@@ -331,6 +331,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "varve-gql"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "varve-types"
 version = "0.1.0"
 dependencies = [
