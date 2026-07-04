@@ -178,3 +178,25 @@ async fn temporal_functions_project_hidden_columns() {
     assert_eq!(vt.value(0), Instant::END_OF_TIME.as_micros());
     assert_eq!(sf.value(0), 1);
 }
+
+#[tokio::test]
+async fn split_matching_equals_one_shot() {
+    use varve_plan::{iids_from_snapshot, matching_iids, matching_snapshot};
+    use varve_types::{TemporalBounds, TemporalDimension};
+
+    let live = setup();
+    let q = query_stmt("MATCH (p:Person) WHERE p.age = 36 RETURN p.name");
+    let bounds = TemporalBounds {
+        valid: TemporalDimension::at(varve_types::Instant::from_micros(100)),
+        system: TemporalDimension::at(varve_types::Instant::from_micros(100)),
+    };
+
+    let snapshot = matching_snapshot(&q.pattern, &live, &bounds).unwrap();
+    let split = iids_from_snapshot(snapshot, &q.where_clause).await.unwrap();
+    let one_shot = matching_iids(&q.pattern, &q.where_clause, &live, &bounds)
+        .await
+        .unwrap();
+
+    assert_eq!(split.len(), 2); // Ada and Cyd are 36
+    assert_eq!(split, one_shot);
+}

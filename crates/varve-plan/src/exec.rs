@@ -116,18 +116,26 @@ pub async fn execute_query(
     Ok(df.collect().await?)
 }
 
-/// Resolves the IIDs of entities visible at `bounds` that match `pattern` +
-/// `where_clause` — the read side of writer-driven DML (MATCH … DELETE,
-/// spec §10). Sorted and deduplicated so mutation application order is
-/// deterministic.
-pub async fn matching_iids(
+/// Sync phase of DML matching (MATCH … DELETE, spec §10): resolve the
+/// pattern's label and take the snapshot under the caller's brief read lock
+/// (mirror of `snapshot_for_query`).
+pub fn matching_snapshot(
     pattern: &NodePattern,
-    where_clause: &Option<Expr>,
     live: &LiveTable,
     bounds: &TemporalBounds,
-) -> Result<Vec<Iid>, PlanError> {
+) -> Result<Option<RecordBatch>, PlanError> {
     let label = pattern.label.as_deref().unwrap_or("");
-    let Some(batch) = live.snapshot_for_label(label, bounds)? else {
+    Ok(live.snapshot_for_label(label, bounds)?)
+}
+
+/// Async phase: WHERE filter + IID extraction over an OWNED snapshot —
+/// callers drop their live-table lock before awaiting this. Sorted and
+/// deduplicated so mutation application order is deterministic.
+pub async fn iids_from_snapshot(
+    snapshot: Option<RecordBatch>,
+    where_clause: &Option<Expr>,
+) -> Result<Vec<Iid>, PlanError> {
+    let Some(batch) = snapshot else {
         return Ok(vec![]);
     };
     let schema = batch.schema();
@@ -163,6 +171,19 @@ pub async fn matching_iids(
     iids.sort();
     iids.dedup();
     Ok(iids)
+}
+
+/// Resolves the IIDs of entities visible at `bounds` that match `pattern` +
+/// `where_clause` — the read side of writer-driven DML (MATCH … DELETE,
+/// spec §10). One-shot composition of `matching_snapshot` + `iids_from_snapshot`
+/// for tests and non-locking callers.
+pub async fn matching_iids(
+    pattern: &NodePattern,
+    where_clause: &Option<Expr>,
+    live: &LiveTable,
+    bounds: &TemporalBounds,
+) -> Result<Vec<Iid>, PlanError> {
+    iids_from_snapshot(matching_snapshot(pattern, live, bounds)?, where_clause).await
 }
 
 /// One-shot convenience for tests and non-locking callers.
