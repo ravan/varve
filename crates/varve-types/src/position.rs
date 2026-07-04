@@ -8,6 +8,8 @@ pub enum TypeError {
     InvalidId(String),
     #[error("invalid timestamp: {0}")]
     InvalidTimestamp(String),
+    #[error("malformed canonical encoding: {0}")]
+    MalformedEncoding(String),
 }
 
 const OFFSET_BITS: u32 = 48;
