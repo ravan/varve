@@ -2969,10 +2969,13 @@ name = "varve-engine"
 version = "0.1.0"
 dependencies = [
  "datafusion",
+ "serde",
  "thiserror",
  "tokio",
+ "varve-config",
  "varve-gql",
  "varve-index",
+ "varve-log",
  "varve-plan",
  "varve-types",
 ]
