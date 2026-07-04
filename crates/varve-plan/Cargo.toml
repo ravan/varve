@@ -7,13 +7,13 @@ license.workspace = true
 [dependencies]
 varve-gql = { path = "../varve-gql" }
 varve-index = { path = "../varve-index" }
+varve-types = { path = "../varve-types" }
 datafusion = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
 arrow = { workspace = true }
-varve-types = { path = "../varve-types" }
 
 [lints]
 workspace = true
