@@ -119,6 +119,45 @@ async fn generated_ids_do_not_collide_across_restarts() {
 }
 
 #[tokio::test]
+async fn replay_recovers_max_tx_id_across_a_burned_id_gap() {
+    // The writer bumps `next_tx_id` and pulls a clock tick BEFORE resolving a
+    // statement (writer.rs::resolve), so a statement that fails to resolve
+    // still burns a tx_id that never reaches the log. Replay must recover
+    // `next_tx_id` as a MAX over the log, not a count of records, or a
+    // reopened DB will reissue an already-used tx_id and collide two
+    // generated ids (`varve:gen:{tx_id}:{ordinal}`) into the same iid.
+    let dir = tempfile::tempdir().unwrap();
+    let burned_tx_first_id;
+    {
+        let db = Db::open(local_config(dir.path())).await.unwrap();
+        // _id: 2.5 is a Float — Value::id_bytes() rejects Float/Null, so this
+        // fails inside resolve_insert AFTER next_tx_id was incremented to 1.
+        // tx_id 1 is burned: it never reaches the log.
+        let bad = db.execute("INSERT (:X {_id: 2.5})").await;
+        assert!(
+            matches!(bad, Err(varve::EngineError::Type(_))),
+            "expected a Type error from the Float _id, got {bad:?}"
+        );
+
+        // The next successful mutation gets tx_id 2 — the log now holds ONE
+        // record whose tx_id is 2, so count(records) = 1 != max(tx_id) = 2.
+        // This gap is exactly what makes the test non-vacuous.
+        burned_tx_first_id = db.execute("INSERT (:G {v: 1})").await.unwrap();
+        assert_eq!(burned_tx_first_id.tx_id, 2);
+    } // drop closes the writer; the one durable record is tx_id 2.
+
+    // Reopen: with correct `max()` recovery, next_tx_id floors at 2, so this
+    // insert gets tx_id 3 and a distinct generated id
+    // (`varve:gen:3:0` vs. the first insert's `varve:gen:2:0`). A regression
+    // to `records.len()` recovery would floor at 1 (one record replayed),
+    // reissue tx_id 2, and re-derive `varve:gen:2:0` — colliding the two
+    // generated-id nodes into a single iid and losing a row.
+    let db = Db::open(local_config(dir.path())).await.unwrap();
+    db.execute("INSERT (:G {v: 2})").await.unwrap();
+    assert_eq!(rows(&db.query("MATCH (g:G) RETURN g.v").await.unwrap()), 2);
+}
+
+#[tokio::test]
 async fn db_local_convenience_and_reopen() {
     let dir = tempfile::tempdir().unwrap();
     {
