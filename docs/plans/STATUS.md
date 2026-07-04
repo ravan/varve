@@ -15,11 +15,14 @@
   `Db::open(Config)` selects the backend by registry name and replays the log into the live index
   on startup. A `kill -9` crash matrix in `varve-testkit` proves the recovery contract.
   Demo: `cargo run --release --example write_bench -p varve`.
-- **Next action:** generate the slice-4 detailed plan (blocks & persisted scan — flush Arrow
-  blocks + hash-trie meta to object storage, persisted `BitemporalScan`, restart from manifest —
-  spec §9) with the writing-plans skill from the roadmap entry + spec, commit it, then execute.
-  Slice 4 depends on slice 3's log (block manifest = commit point; replay-from-watermark trims
-  the log). `BuildContext` factory param may finally be needed there (cache tiers) — see open items.
+- **Next action:** EXECUTE the slice-4 detailed plan `docs/plans/2026-07-05-slice-04-blocks.md`
+  (✅ written + committed 2026-07-05, 14 tasks, SDD/executing-plans) — blocks & persisted scan:
+  `varve-storage` crate (ObjectStore trait over `object_store` 0.13 — datafusion already pins it),
+  spec-§9 key layout, manifest commit point, paged block format, merged live∪persisted scan,
+  `Log::trim`, restart from manifest + log tail, crash-matrix flush points, 1M-event bench.
+  Read the plan's "Design decisions" 1–15 first — notably: valid-axis page pruning is deliberately
+  ABSENT (it would corrupt reported `_valid_to`), and `BuildContext` is still NOT needed (cache
+  wraps the store by engine composition, not in a factory).
 - **Slice 2 (bitemporal core):** ✅ COMPLETE (2026-07-04). Events + XTDB Ceiling/Polygon port +
   temporal GQL. Demo: `cargo run --example time_travel -p varve`.
 - **Slice 1 (walking skeleton):** ✅ COMPLETE (2026-07-04). INSERT → MATCH end-to-end in memory.
@@ -256,7 +259,7 @@
 | 1 walking skeleton | ✅ complete | 1 | `cargo run --example hello -p varve` | INSERT→MATCH e2e in memory; +`varve-gql`(lexer/parser/AST), `varve-index`(LiveTable→Arrow), `varve-plan`(DataFusion), `varve-engine`(Db), `varve` facade; datafusion 54/arrow 58 pinned; 44 workspace tests |
 | 2 bitemporal core | ✅ complete | 1 | `cargo run --example time_travel -p varve` | events + XTDB Ceiling/Polygon port + per-entity resolve; `varve-testkit` reference model + proptest equivalence (10k CI / 200k nightly); temporal GQL (`FOR VALID_TIME`/`SYSTEM_TIME`, `INSERT … VALID`, `MATCH … DELETE`, history fns); `MonotonicClock`; `TxReceipt.system_time`; lock-split query; ~125 workspace tests |
 | 3 durability (log) | ✅ complete | 1 | `cargo run --release --example write_bench -p varve` | `varve-log` crate: `Log` trait + prost envelope + `memory`/`local` backends (CRC32C frames, fsync-before-ack, torn-tail recovery) + writer loop group commit + `Db::open` replay + pluggable `Clock`/`Registries` + `kill -9` crash matrix; bench memory 6226 / local 340 tx/s (M3 Max); 181 workspace tests |
-| 4 blocks & persisted scan | not started | – | – | no detailed plan yet |
+| 4 blocks & persisted scan | plan ready | – | – | detailed plan: 2026-07-05-slice-04-blocks.md (14 tasks) |
 | 5 s3 backends & caches | not started | – | – | no detailed plan yet |
 | 6 edges & traversal | not started | – | – | no detailed plan yet |
 | 7 GQL completion & TCK | not started | – | – | no detailed plan yet |
