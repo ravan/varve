@@ -1,0 +1,13 @@
+[package]
+name = "varve-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+varve-types = { path = "../varve-types" }
+arrow = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
