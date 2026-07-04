@@ -3006,6 +3006,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "varve-config",
  "varve-types",
 ]

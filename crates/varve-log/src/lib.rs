@@ -1,7 +1,9 @@
+pub mod local;
 pub mod log;
 pub mod memory;
 pub mod record;
 
+pub use local::{LocalLog, LocalLogFactory, DEFAULT_SEGMENT_MAX_BYTES};
 pub use log::{Log, LogError};
 pub use memory::{MemoryLog, MemoryLogFactory};
 pub use record::{LogRecord, TableEffects};
@@ -12,6 +14,7 @@ use varve_config::{ComponentFactory, Registry};
 pub fn log_registry() -> Registry<dyn Log> {
     let mut reg = Registry::new("log");
     register_builtin(&mut reg, Box::new(MemoryLogFactory));
+    register_builtin(&mut reg, Box::new(LocalLogFactory));
     reg
 }
 
