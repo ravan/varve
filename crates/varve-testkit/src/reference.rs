@@ -17,7 +17,16 @@ impl ReferenceStore {
         Self::default()
     }
 
+    /// Append an event in arrival (log) order. Callers MUST supply events with
+    /// non-decreasing `system_from` per `iid` — the winner-selection in
+    /// `visible_at` relies on this (it matches `resolve`'s documented precondition).
     pub fn append(&mut self, event: Event) {
+        if let Some(last) = self.events.get(&event.iid).and_then(|v| v.last()) {
+            debug_assert!(
+                event.system_from >= last.system_from,
+                "ReferenceStore::append requires non-decreasing system_from per iid"
+            );
+        }
         self.events.entry(event.iid).or_default().push(event);
     }
 
