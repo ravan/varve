@@ -2,21 +2,39 @@ use serde::de::DeserializeOwned;
 use std::path::Path;
 use thiserror::Error;
 
+/// Failure modes for reading, parsing, or deserializing configuration.
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    /// Reading the config file failed (e.g. [`Config::from_file`] on a path
+    /// that doesn't exist) — wraps the underlying `std::io::Error`.
     #[error("failed to read config file: {0}")]
     Io(#[from] std::io::Error),
+    /// The config text is not valid TOML.
     #[error("failed to parse TOML: {0}")]
     Parse(#[from] toml::de::Error),
+    /// [`ConfigSection::get`] could not deserialize the section's table into
+    /// the requested type (e.g. a required field is missing).
     #[error("failed to deserialize section: {0}")]
     Deserialize(String),
 }
 
+/// Parsed TOML configuration root (spec §4/§11: one `varve.toml` per
+/// process, e.g. `[log]`, `[clock]`, `[storage]` sections), with
+/// `VARVE__`-prefixed environment variables layered on top at parse time.
+/// See `apply_env_overrides` (private) for the exact override rules — in
+/// short, `VARVE__LOG__BACKEND=memory` sets `root.log.backend = "memory"`,
+/// `__` nests further (`VARVE__LOG__LOCAL__DIR` → `log.local.dir`), and each
+/// value coerces to the most specific scalar it parses as: bool, then i64,
+/// then f64, else it stays a string.
 #[derive(Debug, Clone)]
 pub struct Config {
     root: toml::Table,
 }
 
+/// One `[section]` (or nested `[section.child]`) table, handed to a
+/// [`crate::ComponentFactory::build`] so each factory reads only its own
+/// slice of the config — e.g. the `local` log factory calls
+/// `cfg.child("local")` to reach `[log.local]`.
 #[derive(Debug, Clone)]
 pub struct ConfigSection {
     table: toml::Table,
@@ -26,17 +44,23 @@ const ENV_PREFIX: &str = "VARVE__";
 
 impl Config {
     /// Parses `s` as TOML and applies process-environment overrides on top
-    /// (see [`apply_env_overrides`] for the exact rules).
+    /// (see `apply_env_overrides`, private, for the exact rules; summarized
+    /// on [`Config`]).
     pub fn from_toml_str(s: &str) -> Result<Self, ConfigError> {
         let mut root: toml::Table = toml::from_str(s)?;
         apply_env_overrides(&mut root, std::env::vars());
         Ok(Config { root })
     }
 
+    /// Reads `path` and parses it as TOML (spec §11: `Db::open(Config::from_file("varve.toml")?)`).
+    /// A missing or unreadable file surfaces as [`ConfigError::Io`]; malformed
+    /// TOML as [`ConfigError::Parse`].
     pub fn from_file(path: &Path) -> Result<Self, ConfigError> {
         Self::from_toml_str(&std::fs::read_to_string(path)?)
     }
 
+    /// Looks up top-level table `[name]` (e.g. `config.section("log")` for
+    /// `[log]`); `None` if `name` is absent or not a table.
     pub fn section(&self, name: &str) -> Option<ConfigSection> {
         match self.root.get(name) {
             Some(toml::Value::Table(t)) => Some(ConfigSection { table: t.clone() }),
@@ -55,10 +79,14 @@ impl ConfigSection {
         }
     }
 
+    /// The section's `backend` key (a [`crate::Registry`] lookup name, e.g.
+    /// `[log] backend = "local"`); `None` if absent or not a string.
     pub fn backend(&self) -> Option<&str> {
         self.table.get("backend").and_then(|v| v.as_str())
     }
 
+    /// Looks up nested table `[section.name]` (e.g. `log.child("local")` for
+    /// `[log.local]`); `None` if `name` is absent or not a table.
     pub fn child(&self, name: &str) -> Option<ConfigSection> {
         match self.table.get(name) {
             Some(toml::Value::Table(t)) => Some(ConfigSection { table: t.clone() }),
@@ -66,6 +94,10 @@ impl ConfigSection {
         }
     }
 
+    /// Deserializes this section's table into `T` (typically a factory's own
+    /// tuning struct); unset fields fall back to `T`'s
+    /// `#[serde(default = ...)]` values. Failure surfaces as
+    /// [`ConfigError::Deserialize`].
     pub fn get<T: DeserializeOwned>(&self) -> Result<T, ConfigError> {
         T::deserialize(toml::Value::Table(self.table.clone()))
             .map_err(|e| ConfigError::Deserialize(e.to_string()))

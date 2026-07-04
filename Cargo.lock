@@ -2949,7 +2949,9 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "datafusion",
+ "tempfile",
  "tokio",
+ "varve-config",
  "varve-engine",
  "varve-types",
 ]
@@ -2960,6 +2962,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serial_test",
+ "tempfile",
  "thiserror",
  "toml",
 ]

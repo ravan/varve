@@ -1,16 +1,19 @@
 use crate::clock::{Clock, MonotonicClock};
-use crate::writer::{spawn_writer, Submission, WriterConfig, WriterState};
+use crate::registries::Registries;
+use crate::writer::{spawn_writer, Submission, WriterConfig, WriterState, NODES_TABLE};
 use datafusion::arrow::record_batch::RecordBatch;
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
+use varve_config::{Config, ConfigError, ConfigSection, RegistryError};
 use varve_gql::ast::Statement;
 use varve_gql::token::GqlError;
-use varve_index::{IndexError, LiveTable};
-use varve_log::{LogError, MemoryLog};
+use varve_index::{decode_events, IndexError, LiveTable};
+use varve_log::{LocalLog, Log, LogError, MemoryLog, DEFAULT_SEGMENT_MAX_BYTES};
 use varve_plan::PlanError;
-use varve_types::{Instant, TypeError};
+use varve_types::{Instant, LogPosition, TypeError};
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -36,6 +39,32 @@ pub enum EngineError {
     NotAQuery,
     #[error("internal lock poisoned")]
     Poisoned,
+    #[error(transparent)]
+    Registry(#[from] RegistryError),
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error("log record references unknown table '{0}'")]
+    UnknownTable(String),
+}
+
+/// Group-commit tuning read from `[log]` (spec §6): a batch flushes when its
+/// window elapses OR its size reaches `group_commit_max_bytes`, whichever
+/// comes first. Unknown keys in `[log]` (`backend`, the `local` subtable)
+/// are ignored — this struct only pulls out the two tuning knobs it knows.
+#[derive(serde::Deserialize)]
+struct LogTuning {
+    #[serde(default = "default_window_ms")]
+    group_commit_window_ms: u64,
+    #[serde(default = "default_max_bytes")]
+    group_commit_max_bytes: usize,
+}
+
+fn default_window_ms() -> u64 {
+    15
+}
+
+fn default_max_bytes() -> usize {
+    8 * 1024 * 1024
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -53,6 +82,15 @@ pub struct Db {
     live: Arc<RwLock<LiveTable>>,
     clock: Arc<dyn Clock>,
     submit: mpsc::Sender<Submission>,
+}
+
+impl std::fmt::Debug for Db {
+    /// Opaque handle: internals (live index, clock, writer channel) carry no
+    /// useful debug representation, so this only identifies the type — e.g.
+    /// for `Result<Db, _>::unwrap_err()` in tests.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Db").finish_non_exhaustive()
+    }
 }
 
 impl Db {
@@ -94,6 +132,47 @@ impl Db {
         }
     }
 
+    /// Opens a database from configuration using the built-in backends
+    /// (spec §11: `Db::open(Config::from_file("varve.toml")?)`).
+    pub async fn open(config: Config) -> Result<Db, EngineError> {
+        Self::open_with(&config, &Registries::with_builtins()).await
+    }
+
+    /// Like [`Db::open`], but with caller-supplied registries — the spec §4
+    /// extension point: register custom `Log`/`Clock` factories, then open.
+    pub async fn open_with(config: &Config, registries: &Registries) -> Result<Db, EngineError> {
+        let log_section = config.section("log").unwrap_or_else(ConfigSection::empty);
+        let log = registries
+            .log
+            .build(log_section.backend().unwrap_or("memory"), &log_section)?;
+        let clock_section = config.section("clock").unwrap_or_else(ConfigSection::empty);
+        let clock = registries
+            .clock
+            .build(clock_section.backend().unwrap_or("system"), &clock_section)?;
+        let tuning: LogTuning = log_section.get()?;
+        let cfg = WriterConfig {
+            window: Duration::from_millis(tuning.group_commit_window_ms),
+            max_bytes: tuning.group_commit_max_bytes,
+        };
+        let (live, next_tx_id) = replay(log.as_ref(), clock.as_ref()).await?;
+        Ok(Self::assemble(live, log, clock, cfg, next_tx_id))
+    }
+
+    /// Local-filesystem database at `dir` with default tuning (spec §11
+    /// `Db::local(path)` convenience — no config file needed).
+    pub async fn local(dir: impl AsRef<Path>) -> Result<Db, EngineError> {
+        let log: Arc<dyn Log> = Arc::new(LocalLog::open(dir.as_ref(), DEFAULT_SEGMENT_MAX_BYTES)?);
+        let clock: Arc<dyn Clock> = Arc::new(MonotonicClock::new());
+        let (live, next_tx_id) = replay(log.as_ref(), clock.as_ref()).await?;
+        Ok(Self::assemble(
+            live,
+            log,
+            clock,
+            WriterConfig::default(),
+            next_tx_id,
+        ))
+    }
+
     /// Executes a mutation statement (INSERT, MATCH … DELETE): parses here,
     /// resolves and commits inside the writer loop, and returns once the tx
     /// is durable AND visible.
@@ -125,4 +204,33 @@ impl Db {
         };
         Ok(varve_plan::execute_query(&q, snapshot).await?)
     }
+}
+
+/// Spec §6 recovery: fold the whole log into a fresh live index; floor the
+/// clock and tx counter above everything replayed. Blocks + manifest
+/// watermarks (replay-from-position) arrive in slice 4.
+async fn replay(
+    log: &dyn varve_log::Log,
+    clock: &dyn Clock,
+) -> Result<(LiveTable, u64), EngineError> {
+    let mut live = LiveTable::new();
+    let mut next_tx_id = 0u64;
+    let mut max_system: Option<Instant> = None;
+    for (_position, record) in log.tail(LogPosition::ZERO).await? {
+        for effect in &record.effects {
+            if effect.table != NODES_TABLE {
+                return Err(EngineError::UnknownTable(effect.table.clone()));
+            }
+            for event in decode_events(&effect.arrow_ipc)? {
+                live.append(event)?;
+            }
+        }
+        next_tx_id = next_tx_id.max(record.tx_id);
+        let system = Instant::from_micros(record.system_time_us);
+        max_system = Some(max_system.map_or(system, |m| m.max(system)));
+    }
+    if let Some(floor) = max_system {
+        clock.advance_to(floor);
+    }
+    Ok((live, next_tx_id))
 }

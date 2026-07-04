@@ -166,3 +166,17 @@ fn empty_section_has_no_backend_and_deserializes_defaults() {
     assert!(empty.backend().is_none());
     assert_eq!(empty.get::<Tuning>().unwrap(), Tuning { knob: 1 });
 }
+
+#[test]
+fn from_file_reads_and_missing_file_is_io_error() {
+    use varve_config::ConfigError;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("varve.toml");
+    std::fs::write(&path, "[log]\nbackend = \"memory\"\n").unwrap();
+    let cfg = Config::from_file(&path).unwrap();
+    assert_eq!(cfg.section("log").unwrap().backend(), Some("memory"));
+
+    let err = Config::from_file(&dir.path().join("absent.toml")).unwrap_err();
+    assert!(matches!(err, ConfigError::Io(_)));
+}
