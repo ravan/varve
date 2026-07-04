@@ -33,3 +33,14 @@ jobs:
       - run: cargo test -p varve-testkit --release
         env:
           PROPTEST_CASES: "200000"
+
+  crash-matrix:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p varve-testkit --release --test crash_recovery
+        env:
+          VARVE_CRASH_ITERS: "100"

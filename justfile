@@ -10,3 +10,6 @@ check:
 
 test:
     cargo test --workspace
+
+crash:
+    VARVE_CRASH_ITERS=10 cargo test -p varve-testkit --release --test crash_recovery

@@ -8,6 +8,13 @@ license.workspace = true
 proptest = { workspace = true }
 varve-index = { path = "../varve-index" }
 varve-types = { path = "../varve-types" }
+varve = { path = "../varve" }
+varve-log = { path = "../varve-log", features = ["fault-injection"] }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+arrow = { workspace = true }
 
 [lints]
 workspace = true
