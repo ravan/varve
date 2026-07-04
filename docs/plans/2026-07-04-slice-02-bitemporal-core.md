@@ -77,7 +77,7 @@ XTDB porting references (read before Tasks 2–4): `refs/xtdb/core/src/main/kotl
 - Produces `varve_types::TemporalBounds` — `pub valid/system: TemporalDimension`, `fn intersects(&self, valid_from, valid_to, system_from, system_to) -> bool`; `Default` = both `all()`.
 - Modify `TypeError`: add `#[error("invalid timestamp: {0}")] InvalidTimestamp(String)`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/varve-types/src/temporal.rs`:
 ```rust
@@ -182,12 +182,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-types temporal`
 Expected: compile error — `temporal` module not defined.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Root `Cargo.toml` — add to `[workspace.dependencies]`:
 ```toml
@@ -329,19 +329,19 @@ pub use temporal::{Instant, TemporalBounds, TemporalDimension};
 pub use value::{Doc, Value};
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-types`
 Expected: all pass (12 new + 15 existing).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Cargo.toml Cargo.lock crates/varve-types/
 git commit -m "feat: temporal types — Instant, TemporalDimension, TemporalBounds"
 ```
 
-- [ ] **Step 6: Slice-1 remediation (STATUS.md T1) — write the failing test**
+- [x] **Step 6: Slice-1 remediation (STATUS.md T1) — write the failing test**
 
 Append to the tests module in `crates/varve-types/src/value.rs`:
 ```rust
@@ -356,7 +356,7 @@ Append to the tests module in `crates/varve-types/src/value.rs`:
     }
 ```
 
-- [ ] **Step 7: Run, then narrow the rejection arm**
+- [x] **Step 7: Run, then narrow the rejection arm**
 
 Run: `cargo test -p varve-types value` — the new test already passes (tags exist); it pins the property. Then narrow `id_bytes`'s catch-all so a future `Value` variant forces an explicit decision — replace:
 ```rust
@@ -371,7 +371,7 @@ with:
 
 Run: `cargo test -p varve-types` — Expected: all pass (the match is now exhaustive without a wildcard).
 
-- [ ] **Step 8: Commit the remediation**
+- [x] **Step 8: Commit the remediation**
 
 ```bash
 git add crates/varve-types/
@@ -396,7 +396,7 @@ git commit -m "fix: narrow id_bytes rejection arm; pin same-length id collision 
   - Internal fields `valid_times: Vec<Instant>` (descending, sentinel-bounded) and `sys_time_ceilings: Vec<Instant>` (one per interval) stay private; in-module tests inspect them directly.
 - Produces (crate-private) `fn binary_search_desc(xs: &[Instant], needle: Instant) -> Result<usize, usize>` — search in a **descending** slice; `Ok(idx)` on match, `Err(insertion_point)` otherwise. (Replaces Kotlin's `-left - 1` encoding with `Result`.)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/varve-index/src/bitemporal.rs` (test module; the Kotlin known answers translated 1:1 — `Long.MAX_VALUE` → `Instant::END_OF_TIME`, `Long.MIN_VALUE` → `Instant::MIN`):
 ```rust
@@ -489,12 +489,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-index bitemporal`
 Expected: compile error — module not defined.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Prepend to `crates/varve-index/src/bitemporal.rs`:
 ```rust
@@ -637,12 +637,12 @@ pub use bitemporal::Ceiling;
 pub use live::{IndexError, LiveTable};
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-index`
 Expected: 5 new tests pass (plus the 3 existing `live` tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-index/
@@ -667,7 +667,7 @@ git commit -m "feat: port XTDB Ceiling — valid-time staircase of system-time c
   - `fn recency(&self) -> Instant` — youngest instant at which the event still matters; drives current/historical file routing in slices 4/8 (spec §9). Requires `range_count() >= 1`.
   - Internal fields `valid_times: Vec<Instant>` (ascending here) and `sys_time_ceilings: Vec<Instant>` stay private; in-module tests construct instances directly.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to the `tests` module in `crates/varve-index/src/bitemporal.rs` (translated 1:1 from XTDB `PolygonTest.kt`):
 ```rust
@@ -829,12 +829,12 @@ Append to the `tests` module in `crates/varve-index/src/bitemporal.rs` (translat
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-index bitemporal`
 Expected: compile error — `Polygon` not defined.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add to `crates/varve-index/src/bitemporal.rs` (below `Ceiling`):
 ```rust
@@ -922,12 +922,12 @@ Update the re-export line in `crates/varve-index/src/lib.rs`:
 pub use bitemporal::{Ceiling, Polygon};
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-index`
 Expected: all pass (14 new since Task 2 started, plus existing).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-index/
@@ -994,7 +994,7 @@ Semantics (each pinned by a test below):
 5. Rectangles with `system_to <= system_from` are dropped (fully superseded, e.g. same-system-time batches).
 6. Events with `valid_from >= valid_to` are skipped defensively (engine validates upstream).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to the `tests` module in `crates/varve-index/src/bitemporal.rs`:
 ```rust
@@ -1140,12 +1140,12 @@ Append to the `tests` module in `crates/varve-index/src/bitemporal.rs`:
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-index bitemporal`
 Expected: compile error — `event` module / `resolve` not defined.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 `crates/varve-index/src/event.rs`:
 ```rust
@@ -1247,12 +1247,12 @@ pub use event::{Event, Op};
 pub use live::{IndexError, LiveTable};
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-index`
 Expected: all pass (8 new resolution tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-index/
@@ -1303,7 +1303,7 @@ pub fn arb_bounds() -> impl Strategy<Value = TemporalBounds>;
 
 - CI: the equivalence tests read `PROPTEST_CASES` (default **10_000**); a scheduled nightly job runs them with `PROPTEST_CASES=200000 --release`.
 
-- [ ] **Step 1: Write the failing unit tests for the reference model**
+- [x] **Step 1: Write the failing unit tests for the reference model**
 
 `crates/varve-testkit/src/reference.rs` (test module first):
 ```rust
@@ -1404,12 +1404,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-testkit`
 Expected: compile error — crate does not exist yet.
 
-- [ ] **Step 3: Write the crate and minimal implementation**
+- [x] **Step 3: Write the crate and minimal implementation**
 
 `crates/varve-testkit/Cargo.toml`:
 ```toml
@@ -1484,12 +1484,12 @@ impl ReferenceStore {
 
 (`Doc` is used by the test module; keep the import.)
 
-- [ ] **Step 4: Run reference tests to verify they pass**
+- [x] **Step 4: Run reference tests to verify they pass**
 
 Run: `cargo test -p varve-testkit`
 Expected: 5 passed.
 
-- [ ] **Step 5: Write the strategies and the failing equivalence properties**
+- [x] **Step 5: Write the strategies and the failing equivalence properties**
 
 `crates/varve-testkit/src/strategy.rs`:
 ```rust
@@ -1704,12 +1704,12 @@ proptest! {
 }
 ```
 
-- [ ] **Step 6: Run the equivalence properties**
+- [x] **Step 6: Run the equivalence properties**
 
 Run: `cargo test -p varve-testkit`
 Expected: all pass — 5 reference tests + 2 properties × 10_000 cases (expect tens of seconds in debug; if a case fails, proptest prints the minimal counterexample: FIX THE ENGINE, never the oracle, unless the oracle provably contradicts the semantics in Task 4's Interfaces block).
 
-- [ ] **Step 7: Add the nightly CI property job**
+- [x] **Step 7: Add the nightly CI property job**
 
 Modify `.github/workflows/ci.yml` — extend `on:` and add a job (final file):
 ```yaml
@@ -1750,12 +1750,12 @@ jobs:
           PROPTEST_CASES: "200000"
 ```
 
-- [ ] **Step 8: Run the full gate**
+- [x] **Step 8: Run the full gate**
 
 Run: `just check`
 Expected: green (fmt, clippy, all workspace tests including the new crate).
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add crates/varve-testkit/ .github/workflows/ci.yml Cargo.toml Cargo.lock
@@ -1817,7 +1817,7 @@ pub async fn run_query(stmt: &QueryStmt, live: &LiveTable, now: Instant)
 
 - `varve_engine::Db::query` snapshots under the read guard in an inner block, drops it, then awaits `execute_query` — its `#[allow(clippy::await_holding_lock)]` is DELETED. `Db::execute` keeps the slice-1 atomicity fix: build + validate every event BEFORE the first append. Interim system-time source: `system_from = Instant::from_micros(tx_id)`, query `now` = latest tx counter value; replaced by the real `MonotonicClock` in Task 8 (keeps Task 6 reviewable on its own; slice-1 tests stay green throughout).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Replace the test module in `crates/varve-index/src/live.rs`:
 ```rust
@@ -1975,12 +1975,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-index live`
 Expected: compile errors — v0 `append(iid, labels, doc)` signature gone.
 
-- [ ] **Step 3: Rewrite the implementation**
+- [x] **Step 3: Rewrite the implementation**
 
 Replace the implementation part of `crates/varve-index/src/live.rs`:
 ```rust
@@ -2193,12 +2193,12 @@ impl LiveTable {
 
 (API caveat: if the pinned arrow 58.3.0 spells the builder timezone helper differently — e.g. `with_timezone_opt` — adapt the implementation; the schema/type assertions in the tests are the contract.)
 
-- [ ] **Step 4: Run the index tests**
+- [x] **Step 4: Run the index tests**
 
 Run: `cargo test -p varve-index`
 Expected: live tests pass; the workspace does NOT compile yet (`varve-plan`/`varve-engine` still call the v0 API) — fixed in the next steps before this task commits.
 
-- [ ] **Step 5: Adapt varve-plan (failing tests first)**
+- [x] **Step 5: Adapt varve-plan (failing tests first)**
 
 `crates/varve-plan/Cargo.toml` — move `varve-types` from dev-dependencies to `[dependencies]` (keep the dev-deps `tokio`, `arrow`).
 
@@ -2380,7 +2380,7 @@ pub mod exec;
 pub use exec::{execute_query, run_query, snapshot_for_query, PlanError};
 ```
 
-- [ ] **Step 6: Adapt varve-engine (interim counter clock; lock split; atomicity preserved)**
+- [x] **Step 6: Adapt varve-engine (interim counter clock; lock split; atomicity preserved)**
 
 In `crates/varve-engine/src/db.rs`:
 
@@ -2434,12 +2434,12 @@ Replace `query()` entirely — the guard is dropped BEFORE the await, and the `#
     }
 ```
 
-- [ ] **Step 7: Run the full gate**
+- [x] **Step 7: Run the full gate**
 
 Run: `just check`
 Expected: green — index, plan, engine, walking-skeleton, testkit all pass (slice-1 tests prove current-time queries are just "AS OF now").
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/
@@ -2505,7 +2505,7 @@ return_item  := ident '.' ident [AS ident] | (valid_from|valid_to|system_from) '
 Duplicate `FOR VALID_TIME`/`FOR SYSTEM_TIME` in one position is an error; `FROM a TO b` requires `a < b`, `BETWEEN a AND b` requires `a <= b`.
 - Produces in `varve-plan`: `run_query` now derives bounds per axis: per-MATCH clause, else query-level clause, else `at(now)` (defaults: valid AS OF now, system AS OF latest-visible — with a monotonic writer clock `at(now)` is exactly "latest"). `ReturnItem::TemporalFn` projects the hidden temporal columns: `valid_from → _valid_from`, `valid_to → _valid_to`, `system_from → _system_from`; default output names are the function names.
 
-- [ ] **Step 1: Write the failing tokenizer test**
+- [x] **Step 1: Write the failing tokenizer test**
 
 Append to the tests module in `crates/varve-gql/src/token.rs`:
 ```rust
@@ -2527,12 +2527,12 @@ Append to the tests module in `crates/varve-gql/src/token.rs`:
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-gql token`
 Expected: compile error — `Keyword::For` etc. not defined.
 
-- [ ] **Step 3: Add the keywords**
+- [x] **Step 3: Add the keywords**
 
 In `crates/varve-gql/src/token.rs`, extend the `Keyword` enum:
 ```rust
@@ -2569,7 +2569,7 @@ and the `keyword()` match:
 
 Run: `cargo test -p varve-gql token` — Expected: PASS.
 
-- [ ] **Step 4: Write the failing parser tests**
+- [x] **Step 4: Write the failing parser tests**
 
 In `crates/varve-gql/src/parser.rs` tests — first UPDATE the two existing literals for the new `QueryStmt`/`ReturnItem` shapes:
 
@@ -2686,12 +2686,12 @@ Then append the new tests (add `use varve_types::{Instant, TemporalDimension};` 
     }
 ```
 
-- [ ] **Step 5: Run test to verify it fails**
+- [x] **Step 5: Run test to verify it fails**
 
 Run: `cargo test -p varve-gql parser`
 Expected: compile errors (`TemporalClauses` etc. undefined).
 
-- [ ] **Step 6: Implement AST + parser**
+- [x] **Step 6: Implement AST + parser**
 
 `crates/varve-gql/Cargo.toml` — add:
 ```toml
@@ -2902,7 +2902,7 @@ And rewire `statement()` so a query may start with FOR:
 
 Run: `cargo test -p varve-gql` — Expected: all parser + tokenizer tests pass. (`varve-plan`/`varve-engine` don't compile yet — next step.)
 
-- [ ] **Step 7: Write the failing planner tests, then wire the planner**
+- [x] **Step 7: Write the failing planner tests, then wire the planner**
 
 Append to `crates/varve-plan/tests/exec_test.rs` (µs-scale instants exercise the literal path: `1970-01-01T00:00:00.000005Z` is 5 µs):
 ```rust
@@ -3018,12 +3018,12 @@ and in `execute_query`, replace the projection loop with:
     let df = df.select(projection)?;
 ```
 
-- [ ] **Step 8: Run the full gate**
+- [x] **Step 8: Run the full gate**
 
 Run: `just check`
 Expected: green. (`varve-engine` compiles unchanged: it reads `ins.nodes` and constructs no `QueryStmt`/`ReturnItem` literals.)
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add crates/varve-gql/ crates/varve-plan/ Cargo.lock
@@ -3095,7 +3095,7 @@ impl MonotonicClock {
 - `EngineError` gains `#[error("VALID FROM {from} must be earlier than VALID TO {to}")] InvalidValidRange { from: Instant, to: Instant }`.
 - `Db::execute` semantics: one tx = one `clock.next()` `system_from` shared by all its events; every event is built and validated BEFORE the first append (slice-1 atomicity fix preserved). INSERT: `valid_from` defaults to the tx time, `valid_to` to `END_OF_TIME`; the computed pair must satisfy `from < to`. DELETE: run `matching_iids` at `valid: at(tx_time), system: at(tx_time)`, emit one `Op::Delete` event per IID with valid `[tx_time, END_OF_TIME)`; zero matches is a successful empty tx — DELETE keeps a documented `#[allow(clippy::await_holding_lock)]` (writes are log-serialized by design, spec D3; dissolves in slice 3's writer loop). `Db::query` passes `clock.watermark()` as `now` and stays lock-split (Task 6).
 
-- [ ] **Step 1: Write the failing parser tests**
+- [x] **Step 1: Write the failing parser tests**
 
 Update the existing `parses_insert_node` expected literal: `InsertStmt { nodes: vec![…], valid_from: None, valid_to: None }`. Then append to `crates/varve-gql/src/parser.rs` tests:
 ```rust
@@ -3154,12 +3154,12 @@ Update the existing `parses_insert_node` expected literal: `InsertStmt { nodes: 
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-gql parser`
 Expected: compile errors (`DeleteStmt` undefined, `InsertStmt` field mismatch).
 
-- [ ] **Step 3: Implement AST + parser changes**
+- [x] **Step 3: Implement AST + parser changes**
 
 `crates/varve-gql/src/ast.rs`: apply the `InsertStmt`/`DeleteStmt`/`Statement` shapes from the Interfaces block.
 
@@ -3283,7 +3283,7 @@ Delete the now-unused `query_stmt` — `match_tail` fully replaces it.
 
 Run: `cargo test -p varve-gql` — Expected: PASS.
 
-- [ ] **Step 4: Write the failing engine tests**
+- [x] **Step 4: Write the failing engine tests**
 
 `crates/varve-engine/Cargo.toml` — add:
 ```toml
@@ -3370,12 +3370,12 @@ async fn delete_with_no_matches_is_an_empty_tx() {
 }
 ```
 
-- [ ] **Step 5: Run test to verify it fails**
+- [x] **Step 5: Run test to verify it fails**
 
 Run: `cargo test -p varve-engine`
 Expected: compile errors — `TxReceipt` has no `system_time`, engine has no `Statement::Delete` arm, `varve_engine::RecordBatch` not exported.
 
-- [ ] **Step 6: Implement clock + engine**
+- [x] **Step 6: Implement clock + engine**
 
 `crates/varve-engine/src/clock.rs`:
 ```rust
@@ -3681,17 +3681,17 @@ and the `PlanError` variant:
 
 Update `crates/varve/src/lib.rs` (the facade re-exports the engine's `RecordBatch` unchanged — no edit needed; verify `pub use varve_engine::{Db, EngineError, TxReceipt};` still compiles).
 
-- [ ] **Step 7: Run the engine tests**
+- [x] **Step 7: Run the engine tests**
 
 Run: `cargo test -p varve-engine`
 Expected: 5 mutation tests + 2 clock tests pass.
 
-- [ ] **Step 8: Run the full gate**
+- [x] **Step 8: Run the full gate**
 
 Run: `just check`
 Expected: green — including slice-1 walking-skeleton tests (`tx_ids_are_monotonic` etc.) and the property suite.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add crates/
@@ -3720,7 +3720,7 @@ pub use varve_types::{Instant, TemporalBounds, TemporalDimension};
 
 - The four canonical bitemporal scenarios (roadmap slice-2 exit criteria): (1) as-of past valid time; (2) retroactive correction invisible at the old system time; (3) retroactive correction visible at the new system time; (4) delete, then as-of-before-the-delete.
 
-- [ ] **Step 1: Write the failing acceptance tests**
+- [x] **Step 1: Write the failing acceptance tests**
 
 `crates/varve/tests/temporal.rs`:
 ```rust
@@ -3886,12 +3886,12 @@ async fn for_valid_time_all_returns_every_version() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve --test temporal`
 Expected: compile error — `varve::Instant` not exported.
 
-- [ ] **Step 3: Facade re-exports + example**
+- [x] **Step 3: Facade re-exports + example**
 
 `crates/varve/Cargo.toml` — add `varve-types = { path = "../varve-types" }` to `[dependencies]`.
 
@@ -3935,17 +3935,17 @@ fn show(batches: &[varve::RecordBatch]) -> Result<(), Box<dyn std::error::Error>
 }
 ```
 
-- [ ] **Step 4: Run tests and the demo**
+- [x] **Step 4: Run tests and the demo**
 
 Run: `cargo test -p varve && cargo run --example time_travel -p varve`
 Expected: 9 tests pass (3 walking-skeleton + 6 temporal); the demo prints price 12 "now" and price 10 at the old system time.
 
-- [ ] **Step 5: Run the full gate**
+- [x] **Step 5: Run the full gate**
 
 Run: `just check`
 Expected: green.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/varve/
@@ -3956,16 +3956,16 @@ git commit -m "test: end-to-end bitemporal scenarios and time-travel example"
 
 ## Slice exit checklist
 
-- [ ] `just check` green: fmt, clippy `-D warnings`, all workspace tests (including 2 × 10k property cases).
-- [ ] Roadmap slice-2 exit criteria verified: property tests green; the four canonical bitemporal scenarios pass end-to-end through GQL (`crates/varve/tests/temporal.rs`); slice-1 tests still green untouched (`crates/varve/tests/walking_skeleton.rs` including `multi_node_insert_is_atomic_on_invalid_id`, `examples/hello.rs`).
-- [ ] Slice-1 deferred remediations from STATUS.md verified done: `Db::query` carries NO `await_holding_lock` allow (lock-split via `snapshot_for_query`/`execute_query`); LiveTable all-null/empty-doc test and both `UnknownColumn` tests exist; `id_bytes` rejection arm narrowed + same-length collision test. Update the STATUS.md "DEFERRED slice-1 remediations" open item to RESOLVED (note: `SnapshotSource` trait seam deliberately deferred to slice 4; DELETE's documented write-lock allow dissolves in slice 3's writer loop).
-- [ ] Update `docs/plans/STATUS.md`:
+- [x] `just check` green: fmt, clippy `-D warnings`, all workspace tests (including 2 × 10k property cases).
+- [x] Roadmap slice-2 exit criteria verified: property tests green; the four canonical bitemporal scenarios pass end-to-end through GQL (`crates/varve/tests/temporal.rs`); slice-1 tests still green untouched (`crates/varve/tests/walking_skeleton.rs` including `multi_node_insert_is_atomic_on_invalid_id`, `examples/hello.rs`).
+- [x] Slice-1 deferred remediations from STATUS.md verified done: `Db::query` carries NO `await_holding_lock` allow (lock-split via `snapshot_for_query`/`execute_query`); LiveTable all-null/empty-doc test and both `UnknownColumn` tests exist; `id_bytes` rejection arm narrowed + same-length collision test. Update the STATUS.md "DEFERRED slice-1 remediations" open item to RESOLVED (note: `SnapshotSource` trait seam deliberately deferred to slice 4; DELETE's documented write-lock allow dissolves in slice 3's writer loop).
+- [x] Update `docs/plans/STATUS.md`:
   - Current position: slice 2 ✅ complete; next action = plan slice 3 (durability) via writing-plans.
   - Slice log row: `2 bitemporal core | ✅ complete | <sessions> | cargo run --example time_travel -p varve | events + Ceiling/Polygon + reference-model proptest + temporal GQL`.
   - Decisions to record: `TxReceipt.system_time` pulled forward from slice 3 (e2e system-time tests need it); DELETE rejects temporal clauses (reads current state; retroactive deletes deferred); GQL `ERASE` statement deferred to slice 7 (event-level `Op::Erase` fully implemented + property-tested); 13 new reserved keywords can no longer be property names until slice 7's full grammar; interim Task-6 counter clock replaced by `MonotonicClock` in Task 8 (note only if tasks were split across sessions).
   - Environment facts: `proptest` pinned (record the resolved version); nightly CI property job added (`PROPTEST_CASES=200000`).
-- [ ] Tick the slice-2 checkboxes in `docs/plans/varve-v1-roadmap.md` (with parenthetical notes for the deviations above) and tick all checkboxes in this plan.
-- [ ] Commit:
+- [x] Tick the slice-2 checkboxes in `docs/plans/varve-v1-roadmap.md` (with parenthetical notes for the deviations above) and tick all checkboxes in this plan.
+- [x] Commit:
 
 ```bash
 git add docs/plans/

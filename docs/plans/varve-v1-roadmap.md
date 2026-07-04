@@ -112,23 +112,23 @@ RETURN p.name` returns 1 row through the full pipeline; `cargo run --example hel
 **Detailed plan:** `docs/plans/2026-07-04-slice-02-bitemporal-core.md` ✅ written
 **Sessions:** 2–3. **Depends:** slice 1.
 
-- [ ] `varve-types`: temporal types — `Instant` (µs UTC), `END_OF_TIME`, `TemporalBounds`
+- [x] `varve-types`: temporal types — `Instant` (µs UTC), `END_OF_TIME`, `TemporalBounds`
       / `TemporalDimension` (at/in/between/all).
-- [ ] Event model in `varve-index`: `Event { iid, system_from, valid_from, valid_to,
+- [x] Event model in `varve-index`: `Event { iid, system_from, valid_from, valid_to,
       op: Put(doc) | Delete | Erase }`; live table stores events sorted (iid, system_from desc).
-- [ ] Port XTDB `Ceiling` then `Polygon` (reference: `refs/xtdb/core/src/main/kotlin/xtdb/
+- [x] Port XTDB `Ceiling` then `Polygon` (reference: `refs/xtdb/core/src/main/kotlin/xtdb/
       bitemporal/`, spec'd by `refs/xtdb/dev/doc/db.allium`): unit tests from hand-drawn
       rectangle cases, including same-system-time batches and retroactive corrections.
-- [ ] **Reference model** in `varve-testkit`: naive `BTreeMap`-based bitemporal store with
+- [x] **Reference model** in `varve-testkit`: naive `BTreeMap`-based bitemporal store with
       the same query API; proptest strategy generating random op histories; equivalence
       property `resolve(events, bounds) == reference(events, bounds)` (10k cases in CI,
       more nightly).
-- [ ] Wire into scan: resolution during snapshot read; `TemporalBounds` filter parameter.
-- [ ] GQL surface: parse + plan `FOR VALID_TIME AS OF …` / `FOR SYSTEM_TIME AS OF …`
+- [x] Wire into scan: resolution during snapshot read; `TemporalBounds` filter parameter.
+- [x] GQL surface: parse + plan `FOR VALID_TIME AS OF …` / `FOR SYSTEM_TIME AS OF …`
       (query-level and per-MATCH), `INSERT … VALID FROM/TO`, `DELETE`; defaults
       (valid AS OF now, system AS OF latest); `valid_from(x)`/`valid_to(x)`/`system_from(x)`
       functions on bound elements.
-- [ ] End-to-end temporal tests: as-of past, retroactive correction visible in old/new
+- [x] End-to-end temporal tests: as-of past, retroactive correction visible in old/new
       system time, delete then as-of-before-delete.
 
 **Exit criteria:** property tests green; the four canonical bitemporal scenarios from the

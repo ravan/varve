@@ -5,14 +5,19 @@
 
 ## Current position
 
-- **Current slice:** 1 (walking skeleton) — ✅ COMPLETE (2026-07-04, 1 session).
-  INSERT → MATCH end-to-end in memory: tokenizer → parser → AST → LiveTable (Arrow) →
-  DataFusion → Arrow RecordBatches. Demo: `cargo run --example hello -p varve`.
-- **Next action:** execute `docs/plans/2026-07-04-slice-02-bitemporal-core.md` from Task 1
-  (bitemporal core: temporal types, event model, XTDB Ceiling/Polygon port, varve-testkit
-  reference model + proptest equivalence, temporal GQL). The deferred slice-1 remediations
-  below are folded into that plan (Tasks 1 and 6) — no separate pass needed.
-- **Detailed plans ready:** slice 0 ✅ (done) · slice 1 ✅ (done) · slice 2 ✅ ·
+- **Current slice:** 2 (bitemporal core) — ✅ COMPLETE (2026-07-04, 1 session, SDD).
+  Every mutation is now an immutable bitemporal event; queries resolve visibility through
+  ported XTDB Ceiling/Polygon and answer `FOR VALID_TIME`/`FOR SYSTEM_TIME` time-travel,
+  retroactive corrections, and `DELETE` end-to-end through GQL. A naive `varve-testkit`
+  reference model proves the engine correct on 10k randomized histories/CI (200k nightly).
+  Demo: `cargo run --example time_travel -p varve`.
+- **Next action:** generate the slice-3 detailed plan (durability: pluggable log, group commit,
+  crash safety — spec §6) with the writing-plans skill from the roadmap entry + spec, commit
+  it, then execute. Slice 3 is where the writer loop log-serializes writes (dissolves the
+  documented single-writer clock assumption and DELETE's `await_holding_lock` — see decisions).
+- **Slice 1 (walking skeleton):** ✅ COMPLETE (2026-07-04). INSERT → MATCH end-to-end in memory.
+  Demo: `cargo run --example hello -p varve` (still green under slice 2's "AS OF now").
+- **Detailed plans ready:** slice 0 ✅ (done) · slice 1 ✅ (done) · slice 2 ✅ (done) ·
   slices 3–11 generated just-in-time from the roadmap (writing-plans skill) at each
   slice's start.
 
@@ -44,6 +49,37 @@
 
 ## Decisions made during implementation
 
+- **2026-07-04 (slice 2) deps pinned:** `chrono = "0.4"` resolved 0.4.45 (already in-tree
+  transitively; workspace pin unified it), `proptest = "1"` resolved 1.11.0. Both in root
+  `[workspace.dependencies]`; existing `datafusion 54.0.0 / arrow 58.3.0` pins carried forward.
+- **2026-07-04 (slice 2) `TxReceipt.system_time` pulled forward from slice 3:** temporal e2e
+  tests need a handle on assigned tx times, so `TxReceipt` is `{ tx_id, system_time: Instant }`
+  now rather than at durability. Additive — slice-1 code reads only `.tx_id`.
+- **2026-07-04 (slice 2) DELETE reads current state, rejects temporal clauses:** `MATCH … DELETE`
+  resolves matches at (valid=now, system=now) and appends `Op::Delete` events over sorted+deduped
+  IIDs; a `FOR` clause on a DELETE is a parse error. Retroactive/as-of deletes deferred (post-v1).
+- **2026-07-04 (slice 2) GQL `ERASE` statement deferred to slice 7:** the event-level `Op::Erase`
+  is fully implemented and property-tested (erase hides history at EVERY system time — a
+  deliberate, tested GDPR choice, not a time-travel bug); only the surface `ERASE` statement and
+  end-to-end GDPR object-scan verification (slice 11) are deferred.
+- **2026-07-04 (slice 2) 13 new reserved words:** `FOR, FROM, TO, ALL, AND, VALID, DELETE,
+  BETWEEN, TIMESTAMP, DATE, VALID_TIME, SYSTEM_TIME, OF` can no longer be property names —
+  accepted until slice 7's full literal/identifier grammar.
+- **2026-07-04 (slice 2) `MonotonicClock` is crate-internal:** strictly-increasing wall-clock µs
+  (AtomicI64 compare_exchange); the pluggable `Clock` registry interface (spec §4) arrives with
+  durability config wiring. v0 is SINGLE-WRITER: `clock.next()` is taken before the `live.write()`
+  lock, so concurrent `execute()` is unsupported (a lock-race loser hits `OutOfOrderEvent`); full
+  write-serialization arrives in slice 3's writer loop (spec D3). Documented in `db.rs`.
+- **2026-07-04 (slice 2) CI nightly property job:** `.github/workflows/ci.yml` gained a
+  `schedule`-gated `property-nightly` job running `varve-testkit --release` with
+  `PROPTEST_CASES=200000` (10k in the normal `check` job). `check` gated `!= 'schedule'`.
+- **2026-07-04 (slice 2, whole-branch review) `Statement::Query` boxed** (`bf8e85a`): with the
+  final enum shape known (Query ~250B vs Insert ~56B / Delete ~152B), boxing the one oversized
+  variant drops the max below clippy's `large_enum_variant` threshold, so the `#[allow]` (added
+  in Task 7) was removed rather than kept — cleaner and avoids copying a 250B enum per parse.
+- **2026-07-04 (slice 2) `ReferenceStore::append` hardened** (`64f0651`): a `debug_assert!`
+  enforces the non-decreasing-per-iid `system_from` invariant the oracle's winner-by-arrival
+  logic relies on (remediates a whole-branch-review finding; keeps the oracle self-defending).
 - **2026-07-04 (slice 0) clippy.toml:** repo-root `clippy.toml` sets `allow-unwrap-in-tests`
   / `allow-expect-in-tests = true`. Workspace lints deny `unwrap_used`/`expect_used` globally;
   this realizes the Global Constraint's "allowed in tests" so `clippy --all-targets -D warnings`
@@ -98,16 +134,17 @@
 - **~~SPEC INCONSISTENCY~~ — RESOLVED** 2026-07-04 (`3e0f539`): §5.2 aligned to §5.3.
 - **~~ENV-OVERRIDE DESIGN (slice 3)~~ — RESOLVED** 2026-07-04 (`1b517e8`): nesting + scalar
   coercion implemented and tested; no longer a slice-3 decision.
-- **DEFERRED slice-1 remediations — SCHEDULED** in the slice-2 plan (2026-07-04): lock split
-  + deferred tests in Task 6, `id_bytes` narrowing in Task 1; the `SnapshotSource` trait seam
-  deliberately waits for slice 4 (first second scan source). Mark RESOLVED at slice-2 exit.
-  - **`await_holding_lock` in `Db::query`** (`varve-engine/src/db.rs`): when slice 2 adds the
-    temporal scan, snapshot under the lock → drop the guard → run DataFusion on the owned batch.
-    The reviewer's seam: introduce a `SnapshotSource`/scan trait at `Db.live: Arc<RwLock<LiveTable>>`
-    and `run_query(stmt, &LiveTable)` — the only two spots the engine touches a concrete backend
-    (satisfies the "no concrete backend in engine code" Global Constraint with minimal churn).
-  - Add tests deferred from slice 1: LiveTable all-null-property-column + empty-Doc row; the two
-    `PlanError::UnknownColumn` paths (WHERE + RETURN on a property absent from all matched rows).
+- **~~DEFERRED slice-1 remediations~~ — RESOLVED** 2026-07-04 (slice 2):
+  - `await_holding_lock` on `Db::query` DELETED — query path lock-split into sync
+    `snapshot_for_query` + async `execute_query` over an owned batch (Task 6, `ebdf4b6`).
+  - Deferred tests added: LiveTable all-null-property-column + empty-Doc row, and BOTH
+    `PlanError::UnknownColumn` paths (WHERE + RETURN) — Task 6.
+  - `id_bytes` catch-all narrowed + same-length collision test pinned (Task 1, `5e31452`).
+  - Multi-node INSERT atomicity preserved through the Task-6/8 event-buffer rewrite
+    (`multi_node_insert_is_atomic_on_invalid_id` still green).
+  - STILL DEFERRED (intentional): the `SnapshotSource` trait seam waits for slice 4 (YAGNI
+    before a second scan source); DELETE's documented `#[allow(await_holding_lock)]` on
+    `execute_delete` dissolves in slice 3's log-serialized writer loop (spec D3).
 - **`_labels` roadmap divergence (user's call):** either add `_labels` to the LiveTable snapshot
   when slice 6/7 needs it, OR reconcile the roadmap slice-1 text to match the detailed plan
   (`_iid` + property columns). Not blocking; flagged so it isn't silently lost.
@@ -130,7 +167,7 @@
 |---|---|---|---|---|
 | 0 foundation | ✅ complete | 1 | `just check` / `cargo test --workspace` (22 tests) | workspace + `varve-types` (Iid, LogPosition) + `varve-config` (Config, Registry, nested/coerced env overrides) + CI |
 | 1 walking skeleton | ✅ complete | 1 | `cargo run --example hello -p varve` | INSERT→MATCH e2e in memory; +`varve-gql`(lexer/parser/AST), `varve-index`(LiveTable→Arrow), `varve-plan`(DataFusion), `varve-engine`(Db), `varve` facade; datafusion 54/arrow 58 pinned; 44 workspace tests |
-| 2 bitemporal core | not started | – | – | detailed plan ready (`2026-07-04-slice-02-bitemporal-core.md`, 9 tasks; slice-1 remediations folded into Tasks 1/6) |
+| 2 bitemporal core | ✅ complete | 1 | `cargo run --example time_travel -p varve` | events + XTDB Ceiling/Polygon port + per-entity resolve; `varve-testkit` reference model + proptest equivalence (10k CI / 200k nightly); temporal GQL (`FOR VALID_TIME`/`SYSTEM_TIME`, `INSERT … VALID`, `MATCH … DELETE`, history fns); `MonotonicClock`; `TxReceipt.system_time`; lock-split query; ~125 workspace tests |
 | 3 durability (log) | not started | – | – | no detailed plan yet; env-override decision due here |
 | 4 blocks & persisted scan | not started | – | – | no detailed plan yet |
 | 5 s3 backends & caches | not started | – | – | no detailed plan yet |
