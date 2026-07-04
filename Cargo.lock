@@ -2897,6 +2897,7 @@ dependencies = [
 name = "varve-types"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "thiserror",
  "xxhash-rust",
 ]

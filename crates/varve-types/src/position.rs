@@ -6,6 +6,8 @@ pub enum TypeError {
     OffsetOverflow(u64),
     #[error("value cannot be used as an id: {0}")]
     InvalidId(String),
+    #[error("invalid timestamp: {0}")]
+    InvalidTimestamp(String),
 }
 
 const OFFSET_BITS: u32 = 48;

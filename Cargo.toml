@@ -17,6 +17,8 @@ datafusion = "54"
 arrow = "58"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+proptest = "1"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
