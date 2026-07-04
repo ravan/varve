@@ -1,0 +1,19 @@
+[package]
+name = "varve-plan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+varve-gql = { path = "../varve-gql" }
+varve-index = { path = "../varve-index" }
+datafusion = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+arrow = { workspace = true }
+varve-types = { path = "../varve-types" }
+
+[lints]
+workspace = true
