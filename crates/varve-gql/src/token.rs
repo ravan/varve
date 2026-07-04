@@ -18,6 +18,19 @@ pub enum Keyword {
     True,
     False,
     Null,
+    For,
+    ValidTime,
+    SystemTime,
+    Of,
+    All,
+    From,
+    To,
+    Between,
+    And,
+    Valid,
+    Delete,
+    Timestamp,
+    Date,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +68,19 @@ fn keyword(word: &str) -> Option<Keyword> {
         "TRUE" => Some(Keyword::True),
         "FALSE" => Some(Keyword::False),
         "NULL" => Some(Keyword::Null),
+        "FOR" => Some(Keyword::For),
+        "VALID_TIME" => Some(Keyword::ValidTime),
+        "SYSTEM_TIME" => Some(Keyword::SystemTime),
+        "OF" => Some(Keyword::Of),
+        "ALL" => Some(Keyword::All),
+        "FROM" => Some(Keyword::From),
+        "TO" => Some(Keyword::To),
+        "BETWEEN" => Some(Keyword::Between),
+        "AND" => Some(Keyword::And),
+        "VALID" => Some(Keyword::Valid),
+        "DELETE" => Some(Keyword::Delete),
+        "TIMESTAMP" => Some(Keyword::Timestamp),
+        "DATE" => Some(Keyword::Date),
         _ => None,
     }
 }
@@ -250,5 +276,40 @@ mod tests {
     fn error_carries_offset() {
         let err = tokenize("MATCH ^").unwrap_err();
         assert!(err.to_string().contains("offset 6"), "{err}");
+    }
+
+    #[test]
+    fn temporal_keywords_tokenize() {
+        use Keyword::*;
+        use TokenKind::*;
+        assert_eq!(
+            kinds("FOR VALID_TIME AS OF TIMESTAMP '2024-01-01T00:00:00Z'"),
+            vec![
+                Kw(For),
+                Kw(ValidTime),
+                Kw(As),
+                Kw(Of),
+                Kw(Timestamp),
+                Str("2024-01-01T00:00:00Z".into()),
+                Eof
+            ]
+        );
+        assert_eq!(
+            kinds("for system_time from date '2020-01-01' to all between and valid delete"),
+            vec![
+                Kw(For),
+                Kw(SystemTime),
+                Kw(From),
+                Kw(Date),
+                Str("2020-01-01".into()),
+                Kw(To),
+                Kw(All),
+                Kw(Between),
+                Kw(And),
+                Kw(Valid),
+                Kw(Delete),
+                Eof
+            ]
+        );
     }
 }

@@ -1,5 +1,5 @@
 #![allow(clippy::unwrap_used)] // tests may use unwrap; crate-level allow covers helper fns
-use arrow::array::{Array, StringArray};
+use arrow::array::{Array, StringArray, TimestampMicrosecondArray};
 use varve_gql::ast::Statement;
 use varve_index::{Event, LiveTable, Op};
 use varve_plan::run_query;
@@ -109,4 +109,72 @@ async fn where_and_return_on_absent_property_are_unknown_column() {
         run_query(&q, &live, NOW).await,
         Err(PlanError::UnknownColumn(c)) if c == "ghost"
     ));
+}
+
+#[tokio::test]
+async fn for_system_time_as_of_travels_back() {
+    let mut live = setup();
+    let mut doc = Doc::new();
+    doc.insert("name".into(), Value::Str("Adele".into()));
+    doc.insert("age".into(), Value::Int(36));
+    live.append(Event {
+        iid: Iid::derive("g", "nodes", &[1u8]),
+        system_from: Instant::from_micros(10),
+        valid_from: Instant::from_micros(10),
+        valid_to: Instant::END_OF_TIME,
+        op: Op::Put {
+            labels: vec!["Person".into()],
+            doc,
+        },
+    })
+    .unwrap();
+
+    // Snapshot system time 5µs: rename at 10µs hasn't happened.
+    let q = query_stmt(
+        "FOR SYSTEM_TIME AS OF TIMESTAMP '1970-01-01T00:00:00.000005Z' \
+         MATCH (p:Person) WHERE p.age = 36 RETURN p.name AS name",
+    );
+    let batches = run_query(&q, &live, NOW).await.unwrap();
+    assert_eq!(names(&batches), vec!["Ada", "Cyd"]);
+
+    // Per-MATCH placement behaves identically.
+    let q = query_stmt(
+        "MATCH (p:Person) FOR SYSTEM_TIME AS OF TIMESTAMP '1970-01-01T00:00:00.000005Z' \
+         WHERE p.age = 36 RETURN p.name AS name",
+    );
+    let batches = run_query(&q, &live, NOW).await.unwrap();
+    assert_eq!(names(&batches), vec!["Ada", "Cyd"]);
+}
+
+#[tokio::test]
+async fn temporal_functions_project_hidden_columns() {
+    let live = setup();
+    let q = query_stmt(
+        "MATCH (p:Person) WHERE p.name = 'Ada' \
+         RETURN p.name AS name, valid_from(p) AS vf, valid_to(p), system_from(p)",
+    );
+    let batches = run_query(&q, &live, NOW).await.unwrap();
+    let batch = &batches[0];
+
+    let vf: &TimestampMicrosecondArray = batch
+        .column_by_name("vf")
+        .unwrap()
+        .as_any()
+        .downcast_ref()
+        .unwrap();
+    let vt: &TimestampMicrosecondArray = batch
+        .column_by_name("valid_to")
+        .unwrap()
+        .as_any()
+        .downcast_ref()
+        .unwrap();
+    let sf: &TimestampMicrosecondArray = batch
+        .column_by_name("system_from")
+        .unwrap()
+        .as_any()
+        .downcast_ref()
+        .unwrap();
+    assert_eq!(vf.value(0), 1);
+    assert_eq!(vt.value(0), Instant::END_OF_TIME.as_micros());
+    assert_eq!(sf.value(0), 1);
 }

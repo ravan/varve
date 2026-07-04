@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
+varve-types = { path = "../varve-types" }
 
 [lints]
 workspace = true
