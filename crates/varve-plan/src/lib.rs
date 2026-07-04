@@ -1,3 +1,3 @@
 pub mod exec;
 
-pub use exec::{run_query, PlanError};
+pub use exec::{execute_query, run_query, snapshot_for_query, PlanError};

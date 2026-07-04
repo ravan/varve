@@ -4,9 +4,9 @@ use std::sync::{Arc, RwLock};
 use thiserror::Error;
 use varve_gql::ast::{Literal, Statement};
 use varve_gql::token::GqlError;
-use varve_index::{IndexError, LiveTable};
+use varve_index::{Event, IndexError, LiveTable, Op};
 use varve_plan::PlanError;
-use varve_types::{Doc, Iid, TypeError, Value};
+use varve_types::{Doc, Iid, Instant, TypeError, Value};
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -64,6 +64,9 @@ impl Db {
             return Err(EngineError::NotAMutation);
         };
         let tx_id = self.tx_counter.fetch_add(1, Ordering::SeqCst) + 1;
+        // Interim system time = tx counter as µs; the real monotonic wall
+        // clock lands with temporal mutations (Task 8 of the slice-2 plan).
+        let system = Instant::from_micros(i64::try_from(tx_id).unwrap_or(i64::MAX));
         // v0: build and validate every node's (iid, labels, doc) triple up front —
         // including the fallible `id_bytes()?` — before touching the live table, so a
         // later node's invalid id can't leave earlier nodes from this statement
@@ -86,26 +89,38 @@ impl Db {
                 }
             };
             let iid = Iid::derive("default", "nodes", &id.id_bytes()?);
-            rows.push((iid, node.labels.clone(), doc));
+            rows.push(Event {
+                iid,
+                system_from: system,
+                valid_from: system,
+                valid_to: Instant::END_OF_TIME,
+                op: Op::Put {
+                    labels: node.labels.clone(),
+                    doc,
+                },
+            });
         }
         let mut live = self.live.write().map_err(|_| EngineError::Poisoned)?;
-        for (iid, labels, doc) in rows {
-            live.append(iid, labels, doc)?;
+        for event in rows {
+            live.append(event)?;
         }
         Ok(TxReceipt { tx_id })
     }
 
     /// Execute a read query, returning Arrow batches.
-    // v0: clone-free read under lock; snapshotting becomes cheap-Arc in slice 2. The
-    // `RwLockReadGuard` is held across `run_query`'s internal `.await` (DataFusion's
-    // `collect()`) — acceptable for v0's single-writer walking skeleton, with no
-    // concurrent-access contention model yet.
-    #[allow(clippy::await_holding_lock)]
     pub async fn query(&self, gql: &str) -> Result<Vec<RecordBatch>, EngineError> {
         let Statement::Query(q) = varve_gql::parse(gql)? else {
             return Err(EngineError::NotAQuery);
         };
-        let live = self.live.read().map_err(|_| EngineError::Poisoned)?;
-        Ok(varve_plan::run_query(&q, &live).await?)
+        let now = Instant::from_micros(
+            i64::try_from(self.tx_counter.load(Ordering::SeqCst)).unwrap_or(i64::MAX),
+        );
+        // Snapshot under the read lock, drop the guard, then run DataFusion
+        // on the owned batch — no await while holding the lock.
+        let snapshot = {
+            let live = self.live.read().map_err(|_| EngineError::Poisoned)?;
+            varve_plan::snapshot_for_query(&q, &live, now)?
+        };
+        Ok(varve_plan::execute_query(&q, snapshot).await?)
     }
 }

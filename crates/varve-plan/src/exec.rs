@@ -5,6 +5,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use varve_gql::ast::{Expr, Literal, QueryStmt};
 use varve_index::LiveTable;
+use varve_types::{Instant, TemporalBounds, TemporalDimension};
 
 #[derive(Debug, Error)]
 pub enum PlanError {
@@ -26,10 +27,30 @@ fn to_df_literal(l: &Literal) -> datafusion::prelude::Expr {
     }
 }
 
-pub async fn run_query(stmt: &QueryStmt, live: &LiveTable) -> Result<Vec<RecordBatch>, PlanError> {
-    // v0 scan: label pruning happens in the snapshot (spec §10 — labels prune scans).
+/// Sync phase: resolve + snapshot under the caller's lock. Bounds are the
+/// spec §7 defaults — valid AS OF now, system AS OF now (the writer clock is
+/// monotonic, so at(now) sees exactly the current versions). Task 7 derives
+/// bounds from the statement's FOR clauses.
+pub fn snapshot_for_query(
+    stmt: &QueryStmt,
+    live: &LiveTable,
+    now: Instant,
+) -> Result<Option<RecordBatch>, PlanError> {
+    let bounds = TemporalBounds {
+        valid: TemporalDimension::at(now),
+        system: TemporalDimension::at(now),
+    };
     let label = stmt.pattern.label.as_deref().unwrap_or("");
-    let Some(batch) = live.snapshot_for_label(label)? else {
+    Ok(live.snapshot_for_label(label, &bounds)?)
+}
+
+/// Async phase: DataFusion filter/projection over an OWNED snapshot — callers
+/// drop their live-table lock before awaiting this.
+pub async fn execute_query(
+    stmt: &QueryStmt,
+    snapshot: Option<RecordBatch>,
+) -> Result<Vec<RecordBatch>, PlanError> {
+    let Some(batch) = snapshot else {
         return Ok(vec![]);
     };
     let schema = batch.schema();
@@ -54,7 +75,16 @@ pub async fn run_query(stmt: &QueryStmt, live: &LiveTable) -> Result<Vec<RecordB
         let out_name = item.alias.clone().unwrap_or_else(|| item.prop.clone());
         projection.push(col(item.prop.as_str()).alias(out_name));
     }
-    df = df.select(projection)?;
+    let df = df.select(projection)?;
 
     Ok(df.collect().await?)
+}
+
+/// One-shot convenience for tests and non-locking callers.
+pub async fn run_query(
+    stmt: &QueryStmt,
+    live: &LiveTable,
+    now: Instant,
+) -> Result<Vec<RecordBatch>, PlanError> {
+    execute_query(stmt, snapshot_for_query(stmt, live, now)?).await
 }
