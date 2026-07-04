@@ -31,8 +31,8 @@ pub struct TxReceipt {
     pub tx_id: u64,
 }
 
-/// Embedded, in-process database handle. v0: single in-memory `LiveTable`,
-/// no persistence, no system_time joins (arrive in slice 2).
+/// Embedded, in-process database handle. v0: single in-memory `LiveTable`
+/// with system-time joins (Task 6); no persistence until slice 3/4.
 pub struct Db {
     live: Arc<RwLock<LiveTable>>,
     tx_counter: AtomicU64,
@@ -59,6 +59,11 @@ impl Db {
     }
 
     /// Execute a mutation statement. v0: INSERT only.
+    ///
+    /// v0 is single-writer only: `system_from` is derived from a tx-counter
+    /// increment taken before the `live.write()` lock, so a smaller-`tx_id`
+    /// writer that loses the lock race could be rejected by `LiveTable`'s
+    /// monotonicity check. Resolved when Task 8 adds a strictly-increasing `MonotonicClock`.
     pub async fn execute(&self, gql: &str) -> Result<TxReceipt, EngineError> {
         let Statement::Insert(ins) = varve_gql::parse(gql)? else {
             return Err(EngineError::NotAMutation);
