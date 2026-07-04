@@ -1,4 +1,5 @@
-use varve_types::Instant;
+use crate::event::{Event, Op};
+use varve_types::{Instant, TemporalBounds};
 
 /// Binary search in a DESCENDING slice. `Ok(idx)` on match, `Err(insertion)`
 /// otherwise. Port of XTDB `Ceiling.kt` `binarySearch` (its `-left - 1`
@@ -207,6 +208,70 @@ impl Polygon {
         }
         recency
     }
+}
+
+/// A visible version of an entity: one Put event's rectangle that intersects
+/// the query bounds. `system_to` is derived by resolution, never stored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedVersion<'a> {
+    pub event: &'a Event,
+    pub valid_from: Instant,
+    pub valid_to: Instant,
+    pub system_to: Instant,
+}
+
+/// Resolve one entity's events against `bounds`. `events` must be in arrival
+/// (log) order: ascending `system_from`, ties broken by arrival order.
+///
+/// Iterates newest-system-first (reverse arrival, so a batch's last write is
+/// newest). Single-entity port of XTDB `PolygonCalculator.calculate`.
+pub fn resolve<'a>(events: &'a [Event], bounds: &TemporalBounds) -> Vec<ResolvedVersion<'a>> {
+    let mut out = Vec::new();
+    let mut ceiling = Ceiling::new();
+    let mut polygon = Polygon::default();
+
+    for event in events.iter().rev() {
+        // An erase kills itself and everything older — deliberately BEFORE the
+        // system-bounds check: erased history is gone at every system time.
+        if matches!(event.op, Op::Erase) {
+            break;
+        }
+        // Events after the snapshot's system upper bound don't exist for this
+        // query — and must not supersede older events either.
+        if event.system_from >= bounds.system.upper {
+            continue;
+        }
+        // Defensive: empty valid ranges affect nothing (engine validates upstream).
+        if event.valid_from >= event.valid_to {
+            continue;
+        }
+
+        polygon.calculate_for(&ceiling, event.valid_from, event.valid_to);
+        ceiling.apply_log(event.system_from, event.valid_from, event.valid_to);
+
+        if let Op::Put { .. } = event.op {
+            for i in 0..polygon.range_count() {
+                let (valid_from, valid_to, system_to) = (
+                    polygon.valid_from(i),
+                    polygon.valid_to(i),
+                    polygon.system_to(i),
+                );
+                // Fully superseded (e.g. an earlier write in a same-system-time batch).
+                if system_to <= event.system_from {
+                    continue;
+                }
+                if bounds.intersects(valid_from, valid_to, event.system_from, system_to) {
+                    out.push(ResolvedVersion {
+                        event,
+                        valid_from,
+                        valid_to,
+                        system_to,
+                    });
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -508,5 +573,171 @@ mod tests {
             polygon_of(&[us(100), us(100), us(5), us(8)], &[us(100), us(9), us(6)]).recency(),
             us(6)
         );
+    }
+
+    use crate::event::{Event, Op};
+    use varve_types::{Doc, Iid, TemporalBounds, TemporalDimension, Value};
+
+    fn iid1() -> Iid {
+        Iid::derive("g", "nodes", &[1])
+    }
+
+    fn put(sf: i64, vf: Instant, vt: Instant, seq: i64) -> Event {
+        let mut doc = Doc::new();
+        doc.insert("seq".into(), Value::Int(seq));
+        Event {
+            iid: iid1(),
+            system_from: us(sf),
+            valid_from: vf,
+            valid_to: vt,
+            op: Op::Put {
+                labels: vec!["P".into()],
+                doc,
+            },
+        }
+    }
+
+    fn delete(sf: i64, vf: Instant, vt: Instant) -> Event {
+        Event {
+            iid: iid1(),
+            system_from: us(sf),
+            valid_from: vf,
+            valid_to: vt,
+            op: Op::Delete,
+        }
+    }
+
+    fn erase(sf: i64) -> Event {
+        Event {
+            iid: iid1(),
+            system_from: us(sf),
+            valid_from: TMIN,
+            valid_to: EOT,
+            op: Op::Erase,
+        }
+    }
+
+    fn all_bounds() -> TemporalBounds {
+        TemporalBounds::default()
+    }
+
+    fn point(valid: i64, system: i64) -> TemporalBounds {
+        TemporalBounds {
+            valid: TemporalDimension::at(us(valid)),
+            system: TemporalDimension::at(us(system)),
+        }
+    }
+
+    fn rects(versions: &[ResolvedVersion<'_>]) -> Vec<(i64, i64, i64, i64)> {
+        versions
+            .iter()
+            .map(|v| {
+                (
+                    v.valid_from.as_micros(),
+                    v.valid_to.as_micros(),
+                    v.event.system_from.as_micros(),
+                    v.system_to.as_micros(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn newer_event_splits_older_events_rectangles() {
+        // Older put covers [0, 20); newer put supersedes [10, ∞) from system 100.
+        let events = vec![put(50, us(0), us(20), 0), put(100, us(10), EOT, 1)];
+        let versions = resolve(&events, &all_bounds());
+        assert_eq!(
+            rects(&versions),
+            vec![
+                (10, EOT.as_micros(), 100, EOT.as_micros()), // newer: untouched
+                (0, 10, 50, EOT.as_micros()),                // older: still current below 10
+                (10, 20, 50, 100),                           // older: superseded at system 100
+            ]
+        );
+    }
+
+    #[test]
+    fn system_time_travel_ignores_newer_events() {
+        let events = vec![put(50, us(0), us(20), 0), put(100, us(10), EOT, 1)];
+        // A snapshot at system 60 never saw the newer event — and must not let
+        // it supersede the older one.
+        let versions = resolve(
+            &events,
+            &TemporalBounds {
+                valid: TemporalDimension::all(),
+                system: TemporalDimension::at(us(60)),
+            },
+        );
+        assert_eq!(rects(&versions), vec![(0, 20, 50, EOT.as_micros())]);
+    }
+
+    #[test]
+    fn same_system_time_batch_last_write_wins() {
+        let events = vec![put(5, us(0), EOT, 0), put(5, us(0), EOT, 1)];
+        let versions = resolve(&events, &all_bounds());
+        // seq 1 is visible; seq 0's rectangle has system_to == system_from and is dropped.
+        assert_eq!(versions.len(), 1);
+        assert_eq!(
+            rects(&versions),
+            vec![(0, EOT.as_micros(), 5, EOT.as_micros())]
+        );
+        let Op::Put { doc, .. } = &versions[0].event.op else {
+            panic!()
+        };
+        assert_eq!(doc.get("seq"), Some(&Value::Int(1)));
+    }
+
+    #[test]
+    fn delete_truncates_visibility() {
+        let events = vec![put(5, us(0), EOT, 0), delete(10, us(0), EOT)];
+        assert_eq!(
+            rects(&resolve(&events, &all_bounds())),
+            vec![(0, EOT.as_micros(), 5, 10)]
+        );
+        assert!(resolve(&events, &point(1, 12)).is_empty()); // after the delete
+        assert_eq!(resolve(&events, &point(1, 7)).len(), 1); // before the delete
+    }
+
+    #[test]
+    fn range_delete_splits_the_put() {
+        // Delete only valid range [3, 6) at system 10.
+        let events = vec![put(5, us(0), EOT, 0), delete(10, us(3), us(6))];
+        assert_eq!(
+            rects(&resolve(&events, &all_bounds())),
+            vec![
+                (0, 3, 5, EOT.as_micros()),
+                (3, 6, 5, 10),
+                (6, EOT.as_micros(), 5, EOT.as_micros()),
+            ]
+        );
+    }
+
+    #[test]
+    fn erase_hides_the_entity_even_from_time_travel() {
+        let events = vec![put(5, us(0), EOT, 0), erase(10), put(15, us(0), EOT, 2)];
+        // Only the post-erase put survives — at every system time.
+        let versions = resolve(&events, &all_bounds());
+        assert_eq!(versions.len(), 1);
+        let Op::Put { doc, .. } = &versions[0].event.op else {
+            panic!()
+        };
+        assert_eq!(doc.get("seq"), Some(&Value::Int(2)));
+        // Time travel to before the erase still sees nothing of the erased history.
+        assert!(resolve(&events[..2], &point(1, 7)).is_empty());
+    }
+
+    #[test]
+    fn bounds_filter_rectangles() {
+        let events = vec![put(5, us(10), us(20), 0)];
+        assert!(resolve(&events, &point(25, 7)).is_empty()); // valid axis misses
+        assert_eq!(resolve(&events, &point(15, 7)).len(), 1);
+        assert!(resolve(&events, &point(15, 3)).is_empty()); // before it existed
+    }
+
+    #[test]
+    fn empty_valid_range_events_are_ignored() {
+        let events = vec![put(5, us(3), us(3), 0)];
+        assert!(resolve(&events, &all_bounds()).is_empty());
     }
 }
