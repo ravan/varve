@@ -234,3 +234,37 @@ async fn replay(
     }
     Ok((live, next_tx_id))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use varve_log::{LogRecord, TableEffects};
+
+    /// `replay` checks `effect.table` before ever touching `arrow_ipc` (spec
+    /// v1: nodes is the only effect batch target), so a non-`nodes` table
+    /// must hard-fail with `UnknownTable` — even though the log record here
+    /// carries deliberately undecodable bytes that would blow up
+    /// `decode_events` if the guard were ever removed or reordered.
+    #[tokio::test]
+    async fn replay_rejects_unknown_table() {
+        let log = MemoryLog::new();
+        log.append(vec![LogRecord {
+            tx_id: 1,
+            system_time_us: 0,
+            user: String::new(),
+            effects: vec![TableEffects {
+                table: "edges".to_string(),
+                arrow_ipc: vec![0xAA], // never decoded: table check happens first
+            }],
+        }])
+        .await
+        .unwrap();
+
+        let clock = MonotonicClock::new();
+        match replay(&log, &clock).await {
+            Err(EngineError::UnknownTable(t)) => assert_eq!(t, "edges"),
+            Err(other) => panic!("expected UnknownTable, got {other:?}"),
+            Ok(_) => panic!("expected replay to fail on the non-nodes table"),
+        }
+    }
+}
