@@ -60,31 +60,39 @@ async fn insert_with_inverted_computed_range_errors() {
 #[tokio::test]
 async fn delete_hides_now_but_not_in_the_past() {
     let db = Db::memory();
-    db.execute("INSERT (:P {_id: 1, name: 'Zoe'})")
+    db.execute("INSERT (:Person {_id: 1, name: 'Zoe'})")
         .await
         .unwrap();
     let amy = db
-        .execute("INSERT (:P {_id: 2, name: 'Amy'})")
+        .execute("INSERT (:Person {_id: 2, name: 'Amy'})")
         .await
         .unwrap();
-    db.execute("MATCH (p:P) WHERE p.name = 'Zoe' DELETE p")
+    db.execute("MATCH (p:Person) WHERE p.name = 'Zoe' DELETE p")
         .await
         .unwrap();
 
+    // Only the delete's target disappears.
     assert_eq!(
-        rows(db.query("MATCH (p:P) RETURN p.name").await.unwrap()),
+        rows(db.query("MATCH (p:Person) RETURN p.name").await.unwrap()),
         1
     );
-
+    // Time travel to just before the delete (Amy's tx): both are visible.
     let time_travel = format!(
-        "FOR SYSTEM_TIME AS OF TIMESTAMP '{}' MATCH (p:P) RETURN p.name",
+        "FOR SYSTEM_TIME AS OF TIMESTAMP '{}' MATCH (p:Person) RETURN p.name",
         amy.system_time
     );
     assert_eq!(rows(db.query(&time_travel).await.unwrap()), 2);
 }
 
 #[tokio::test]
-async fn delete_with_no_matches_is_a_successful_empty_transaction() {
+async fn delete_with_no_matches_is_an_empty_tx() {
+    let db = Db::memory();
+    let receipt = db.execute("MATCH (p:Nobody) DELETE p").await.unwrap();
+    assert!(receipt.tx_id > 0);
+}
+
+#[tokio::test]
+async fn delete_with_filtered_to_zero_matches_is_an_empty_tx() {
     let db = Db::memory();
     db.execute("INSERT (:P {_id: 1, name: 'Zoe'})")
         .await

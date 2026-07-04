@@ -52,13 +52,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn next_is_strictly_increasing() {
+    fn next_is_strictly_increasing_under_bursts() {
         let clock = MonotonicClock::new();
-        let a = clock.next();
-        let b = clock.next();
-        let c = clock.next();
-        assert!(b > a);
-        assert!(c > b);
+        let mut prev = clock.next();
+        for _ in 0..10_000 {
+            let t = clock.next();
+            assert!(t > prev);
+            prev = t;
+        }
     }
 
     #[test]
