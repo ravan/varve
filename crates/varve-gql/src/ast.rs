@@ -1,4 +1,4 @@
-use varve_types::TemporalDimension;
+use varve_types::{Instant, TemporalDimension};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
@@ -18,6 +18,11 @@ pub struct InsertNode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct InsertStmt {
     pub nodes: Vec<InsertNode>,
+    /// `INSERT … VALID FROM <dt> [TO <dt>]` / `VALID TO <dt>` — applies to
+    /// every node in the statement. `None` defers to the engine's default
+    /// (valid_from = system time, valid_to = end of time).
+    pub valid_from: Option<Instant>,
+    pub valid_to: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,6 +73,14 @@ pub enum ReturnItem {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct DeleteStmt {
+    pub pattern: NodePattern,
+    pub where_clause: Option<Expr>,
+    /// The identifier named after `DELETE`; must equal `pattern.var`.
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct QueryStmt {
     /// Query-level `FOR VALID_TIME`/`FOR SYSTEM_TIME` clauses, given before
     /// the (first) `MATCH`.
@@ -82,7 +95,7 @@ pub struct QueryStmt {
 
 // QueryStmt legitimately carries two TemporalClauses (query-level +
 // per-MATCH) plus its pattern/where/return payload, so it is much larger
-// than InsertStmt; boxing it would break the brief's verbatim
+// than InsertStmt or DeleteStmt; boxing it would break the brief's verbatim
 // `Statement::Query(q) => q` test helpers, so the size lint is suppressed
 // instead of changing the variant's shape.
 #[derive(Debug, Clone, PartialEq)]
@@ -90,4 +103,5 @@ pub struct QueryStmt {
 pub enum Statement {
     Insert(InsertStmt),
     Query(QueryStmt),
+    Delete(DeleteStmt),
 }

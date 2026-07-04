@@ -1,11 +1,12 @@
+use datafusion::arrow::array::{Array, FixedSizeBinaryArray};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::MemTable;
 use datafusion::prelude::*;
 use std::sync::Arc;
 use thiserror::Error;
-use varve_gql::ast::{Expr, Literal, QueryStmt, ReturnItem, TemporalFnKind};
+use varve_gql::ast::{Expr, Literal, NodePattern, QueryStmt, ReturnItem, TemporalFnKind};
 use varve_index::LiveTable;
-use varve_types::{Instant, TemporalBounds, TemporalDimension};
+use varve_types::{Iid, Instant, TemporalBounds, TemporalDimension};
 
 #[derive(Debug, Error)]
 pub enum PlanError {
@@ -15,6 +16,8 @@ pub enum PlanError {
     Index(#[from] varve_index::IndexError),
     #[error("unknown column '{0}' in RETURN/WHERE")]
     UnknownColumn(String),
+    #[error("internal: _iid column malformed")]
+    MalformedIid,
 }
 
 fn to_df_literal(l: &Literal) -> datafusion::prelude::Expr {
@@ -111,6 +114,55 @@ pub async fn execute_query(
     let df = df.select(projection)?;
 
     Ok(df.collect().await?)
+}
+
+/// Resolves the IIDs of entities visible at `bounds` that match `pattern` +
+/// `where_clause` — the read side of writer-driven DML (MATCH … DELETE,
+/// spec §10). Sorted and deduplicated so mutation application order is
+/// deterministic.
+pub async fn matching_iids(
+    pattern: &NodePattern,
+    where_clause: &Option<Expr>,
+    live: &LiveTable,
+    bounds: &TemporalBounds,
+) -> Result<Vec<Iid>, PlanError> {
+    let label = pattern.label.as_deref().unwrap_or("");
+    let Some(batch) = live.snapshot_for_label(label, bounds)? else {
+        return Ok(vec![]);
+    };
+    let schema = batch.schema();
+    let has_col = |name: &str| schema.column_with_name(name).is_some();
+
+    let ctx = SessionContext::new();
+    let table = MemTable::try_new(schema.clone(), vec![vec![batch]])?;
+    let mut df = ctx.read_table(Arc::new(table))?;
+
+    if let Some(Expr::PropEq { prop, value, .. }) = where_clause {
+        if !has_col(prop) {
+            return Err(PlanError::UnknownColumn(prop.clone()));
+        }
+        df = df.filter(col(prop.as_str()).eq(to_df_literal(value)))?;
+    }
+    let df = df.select(vec![col("_iid")])?;
+
+    let mut iids = Vec::new();
+    for batch in df.collect().await? {
+        let col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .ok_or(PlanError::MalformedIid)?;
+        for i in 0..col.len() {
+            let bytes: [u8; 16] = col
+                .value(i)
+                .try_into()
+                .map_err(|_| PlanError::MalformedIid)?;
+            iids.push(Iid::from_bytes(bytes));
+        }
+    }
+    iids.sort();
+    iids.dedup();
+    Ok(iids)
 }
 
 /// One-shot convenience for tests and non-locking callers.

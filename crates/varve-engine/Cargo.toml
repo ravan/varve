@@ -12,5 +12,8 @@ varve-plan = { path = "../varve-plan" }
 datafusion = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true }
+
 [lints]
 workspace = true

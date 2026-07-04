@@ -65,7 +65,7 @@ impl Parser {
             TokenKind::Kw(Keyword::Match) | TokenKind::Kw(Keyword::For) => {
                 let temporal = self.for_clauses()?;
                 self.expect(&TokenKind::Kw(Keyword::Match), "MATCH")?;
-                self.query_stmt(temporal).map(Statement::Query)
+                self.match_tail(temporal)
             }
             _ => Err(self.err("expected INSERT, MATCH, or FOR")),
         }
@@ -191,8 +191,44 @@ impl Parser {
             self.pos += 1;
             nodes.push(self.insert_node()?);
         }
+
+        let (mut valid_from, mut valid_to) = (None, None);
+        if *self.peek() == TokenKind::Kw(Keyword::Valid) {
+            self.pos += 1;
+            let offset = self.offset();
+            match self.bump() {
+                TokenKind::Kw(Keyword::From) => {
+                    valid_from = Some(self.datetime()?);
+                    if *self.peek() == TokenKind::Kw(Keyword::To) {
+                        self.pos += 1;
+                        valid_to = Some(self.datetime()?);
+                    }
+                }
+                TokenKind::Kw(Keyword::To) => {
+                    valid_to = Some(self.datetime()?);
+                }
+                other => {
+                    return Err(GqlError::Parse {
+                        offset,
+                        msg: format!("expected FROM or TO after VALID, found {other:?}"),
+                    })
+                }
+            }
+            if let (Some(from), Some(to)) = (valid_from, valid_to) {
+                if from >= to {
+                    return Err(GqlError::Parse {
+                        offset,
+                        msg: "VALID FROM must be earlier than VALID TO".into(),
+                    });
+                }
+            }
+        }
         self.expect(&TokenKind::Eof, "end of statement")?;
-        Ok(InsertStmt { nodes })
+        Ok(InsertStmt {
+            nodes,
+            valid_from,
+            valid_to,
+        })
     }
 
     fn insert_node(&mut self) -> Result<InsertNode, GqlError> {
@@ -243,7 +279,10 @@ impl Parser {
         }
     }
 
-    fn query_stmt(&mut self, temporal: TemporalClauses) -> Result<QueryStmt, GqlError> {
+    /// Shared tail after `MATCH (var:label)`: per-MATCH FOR clauses, an
+    /// optional WHERE, then either `RETURN …` (a query) or `DELETE <var>`
+    /// (a mutation).
+    fn match_tail(&mut self, temporal: TemporalClauses) -> Result<Statement, GqlError> {
         self.expect(&TokenKind::LParen, "'('")?;
         let var = self.ident("pattern variable")?;
         let label = if *self.peek() == TokenKind::Colon {
@@ -263,20 +302,54 @@ impl Parser {
             None
         };
 
-        self.expect(&TokenKind::Kw(Keyword::Return), "RETURN")?;
-        let mut return_items = vec![self.return_item()?];
-        while *self.peek() == TokenKind::Comma {
-            self.pos += 1;
-            return_items.push(self.return_item()?);
+        let offset = self.offset();
+        match self.bump() {
+            TokenKind::Kw(Keyword::Return) => {
+                let mut return_items = vec![self.return_item()?];
+                while *self.peek() == TokenKind::Comma {
+                    self.pos += 1;
+                    return_items.push(self.return_item()?);
+                }
+                self.expect(&TokenKind::Eof, "end of statement")?;
+                Ok(Statement::Query(QueryStmt {
+                    temporal,
+                    pattern: NodePattern { var, label },
+                    match_temporal,
+                    where_clause,
+                    return_items,
+                }))
+            }
+            TokenKind::Kw(Keyword::Delete) => {
+                if temporal != TemporalClauses::default()
+                    || match_temporal != TemporalClauses::default()
+                {
+                    return Err(GqlError::Parse {
+                        offset,
+                        msg: "DELETE reads current state — temporal clauses are not supported"
+                            .into(),
+                    });
+                }
+                let target = self.ident("variable to delete")?;
+                if target != var {
+                    return Err(GqlError::Parse {
+                        offset,
+                        msg: format!(
+                            "DELETE target '{target}' is not bound (pattern variable is '{var}')"
+                        ),
+                    });
+                }
+                self.expect(&TokenKind::Eof, "end of statement")?;
+                Ok(Statement::Delete(DeleteStmt {
+                    pattern: NodePattern { var, label },
+                    where_clause,
+                    target,
+                }))
+            }
+            other => Err(GqlError::Parse {
+                offset,
+                msg: format!("expected RETURN or DELETE, found {other:?}"),
+            }),
         }
-        self.expect(&TokenKind::Eof, "end of statement")?;
-        Ok(QueryStmt {
-            temporal,
-            pattern: NodePattern { var, label },
-            match_temporal,
-            where_clause,
-            return_items,
-        })
     }
 
     fn prop_eq_expr(&mut self) -> Result<Expr, GqlError> {
@@ -356,7 +429,9 @@ mod tests {
                         ("_id".into(), Literal::Int(1)),
                         ("name".into(), Literal::Str("Ada".into())),
                     ],
-                }]
+                }],
+                valid_from: None,
+                valid_to: None,
             })
         );
     }
@@ -536,5 +611,64 @@ mod tests {
         // unknown function in RETURN
         let err = parse("MATCH (p:P) RETURN nonsense(p)").unwrap_err();
         assert!(err.to_string().contains("valid_from"), "{err}");
+    }
+
+    #[test]
+    fn parses_insert_valid_clause() {
+        let Statement::Insert(ins) =
+            parse("INSERT (:P {_id: 1}) VALID FROM DATE '2020-01-01' TO DATE '2021-01-01'")
+                .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(ins.valid_from, Some(ts("2020-01-01T00:00:00Z")));
+        assert_eq!(ins.valid_to, Some(ts("2021-01-01T00:00:00Z")));
+
+        let Statement::Insert(ins) =
+            parse("INSERT (:P {_id: 1}) VALID TO DATE '2021-01-01'").unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(ins.valid_from, None);
+        assert_eq!(ins.valid_to, Some(ts("2021-01-01T00:00:00Z")));
+    }
+
+    #[test]
+    fn insert_valid_range_must_be_ordered() {
+        let err = parse("INSERT (:P {_id: 1}) VALID FROM DATE '2021-01-01' TO DATE '2020-01-01'")
+            .unwrap_err();
+        assert!(err.to_string().contains("earlier"), "{err}");
+    }
+
+    #[test]
+    fn parses_match_delete() {
+        let stmt = parse("MATCH (p:Person) WHERE p.name = 'Ada' DELETE p").unwrap();
+        assert_eq!(
+            stmt,
+            Statement::Delete(DeleteStmt {
+                pattern: NodePattern {
+                    var: "p".into(),
+                    label: Some("Person".into())
+                },
+                where_clause: Some(Expr::PropEq {
+                    var: "p".into(),
+                    prop: "name".into(),
+                    value: Literal::Str("Ada".into()),
+                }),
+                target: "p".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn delete_target_must_be_bound() {
+        let err = parse("MATCH (p:Person) DELETE q").unwrap_err();
+        assert!(err.to_string().contains("not bound"), "{err}");
+    }
+
+    #[test]
+    fn delete_rejects_temporal_clauses() {
+        let err = parse("FOR VALID_TIME ALL MATCH (p:Person) DELETE p").unwrap_err();
+        assert!(err.to_string().contains("DELETE"), "{err}");
     }
 }
