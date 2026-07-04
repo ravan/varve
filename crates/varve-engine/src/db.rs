@@ -1,13 +1,16 @@
 use crate::clock::{Clock, MonotonicClock};
+use crate::writer::{spawn_writer, Submission, WriterConfig, WriterState};
 use datafusion::arrow::record_batch::RecordBatch;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use thiserror::Error;
-use varve_gql::ast::{DeleteStmt, InsertStmt, Literal, Statement};
+use tokio::sync::{mpsc, oneshot};
+use varve_gql::ast::Statement;
 use varve_gql::token::GqlError;
-use varve_index::{Event, IndexError, LiveTable, Op};
+use varve_index::{IndexError, LiveTable};
+use varve_log::{LogError, MemoryLog};
 use varve_plan::PlanError;
-use varve_types::{Doc, Iid, Instant, TemporalBounds, TemporalDimension, TypeError, Value};
+use varve_types::{Instant, TypeError};
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -19,8 +22,14 @@ pub enum EngineError {
     Index(#[from] IndexError),
     #[error(transparent)]
     Type(#[from] TypeError),
+    #[error(transparent)]
+    Log(#[from] LogError),
     #[error("VALID FROM {from} must be earlier than VALID TO {to}")]
     InvalidValidRange { from: Instant, to: Instant },
+    #[error("transaction failed to commit: {0}")]
+    CommitFailed(String),
+    #[error("writer is not running (database closed)")]
+    WriterUnavailable,
     #[error("statement is a query; use query()")]
     NotAMutation,
     #[error("statement is a mutation; use execute()")]
@@ -35,138 +44,70 @@ pub struct TxReceipt {
     pub system_time: Instant,
 }
 
-/// Embedded, in-process database handle. Single in-memory `LiveTable`;
-/// the writer assigns a monotonic system time per tx (durability arrives
-/// in slice 3).
+/// Embedded, in-process database handle. All mutations flow through the
+/// writer loop (spec §3, D3): submissions are resolved serially, group-
+/// committed to the log, applied to the live index after durability, then
+/// acked — so concurrent `execute()` calls are fully supported, and an
+/// acked transaction is both durable and visible.
 pub struct Db {
     live: Arc<RwLock<LiveTable>>,
-    clock: MonotonicClock,
-    tx_counter: AtomicU64,
-    id_counter: AtomicU64,
-}
-
-fn literal_to_value(l: &Literal) -> Value {
-    match l {
-        Literal::Int(i) => Value::Int(*i),
-        Literal::Float(f) => Value::Float(*f),
-        Literal::Str(s) => Value::Str(s.clone()),
-        Literal::Bool(b) => Value::Bool(*b),
-        Literal::Null => Value::Null,
-    }
+    clock: Arc<dyn Clock>,
+    submit: mpsc::Sender<Submission>,
 }
 
 impl Db {
+    /// Volatile database: memory log, zero group-commit window (there is no
+    /// fsync to amortize — decision 11). Requires a Tokio runtime.
     pub fn memory() -> Db {
-        Db {
-            live: Arc::new(RwLock::new(LiveTable::new())),
-            clock: MonotonicClock::new(),
-            tx_counter: AtomicU64::new(0),
-            id_counter: AtomicU64::new(0),
-        }
+        let live = LiveTable::new();
+        Db::assemble(
+            live,
+            Arc::new(MemoryLog::new()),
+            Arc::new(MonotonicClock::new()),
+            WriterConfig {
+                window: Duration::ZERO,
+                ..WriterConfig::default()
+            },
+            0,
+        )
     }
 
-    /// Executes a mutation statement (INSERT or MATCH … DELETE).
-    ///
-    /// v0 is single-writer only: `clock.next()` is taken *before* the
-    /// `live.write()` lock, so a strictly-increasing clock alone does not
-    /// serialize concurrent writers — a caller assigned a smaller tx time
-    /// that loses the lock race would still be rejected by `LiveTable`'s
-    /// monotonicity check as an `OutOfOrderEvent`. Full write serialization
-    /// (a single writer loop, spec D3) arrives in slice 3; concurrent
-    /// `execute()` calls are unsupported until then.
-    pub async fn execute(&self, gql: &str) -> Result<TxReceipt, EngineError> {
-        match varve_gql::parse(gql)? {
-            Statement::Insert(ins) => self.execute_insert(&ins).await,
-            Statement::Delete(del) => self.execute_delete(&del).await,
-            Statement::Query(_) => Err(EngineError::NotAMutation),
-        }
-    }
-
-    async fn execute_insert(&self, ins: &InsertStmt) -> Result<TxReceipt, EngineError> {
-        let tx_id = self.tx_counter.fetch_add(1, Ordering::SeqCst) + 1;
-        let system = self.clock.next();
-        let valid_from = ins.valid_from.unwrap_or(system);
-        let valid_to = ins.valid_to.unwrap_or(Instant::END_OF_TIME);
-        if valid_from >= valid_to {
-            return Err(EngineError::InvalidValidRange {
-                from: valid_from,
-                to: valid_to,
-            });
-        }
-
-        // Build and validate EVERY node's (iid, labels, doc) triple —
-        // including the fallible `id_bytes()?` — before the first append, so
-        // a later node's invalid `_id` can't leave earlier nodes from this
-        // statement partially committed (slice-1 review fix, pinned by
-        // `multi_node_insert_is_atomic_on_invalid_id`).
-        let mut events = Vec::with_capacity(ins.nodes.len());
-        for node in &ins.nodes {
-            let mut doc: Doc = node
-                .props
-                .iter()
-                .map(|(k, v)| (k.clone(), literal_to_value(v)))
-                .collect();
-            let id = match doc.get("_id") {
-                Some(v) => v.clone(),
-                None => {
-                    // process-local generated id; user-durable ids arrive in slice 3
-                    let n = self.id_counter.fetch_add(1, Ordering::SeqCst);
-                    let v = Value::Str(format!("varve:gen:{n}"));
-                    doc.insert("_id".into(), v.clone());
-                    v
-                }
-            };
-            let iid = Iid::derive("default", "nodes", &id.id_bytes()?);
-            events.push(Event {
-                iid,
-                system_from: system,
-                valid_from,
-                valid_to,
-                op: Op::Put {
-                    labels: node.labels.clone(),
-                    doc,
-                },
-            });
-        }
-
-        let mut live = self.live.write().map_err(|_| EngineError::Poisoned)?;
-        for event in events {
-            live.append(event)?;
-        }
-        Ok(TxReceipt {
-            tx_id,
-            system_time: system,
-        })
-    }
-
-    // DELETE plans its read (`matching_iids`) as part of the same tx's own
-    // snapshot (spec §10 DML), holding the write lock across an internal
-    // await — acceptable for the single-writer embedded engine (no
-    // concurrent access model until slice 3's writer loop).
-    #[allow(clippy::await_holding_lock)]
-    async fn execute_delete(&self, del: &DeleteStmt) -> Result<TxReceipt, EngineError> {
-        let tx_id = self.tx_counter.fetch_add(1, Ordering::SeqCst) + 1;
-        let system = self.clock.next();
-        let bounds = TemporalBounds {
-            valid: TemporalDimension::at(system),
-            system: TemporalDimension::at(system),
+    fn assemble(
+        live: LiveTable,
+        log: Arc<dyn varve_log::Log>,
+        clock: Arc<dyn Clock>,
+        cfg: WriterConfig,
+        next_tx_id: u64,
+    ) -> Db {
+        let live = Arc::new(RwLock::new(live));
+        let state = WriterState {
+            live: Arc::clone(&live),
+            clock: Arc::clone(&clock),
+            log,
+            next_tx_id,
         };
-        let mut live = self.live.write().map_err(|_| EngineError::Poisoned)?;
-        let iids: Vec<Iid> =
-            varve_plan::matching_iids(&del.pattern, &del.where_clause, &live, &bounds).await?;
-        for iid in iids {
-            live.append(Event {
-                iid,
-                system_from: system,
-                valid_from: system,
-                valid_to: Instant::END_OF_TIME,
-                op: Op::Delete,
-            })?;
+        let submit = spawn_writer(state, cfg);
+        Db {
+            live,
+            clock,
+            submit,
         }
-        Ok(TxReceipt {
-            tx_id,
-            system_time: system,
-        })
+    }
+
+    /// Executes a mutation statement (INSERT, MATCH … DELETE): parses here,
+    /// resolves and commits inside the writer loop, and returns once the tx
+    /// is durable AND visible.
+    pub async fn execute(&self, gql: &str) -> Result<TxReceipt, EngineError> {
+        let stmt = varve_gql::parse(gql)?;
+        if matches!(stmt, Statement::Query(_)) {
+            return Err(EngineError::NotAMutation);
+        }
+        let (ack, rx) = oneshot::channel();
+        self.submit
+            .send(Submission { stmt, ack })
+            .await
+            .map_err(|_| EngineError::WriterUnavailable)?;
+        rx.await.map_err(|_| EngineError::WriterUnavailable)?
     }
 
     /// Executes a read query, returning Arrow batches.
@@ -176,7 +117,8 @@ impl Db {
         };
         let now = self.clock.watermark();
         // Snapshot under the read lock, drop the guard, then run DataFusion
-        // on the owned batch — no await while holding the lock.
+        // on the owned batch — no await while holding the lock (slice-2
+        // pattern).
         let snapshot = {
             let live = self.live.read().map_err(|_| EngineError::Poisoned)?;
             varve_plan::snapshot_for_query(&q, &live, now)?
