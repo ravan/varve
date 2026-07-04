@@ -15,10 +15,13 @@ toml = "0.8"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 datafusion = "54"
 arrow = "58"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 proptest = "1"
+prost = "0.14"
+crc32c = "0.6"
+tempfile = "3"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
