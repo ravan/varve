@@ -2968,6 +2968,7 @@ dependencies = [
 name = "varve-engine"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "datafusion",
  "serde",
  "thiserror",
