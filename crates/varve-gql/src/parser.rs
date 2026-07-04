@@ -128,7 +128,60 @@ impl Parser {
     }
 
     fn query_stmt(&mut self) -> Result<QueryStmt, GqlError> {
-        Err(self.err("MATCH not implemented yet")) // Task 4
+        self.expect(&TokenKind::LParen, "'('")?;
+        let var = self.ident("pattern variable")?;
+        let label = if *self.peek() == TokenKind::Colon {
+            self.pos += 1;
+            Some(self.ident("label name")?)
+        } else {
+            None
+        };
+        self.expect(&TokenKind::RParen, "')'")?;
+
+        let where_clause = if *self.peek() == TokenKind::Kw(Keyword::Where) {
+            self.pos += 1;
+            Some(self.prop_eq_expr()?)
+        } else {
+            None
+        };
+
+        self.expect(&TokenKind::Kw(Keyword::Return), "RETURN")?;
+        let mut return_items = vec![self.return_item()?];
+        while *self.peek() == TokenKind::Comma {
+            self.pos += 1;
+            return_items.push(self.return_item()?);
+        }
+        self.expect(&TokenKind::Eof, "end of statement")?;
+        Ok(QueryStmt {
+            pattern: NodePattern { var, label },
+            where_clause,
+            return_items,
+        })
+    }
+
+    fn prop_eq_expr(&mut self) -> Result<Expr, GqlError> {
+        let var = self.ident("variable")?;
+        self.expect(&TokenKind::Dot, "'.'")?;
+        let prop = self.ident("property name")?;
+        self.expect(&TokenKind::Eq, "'='")?;
+        Ok(Expr::PropEq {
+            var,
+            prop,
+            value: self.literal()?,
+        })
+    }
+
+    fn return_item(&mut self) -> Result<ReturnItem, GqlError> {
+        let var = self.ident("variable")?;
+        self.expect(&TokenKind::Dot, "'.'")?;
+        let prop = self.ident("property name")?;
+        let alias = if *self.peek() == TokenKind::Kw(Keyword::As) {
+            self.pos += 1;
+            Some(self.ident("alias")?)
+        } else {
+            None
+        };
+        Ok(ReturnItem { var, prop, alias })
     }
 }
 
@@ -167,5 +220,50 @@ mod tests {
     fn insert_without_label_or_props_errors_helpfully() {
         let err = parse("INSERT ()").unwrap_err();
         assert!(err.to_string().contains("label"), "{err}");
+    }
+
+    #[test]
+    fn parses_match_where_return() {
+        let stmt =
+            parse("MATCH (p:Person) WHERE p.name = 'Ada' RETURN p.name AS n, p.age").unwrap();
+        assert_eq!(
+            stmt,
+            Statement::Query(QueryStmt {
+                pattern: NodePattern {
+                    var: "p".into(),
+                    label: Some("Person".into())
+                },
+                where_clause: Some(Expr::PropEq {
+                    var: "p".into(),
+                    prop: "name".into(),
+                    value: Literal::Str("Ada".into()),
+                }),
+                return_items: vec![
+                    ReturnItem {
+                        var: "p".into(),
+                        prop: "name".into(),
+                        alias: Some("n".into())
+                    },
+                    ReturnItem {
+                        var: "p".into(),
+                        prop: "age".into(),
+                        alias: None
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn match_without_where() {
+        let stmt = parse("MATCH (p:Person) RETURN p.name").unwrap();
+        let Statement::Query(q) = stmt else { panic!() };
+        assert!(q.where_clause.is_none());
+        assert_eq!(q.return_items.len(), 1);
+    }
+
+    #[test]
+    fn match_without_return_errors() {
+        assert!(parse("MATCH (p:Person)").is_err());
     }
 }
