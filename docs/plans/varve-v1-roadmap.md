@@ -37,8 +37,8 @@ criterion · cargo-fuzz.
 - Workspace lints: `cargo clippy --workspace --all-targets -- -D warnings`; `unwrap()`/
   `expect()` forbidden in library code (allowed in tests); errors via `thiserror` per crate.
 - Timestamps are always `Timestamp(µs, UTC)`; IIDs are always `xxh3_128(graph, table, _id)`.
-- Commit style: `feat:`/`fix:`/`test:`/`refactor:`/`docs:` + trailer
-  `Co-Authored-By: Claude <model attribution per session>`.
+- Commit style: `feat:`/`fix:`/`test:`/`refactor:`/`docs:` conventional prefixes.
+  Do NOT add a `Co-Authored-By` / co-author trailer (user preference, 2026-07-04).
 - Every slice ends with: all workspace tests green, clippy clean, STATUS.md updated,
   roadmap checkbox ticked, a runnable demo command recorded in STATUS.md.
 
@@ -69,12 +69,14 @@ Each slice = 1–3 Claude Code sessions and ends with demonstrably working softw
 **Detailed plan:** `docs/plans/2026-07-04-slice-00-foundation.md` ✅ written
 **Spec:** §4, §15. **Sessions:** 1.
 
-- [ ] Cargo workspace + `varve-types` crate: `Iid` (xxh3-128, 16-byte), `LogPosition`
+- [x] Cargo workspace + `varve-types` crate: `Iid` (xxh3-128, 16-byte), `LogPosition`
       (epoch u16 | offset u48 packed in u64, sort-correct), `VarveError` base.
-- [ ] `varve-config`: TOML config loading with env overrides; `ConfigSection`;
+      _(Done. Errors shipped per-crate (`TypeError`) not as one `VarveError` base — see STATUS.md decisions.)_
+- [x] `varve-config`: TOML config loading with env overrides; `ConfigSection`;
       typed `Registry<T>` + `ComponentFactory<T>` + `Registries` aggregate with
       actionable unknown-name errors.
-- [ ] CI: GitHub Actions (fmt, clippy -D warnings, test) + `justfile` + `rust-toolchain.toml`.
+      _(Done. `Registries` aggregate deferred to `varve-engine`; env overrides are 2-segment/string-only for now — see STATUS.md open items.)_
+- [x] CI: GitHub Actions (fmt, clippy -D warnings, test) + `justfile` + `rust-toolchain.toml`.
 
 **Exit criteria:** `just check` green locally and in CI; a toy component registered in a test
 resolves from TOML by name; unknown name error lists available implementations.

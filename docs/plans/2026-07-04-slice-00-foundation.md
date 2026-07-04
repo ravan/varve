@@ -1,6 +1,6 @@
 # Slice 0: Foundation — Workspace, Types, Config, Registry, CI
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** A compiling, CI-green Cargo workspace containing `varve-types` (Iid, LogPosition, errors) and `varve-config` (TOML config + component registry) — the composition backbone every later slice plugs into.
 
@@ -31,7 +31,7 @@
 - Produces: `varve_types::Iid` — `Iid::derive(graph: &str, table: &str, user_id: &UserIdBytes) -> Iid`; `Iid::as_bytes(&self) -> &[u8; 16]`; `Iid::from_bytes([u8; 16]) -> Iid`. `Iid: Copy + Eq + Ord + Hash + Debug`.
 - Note: `derive` takes the *canonical byte encoding* of the user id (`&[u8]`), not `Value` (which doesn't exist until slice 1). Slice 1 adds `Value::id_bytes()` producing this encoding.
 
-- [ ] **Step 1: Create workspace + crate scaffolding**
+- [x] **Step 1: Create workspace + crate scaffolding**
 
 `Cargo.toml` (root):
 ```toml
@@ -85,7 +85,7 @@ pub mod iid;
 pub use iid::Iid;
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 `crates/varve-types/src/iid.rs`:
 ```rust
@@ -123,12 +123,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `cargo test -p varve-types`
 Expected: compile error — `Iid` not defined.
 
-- [ ] **Step 4: Write minimal implementation**
+- [x] **Step 4: Write minimal implementation**
 
 Prepend to `crates/varve-types/src/iid.rs`:
 ```rust
@@ -159,12 +159,12 @@ impl Iid {
 }
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `cargo test -p varve-types`
 Expected: 4 passed.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add Cargo.toml rust-toolchain.toml crates/
@@ -182,7 +182,7 @@ git commit -m "feat: workspace scaffold + Iid derivation in varve-types"
 **Interfaces:**
 - Produces: `varve_types::LogPosition` — `LogPosition::new(epoch: u16, offset: u64) -> Result<LogPosition, TypeError>` (offset must fit 48 bits); `epoch() -> u16`; `offset() -> u64`; `as_u64() -> u64`; `from_u64(u64) -> LogPosition`; `next(&self) -> Result<LogPosition, TypeError>`. Ordering of `LogPosition` == ordering of `as_u64()` (epoch-major). Also produces `varve_types::TypeError` (thiserror enum, first variant `OffsetOverflow`).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/varve-types/src/position.rs`:
 ```rust
@@ -219,12 +219,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-types position`
 Expected: compile error — `LogPosition` not defined.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Prepend to `crates/varve-types/src/position.rs`:
 ```rust
@@ -282,12 +282,12 @@ pub use iid::Iid;
 pub use position::{LogPosition, TypeError};
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-types`
 Expected: all pass (Iid tests + 4 position tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-types/
@@ -310,7 +310,7 @@ git commit -m "feat: LogPosition with epoch-major u64 packing"
 - Produces: `varve_config::ConfigError` (thiserror: `Io`, `Parse`, `Deserialize`).
 - Env overrides: `VARVE__LOG__BACKEND=memory` overrides `[log] backend` (double underscore = nesting); applied inside `from_toml_str`/`from_file`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/varve-config/tests/config_test.rs`:
 ```rust
@@ -359,12 +359,12 @@ fn env_var_overrides_key() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-config`
 Expected: compile error — crate/module missing.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 `crates/varve-config/Cargo.toml`:
 ```toml
@@ -472,12 +472,12 @@ fn apply_env_overrides(root: &mut toml::Table, vars: impl Iterator<Item = (Strin
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-config`
 Expected: 3 passed. (If the env test flakes under parallel test execution later, mark it `#[serial]` with the `serial_test` crate — only if observed.)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-config/
@@ -515,7 +515,7 @@ impl<T: ?Sized> Registry<T> {
 - `RegistryError` variants: `Duplicate { kind, name }`, `Unknown { kind, name, available: Vec<String> }`, `Build { kind, name, source: Box<dyn Error + Send + Sync> }`, and `From<ConfigError>`.
 - Later slices aggregate per-subsystem registries in `varve-engine` (e.g. `registries.log: Registry<dyn Log>`); this crate only provides the generic mechanism. A `BuildContext` parameter is deliberately deferred until a factory actually needs cross-component access (YAGNI; revisit in slice 3 when `log/local` needs a data directory root — pass it via config instead if that suffices).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/varve-config/tests/registry_test.rs`:
 ```rust
@@ -584,12 +584,12 @@ fn duplicate_registration_rejected() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-config --test registry_test`
 Expected: compile error — `registry` module missing.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 `crates/varve-config/src/registry.rs`:
 ```rust
@@ -668,12 +668,12 @@ pub use config::{Config, ConfigError, ConfigSection};
 pub use registry::{ComponentFactory, Registry, RegistryError};
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-config`
 Expected: all pass (3 config + 3 registry).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-config/
@@ -691,7 +691,7 @@ git commit -m "feat: typed component registry with factory registration"
 **Interfaces:**
 - Produces: `just check` = fmt-check + clippy + test; CI runs the same on push/PR to `main`. Later slices append recipes (`just fuzz`, `just bench`, `just matrix`) and CI jobs; they modify these files, never replace them.
 
-- [ ] **Step 1: Write the check script (the "test" for CI is running it locally)**
+- [x] **Step 1: Write the check script (the "test" for CI is running it locally)**
 
 `justfile`:
 ```make
@@ -734,12 +734,12 @@ jobs:
       - run: cargo test --workspace
 ```
 
-- [ ] **Step 2: Run to verify it passes locally**
+- [x] **Step 2: Run to verify it passes locally**
 
 Run: `just check` (install: `brew install just` / `cargo install just` if missing)
 Expected: fmt clean, clippy clean, all tests pass. Fix any fmt/clippy fallout now.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add justfile .github/
@@ -750,7 +750,7 @@ git commit -m "ci: fmt + clippy + test pipeline"
 
 ## Slice exit checklist
 
-- [ ] `just check` green.
-- [ ] `git log` shows one commit per task, conventional messages.
-- [ ] Update `docs/plans/STATUS.md`: slice 0 complete, demo command = `cargo test --workspace`, note any deviations.
-- [ ] Tick slice 0 boxes in `docs/plans/varve-v1-roadmap.md`; commit.
+- [x] `just check` green.
+- [x] `git log` shows one commit per task, conventional messages.
+- [x] Update `docs/plans/STATUS.md`: slice 0 complete, demo command = `cargo test --workspace`, note any deviations.
+- [x] Tick slice 0 boxes in `docs/plans/varve-v1-roadmap.md`; commit.

@@ -157,7 +157,7 @@ Each **graph** is a namespace containing two internal tables: `nodes` and `edges
 Every mutation becomes an immutable **event**:
 
 ```
-_iid          FixedSizeBinary(16)   // xxh3-128 of (table, _id) — uniform key distribution
+_iid          FixedSizeBinary(16)   // xxh3-128 of (graph, table, _id) — see §5.3; uniform key distribution
 _system_from  Timestamp(µs, UTC)    // assigned by the writer, monotonic per log
 _valid_from   Timestamp(µs, UTC)    // user-controllable (defaults to system_from)
 _valid_to     Timestamp(µs, UTC)    // user-controllable (defaults to ∞)
