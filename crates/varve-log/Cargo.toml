@@ -1,0 +1,26 @@
+[package]
+name = "varve-log"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Test-only crash hooks for the varve-testkit kill -9 harness. Inert unless
+# the VARVE_CRASH_TRIGGER env var points at an armed trigger file.
+fault-injection = []
+
+[dependencies]
+varve-types = { path = "../varve-types" }
+varve-config = { path = "../varve-config" }
+prost = { workspace = true }
+crc32c = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -47,6 +47,14 @@ impl LogPosition {
     pub fn next(&self) -> Result<Self, TypeError> {
         Self::new(self.epoch(), self.offset() + 1)
     }
+
+    /// Epoch 0, offset 0 — where replay starts.
+    pub const ZERO: LogPosition = LogPosition(0);
+
+    /// The position `n` records after this one, within the same epoch.
+    pub fn advance(&self, n: u64) -> Result<Self, TypeError> {
+        Self::new(self.epoch(), self.offset() + n)
+    }
 }
 
 #[cfg(test)]
@@ -96,5 +104,14 @@ mod tests {
         // the epoch.
         let p = LogPosition::new(0, (1u64 << 48) - 1).unwrap();
         assert!(p.next().is_err());
+    }
+
+    #[test]
+    fn zero_and_advance() {
+        assert_eq!(LogPosition::ZERO, LogPosition::new(0, 0).unwrap());
+        let p = LogPosition::new(3, 10).unwrap();
+        assert_eq!(p.advance(0).unwrap(), p);
+        assert_eq!(p.advance(5).unwrap(), LogPosition::new(3, 15).unwrap());
+        assert!(p.advance(1u64 << 48).is_err()); // overflows the 48-bit offset
     }
 }
