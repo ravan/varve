@@ -34,7 +34,9 @@ impl Value {
                 Ok(b)
             }
             Value::Bool(v) => Ok(vec![0x04, *v as u8]),
-            other => Err(TypeError::InvalidId(format!("{other:?}"))),
+            other @ (Value::Float(_) | Value::Null) => {
+                Err(TypeError::InvalidId(format!("{other:?}")))
+            }
         }
     }
 }
@@ -63,5 +65,15 @@ mod tests {
     fn float_and_null_rejected_as_ids() {
         assert!(Value::Float(1.0).id_bytes().is_err());
         assert!(Value::Null.id_bytes().is_err());
+    }
+
+    #[test]
+    fn same_length_encodings_do_not_collide() {
+        // Int encodes to 9 bytes (tag + BE i64); an 8-byte string also encodes
+        // to 9 bytes with an IDENTICAL payload — only the tag disambiguates.
+        let i = Value::Int(0x3132_3334_3536_3738).id_bytes().unwrap(); // BE bytes == b"12345678"
+        let s = Value::Str("12345678".into()).id_bytes().unwrap();
+        assert_eq!(i.len(), s.len());
+        assert_ne!(i, s);
     }
 }
