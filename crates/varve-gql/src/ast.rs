@@ -93,15 +93,9 @@ pub struct QueryStmt {
     pub return_items: Vec<ReturnItem>,
 }
 
-// QueryStmt legitimately carries two TemporalClauses (query-level +
-// per-MATCH) plus its pattern/where/return payload, so it is much larger
-// than InsertStmt or DeleteStmt; boxing it would break the brief's verbatim
-// `Statement::Query(q) => q` test helpers, so the size lint is suppressed
-// instead of changing the variant's shape.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(clippy::large_enum_variant)]
 pub enum Statement {
     Insert(InsertStmt),
-    Query(QueryStmt),
+    Query(Box<QueryStmt>),
     Delete(DeleteStmt),
 }

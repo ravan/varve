@@ -311,13 +311,13 @@ impl Parser {
                     return_items.push(self.return_item()?);
                 }
                 self.expect(&TokenKind::Eof, "end of statement")?;
-                Ok(Statement::Query(QueryStmt {
+                Ok(Statement::Query(Box::new(QueryStmt {
                     temporal,
                     pattern: NodePattern { var, label },
                     match_temporal,
                     where_clause,
                     return_items,
-                }))
+                })))
             }
             TokenKind::Kw(Keyword::Delete) => {
                 if temporal != TemporalClauses::default()
@@ -457,7 +457,7 @@ mod tests {
             parse("MATCH (p:Person) WHERE p.name = 'Ada' RETURN p.name AS n, p.age").unwrap();
         assert_eq!(
             stmt,
-            Statement::Query(QueryStmt {
+            Statement::Query(Box::new(QueryStmt {
                 temporal: TemporalClauses::default(),
                 pattern: NodePattern {
                     var: "p".into(),
@@ -481,7 +481,7 @@ mod tests {
                         alias: None
                     },
                 ],
-            })
+            }))
         );
     }
 
@@ -504,7 +504,7 @@ mod tests {
 
     fn query(src: &str) -> QueryStmt {
         match parse(src).unwrap() {
-            Statement::Query(q) => q,
+            Statement::Query(q) => *q,
             other => panic!("not a query: {other:?}"),
         }
     }
