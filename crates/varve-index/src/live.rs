@@ -21,6 +21,8 @@ pub enum IndexError {
     OutOfOrderEvent { last: Instant, got: Instant },
     #[error(transparent)]
     Arrow(#[from] arrow::error::ArrowError),
+    #[error("event codec: {0}")]
+    Codec(String),
 }
 
 /// Live, in-memory event index. Events are stored per entity in arrival (log)

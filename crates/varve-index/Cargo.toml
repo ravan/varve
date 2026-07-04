@@ -9,5 +9,8 @@ varve-types = { path = "../varve-types" }
 arrow = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+proptest = { workspace = true }
+
 [lints]
 workspace = true
