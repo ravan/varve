@@ -2833,6 +2833,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "varve"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "datafusion",
+ "tokio",
+ "varve-engine",
+]
+
+[[package]]
 name = "varve-config"
 version = "0.1.0"
 dependencies = [
@@ -2840,6 +2850,18 @@ dependencies = [
  "serial_test",
  "thiserror",
  "toml",
+]
+
+[[package]]
+name = "varve-engine"
+version = "0.1.0"
+dependencies = [
+ "datafusion",
+ "thiserror",
+ "varve-gql",
+ "varve-index",
+ "varve-plan",
+ "varve-types",
 ]
 
 [[package]]
