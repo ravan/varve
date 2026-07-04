@@ -9,11 +9,12 @@ varve-types = { path = "../varve-types" }
 varve-gql = { path = "../varve-gql" }
 varve-index = { path = "../varve-index" }
 varve-plan = { path = "../varve-plan" }
+varve-log = { path = "../varve-log" }
+varve-config = { path = "../varve-config" }
 datafusion = { workspace = true }
 thiserror = { workspace = true }
-
-[dev-dependencies]
 tokio = { workspace = true }
+serde = { workspace = true }
 
 [lints]
 workspace = true

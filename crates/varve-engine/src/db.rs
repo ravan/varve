@@ -1,4 +1,4 @@
-use crate::clock::MonotonicClock;
+use crate::clock::{Clock, MonotonicClock};
 use datafusion::arrow::record_batch::RecordBatch;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
