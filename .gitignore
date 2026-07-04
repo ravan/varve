@@ -1,0 +1,11 @@
+# Rust
+target/
+Cargo.lock.orig
+
+# Reference checkouts (not part of this repo)
+refs/
+
+# Local tooling state
+.venv/
+.tokensave/
+.DS_Store
