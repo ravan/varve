@@ -193,6 +193,7 @@ impl Polygon {
     /// system-time >= T. Drives current/historical routing (spec §9).
     /// Requires `range_count() >= 1`.
     pub fn recency(&self) -> Instant {
+        debug_assert!(self.range_count() >= 1);
         let n = self.range_count();
         let mut recency = Instant::MIN;
         let mut valid_to = self.valid_to(n - 1);
