@@ -4,6 +4,8 @@ use thiserror::Error;
 pub enum TypeError {
     #[error("log offset {0} exceeds 48 bits")]
     OffsetOverflow(u64),
+    #[error("value cannot be used as an id: {0}")]
+    InvalidId(String),
 }
 
 const OFFSET_BITS: u32 = 48;
