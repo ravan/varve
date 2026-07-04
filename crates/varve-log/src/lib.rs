@@ -1,5 +1,27 @@
 pub mod log;
+pub mod memory;
 pub mod record;
 
 pub use log::{Log, LogError};
+pub use memory::{MemoryLog, MemoryLogFactory};
 pub use record::{LogRecord, TableEffects};
+
+use varve_config::{ComponentFactory, Registry};
+
+/// All built-in log backends, registered under kind "log".
+pub fn log_registry() -> Registry<dyn Log> {
+    let mut reg = Registry::new("log");
+    register_builtin(&mut reg, Box::new(MemoryLogFactory));
+    reg
+}
+
+/// Registers a built-in factory, panicking on a duplicate name. Builtin
+/// names are a static, distinct set fixed at compile time — a collision here
+/// is a programming error in this crate, not a runtime configuration
+/// problem, so it must never be turned into a `Result` the caller has to
+/// handle.
+fn register_builtin(reg: &mut Registry<dyn Log>, factory: Box<dyn ComponentFactory<dyn Log>>) {
+    if let Err(e) = reg.register(factory) {
+        unreachable!("built-in log factory registration must not collide: {e}");
+    }
+}

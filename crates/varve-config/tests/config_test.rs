@@ -148,3 +148,21 @@ fn override_through_non_table_intermediate_is_skipped() {
     assert_eq!(cfg.section("log").unwrap().backend(), Some("local"));
     std::env::remove_var("VARVE__LOG__BACKEND__SUB");
 }
+
+#[test]
+fn empty_section_has_no_backend_and_deserializes_defaults() {
+    use varve_config::ConfigSection;
+
+    #[derive(Deserialize, Debug, PartialEq)]
+    struct Tuning {
+        #[serde(default = "one")]
+        knob: i64,
+    }
+    fn one() -> i64 {
+        1
+    }
+
+    let empty = ConfigSection::empty();
+    assert!(empty.backend().is_none());
+    assert_eq!(empty.get::<Tuning>().unwrap(), Tuning { knob: 1 });
+}
