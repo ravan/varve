@@ -16,6 +16,7 @@
 - **Timestamps** are always `Timestamp(µs, UTC)` — `Instant` is µs since Unix epoch; Arrow columns are `Timestamp(Microsecond, Some("UTC"))`.
 - **Dependency pinning:** add to root `Cargo.toml` `[workspace.dependencies]`: `chrono = { version = "0.4", default-features = false, features = ["std"] }` and `proptest = "1"` (pin latest stable at implementation time). **The test code in this plan is the contract** — if an API sketch differs from the pinned chrono/proptest/arrow API, adapt the implementation, not the test.
 - **Scope guards:** `Op::Erase` is fully implemented and property-tested at the event level, but the GQL `ERASE` statement lands with mutation completion (slice 7; end-to-end GDPR verification slice 11). Edges, blocks, durability: later slices. New reserved words (`FOR`, `FROM`, `TO`, `ALL`, `AND`, `VALID`, `DELETE`, `BETWEEN`, `TIMESTAMP`, `DATE`, `VALID_TIME`, `SYSTEM_TIME`, `OF`) can no longer be used as property names — acceptable until slice 7's full literal/identifier grammar.
+- **Slice-1 review remediations folded in (STATUS.md "do EARLY in slice 2"):** Task 1 narrows `Value::id_bytes`'s catch-all rejection arm and adds a same-length collision test (T1). Task 6 splits the query path into a sync snapshot phase + async execution phase so `Db::query` no longer holds the `RwLock` across an await (the `#[allow(clippy::await_holding_lock)]` on `query` is DELETED), and adds the deferred tests (LiveTable all-null property / empty doc; both `UnknownColumn` paths). Multi-node INSERT atomicity (validate everything, then append — slice-1 post-review fix) is preserved through Tasks 6 and 8. Deliberately NOT done here: the reviewer's `SnapshotSource` trait seam waits for slice 4 (first second scan source — YAGNI before two impls); DELETE's write-lock-across-await is documented and dissolves in slice 3's writer loop (writes are log-serialized by design, spec D3).
 
 ## File structure
 
@@ -338,6 +339,43 @@ Expected: all pass (12 new + 15 existing).
 ```bash
 git add Cargo.toml Cargo.lock crates/varve-types/
 git commit -m "feat: temporal types — Instant, TemporalDimension, TemporalBounds"
+```
+
+- [ ] **Step 6: Slice-1 remediation (STATUS.md T1) — write the failing test**
+
+Append to the tests module in `crates/varve-types/src/value.rs`:
+```rust
+    #[test]
+    fn same_length_encodings_do_not_collide() {
+        // Int encodes to 9 bytes (tag + BE i64); an 8-byte string also encodes
+        // to 9 bytes with an IDENTICAL payload — only the tag disambiguates.
+        let i = Value::Int(0x3132_3334_3536_3738).id_bytes().unwrap(); // BE bytes == b"12345678"
+        let s = Value::Str("12345678".into()).id_bytes().unwrap();
+        assert_eq!(i.len(), s.len());
+        assert_ne!(i, s);
+    }
+```
+
+- [ ] **Step 7: Run, then narrow the rejection arm**
+
+Run: `cargo test -p varve-types value` — the new test already passes (tags exist); it pins the property. Then narrow `id_bytes`'s catch-all so a future `Value` variant forces an explicit decision — replace:
+```rust
+            other => Err(TypeError::InvalidId(format!("{other:?}"))),
+```
+with:
+```rust
+            other @ (Value::Float(_) | Value::Null) => {
+                Err(TypeError::InvalidId(format!("{other:?}")))
+            }
+```
+
+Run: `cargo test -p varve-types` — Expected: all pass (the match is now exhaustive without a wildcard).
+
+- [ ] **Step 8: Commit the remediation**
+
+```bash
+git add crates/varve-types/
+git commit -m "fix: narrow id_bytes rejection arm; pin same-length id collision test"
 ```
 
 ---
@@ -1761,8 +1799,23 @@ impl LiveTable {
 
 - `IndexError` gains `#[error("event appended out of order: system_from {got} precedes {last}")] OutOfOrderEvent { last: Instant, got: Instant }`. The `MixedPropertyTypes` message now says "(lifted with dense-union columns in slice 4)".
 - Storage: `BTreeMap<Iid, Vec<Event>>` in arrival order — reverse iteration per entity yields the `(iid, system_from desc)` scan order the roadmap requires; BTreeMap gives deterministic whole-table iteration by IID.
-- Produces `varve_plan::run_query(stmt: &QueryStmt, live: &LiveTable, now: Instant) -> Result<Vec<RecordBatch>, PlanError>` — this task hardcodes bounds to `valid: at(now), system: at(now)` (the spec §7 defaults: current time on both axes); Task 7 derives bounds from the statement's FOR clauses.
-- `varve_engine::Db` keeps compiling with an **interim** system-time source: `system_from = Instant::from_micros(tx_id)` and query `now` = latest tx counter value. Replaced by the real `MonotonicClock` in Task 8 (this keeps Task 6 reviewable on its own; slice-1 tests stay green throughout).
+- Produces the split query API in `varve-plan` (slice-1 review remediation: `Db::query` must not hold its lock across an await):
+
+```rust
+/// Sync phase: resolve + snapshot under the caller's lock. Bounds are the
+/// spec §7 defaults (at(now) on both axes) until Task 7 wires FOR clauses.
+pub fn snapshot_for_query(stmt: &QueryStmt, live: &LiveTable, now: Instant)
+    -> Result<Option<RecordBatch>, PlanError>;
+/// Async phase: DataFusion filter/projection over an OWNED snapshot —
+/// callers drop their live-table lock before awaiting this.
+pub async fn execute_query(stmt: &QueryStmt, snapshot: Option<RecordBatch>)
+    -> Result<Vec<RecordBatch>, PlanError>;
+/// One-shot convenience for tests and non-locking callers.
+pub async fn run_query(stmt: &QueryStmt, live: &LiveTable, now: Instant)
+    -> Result<Vec<RecordBatch>, PlanError>;
+```
+
+- `varve_engine::Db::query` snapshots under the read guard in an inner block, drops it, then awaits `execute_query` — its `#[allow(clippy::await_holding_lock)]` is DELETED. `Db::execute` keeps the slice-1 atomicity fix: build + validate every event BEFORE the first append. Interim system-time source: `system_from = Instant::from_micros(tx_id)`, query `now` = latest tx counter value; replaced by the real `MonotonicClock` in Task 8 (keeps Task 6 reviewable on its own; slice-1 tests stay green throughout).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1906,6 +1959,18 @@ mod tests {
             t.snapshot_for_label("P", &now_bounds(50)),
             Err(IndexError::MixedPropertyTypes { .. })
         ));
+    }
+
+    // Deferred from slice 1 (STATUS.md remediation list).
+    #[test]
+    fn all_null_property_and_empty_doc_rows() {
+        let mut t = LiveTable::new();
+        t.append(put(1, 1, 1, "P", doc(&[("ghost", Value::Null)]))).unwrap();
+        t.append(put(2, 2, 2, "P", Doc::new())).unwrap();
+        let batch = t.snapshot_for_label("P", &now_bounds(50)).unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        // A property observed only as Null constrains no column type — no column.
+        assert!(batch.column_by_name("ghost").is_none());
     }
 }
 ```
@@ -2222,32 +2287,100 @@ async fn current_query_sees_only_the_latest_version() {
     let batches = run_query(&q, &live, NOW).await.unwrap();
     assert_eq!(names(&batches), vec!["Adele", "Cyd"]);
 }
-```
 
-In `crates/varve-plan/src/exec.rs`, change the signature and scan call (the filter/projection body is unchanged):
+// Deferred from slice 1 (STATUS.md remediation list): both UnknownColumn paths.
+#[tokio::test]
+async fn where_and_return_on_absent_property_are_unknown_column() {
+    let live = setup();
+    let q = query_stmt("MATCH (p:Person) WHERE p.ghost = 1 RETURN p.name");
+    assert!(matches!(
+        run_query(&q, &live, NOW).await,
+        Err(PlanError::UnknownColumn(c)) if c == "ghost"
+    ));
+    let q = query_stmt("MATCH (p:Person) RETURN p.ghost");
+    assert!(matches!(
+        run_query(&q, &live, NOW).await,
+        Err(PlanError::UnknownColumn(c)) if c == "ghost"
+    ));
+}
+```
+(Add `use varve_plan::PlanError;` to the imports.)
+
+Replace `run_query` in `crates/varve-plan/src/exec.rs` with the split API (the slice-1 review remediation — `to_df_literal` and `PlanError` stay as they are):
 ```rust
 use varve_types::{Instant, TemporalBounds, TemporalDimension};
 
-pub async fn run_query(
+/// Sync phase: resolve + snapshot under the caller's lock. Bounds are the
+/// spec §7 defaults — valid AS OF now, system AS OF now (the writer clock is
+/// monotonic, so at(now) sees exactly the current versions). Task 7 derives
+/// bounds from the statement's FOR clauses.
+pub fn snapshot_for_query(
     stmt: &QueryStmt,
     live: &LiveTable,
     now: Instant,
-) -> Result<Vec<RecordBatch>, PlanError> {
-    // Spec §7 defaults: valid time AS OF now, system time AS OF now (the
-    // writer clock is monotonic, so at(now) sees exactly the current
-    // versions). Task 7 derives bounds from the statement's FOR clauses.
+) -> Result<Option<RecordBatch>, PlanError> {
     let bounds = TemporalBounds {
         valid: TemporalDimension::at(now),
         system: TemporalDimension::at(now),
     };
     let label = stmt.pattern.label.as_deref().unwrap_or("");
-    let Some(batch) = live.snapshot_for_label(label, &bounds)? else {
+    Ok(live.snapshot_for_label(label, &bounds)?)
+}
+
+/// Async phase: DataFusion filter/projection over an OWNED snapshot — callers
+/// drop their live-table lock before awaiting this.
+pub async fn execute_query(
+    stmt: &QueryStmt,
+    snapshot: Option<RecordBatch>,
+) -> Result<Vec<RecordBatch>, PlanError> {
+    let Some(batch) = snapshot else {
         return Ok(vec![]);
     };
-    // … rest of the function unchanged …
+    let schema = batch.schema();
+    let has_col = |name: &str| schema.column_with_name(name).is_some();
+
+    let ctx = SessionContext::new();
+    let table = MemTable::try_new(schema.clone(), vec![vec![batch]])?;
+    let mut df = ctx.read_table(Arc::new(table))?;
+
+    if let Some(Expr::PropEq { prop, value, .. }) = &stmt.where_clause {
+        if !has_col(prop) {
+            return Err(PlanError::UnknownColumn(prop.clone()));
+        }
+        df = df.filter(col(prop.as_str()).eq(to_df_literal(value)))?;
+    }
+
+    let mut projection = Vec::new();
+    for item in &stmt.return_items {
+        if !has_col(&item.prop) {
+            return Err(PlanError::UnknownColumn(item.prop.clone()));
+        }
+        let out_name = item.alias.clone().unwrap_or_else(|| item.prop.clone());
+        projection.push(col(item.prop.as_str()).alias(out_name));
+    }
+    let df = df.select(projection)?;
+
+    Ok(df.collect().await?)
+}
+
+/// One-shot convenience for tests and non-locking callers.
+pub async fn run_query(
+    stmt: &QueryStmt,
+    live: &LiveTable,
+    now: Instant,
+) -> Result<Vec<RecordBatch>, PlanError> {
+    execute_query(stmt, snapshot_for_query(stmt, live, now)?).await
+}
 ```
 
-- [ ] **Step 6: Adapt varve-engine (interim counter clock)**
+Update `crates/varve-plan/src/lib.rs`:
+```rust
+pub mod exec;
+
+pub use exec::{execute_query, run_query, snapshot_for_query, PlanError};
+```
+
+- [ ] **Step 6: Adapt varve-engine (interim counter clock; lock split; atomicity preserved)**
 
 In `crates/varve-engine/src/db.rs`:
 
@@ -2257,30 +2390,48 @@ use varve_index::{Event, Op};
 use varve_types::Instant;
 ```
 
-In `execute()`, insert directly after the `tx_id` binding (BEFORE the node loop — one tx, one `system_from` shared by all its events):
+In `execute()`, KEEP the slice-1 two-phase shape (build + validate everything, then append — the post-review atomicity fix, pinned by `multi_node_insert_is_atomic_on_invalid_id`). Insert after the `tx_id` binding:
 ```rust
         // Interim system time = tx counter as µs; the real monotonic wall
         // clock lands with temporal mutations (Task 8 of the slice-2 plan).
         let system = Instant::from_micros(i64::try_from(tx_id).unwrap_or(i64::MAX));
 ```
-and inside the node loop replace `live.append(iid, node.labels.clone(), doc)?;` with:
+change the phase-1 buffer to hold events — `rows.push((iid, node.labels.clone(), doc));` becomes:
 ```rust
-            live.append(Event {
+            rows.push(Event {
                 iid,
                 system_from: system,
                 valid_from: system,
                 valid_to: Instant::END_OF_TIME,
                 op: Op::Put { labels: node.labels.clone(), doc },
-            })?;
+            });
+```
+and the phase-2 append loop becomes:
+```rust
+        let mut live = self.live.write().map_err(|_| EngineError::Poisoned)?;
+        for event in rows {
+            live.append(event)?;
+        }
 ```
 
-In `query()`, pass the interim `now`:
+Replace `query()` entirely — the guard is dropped BEFORE the await, and the `#[allow(clippy::await_holding_lock)]` and its `// v0` comment are DELETED (slice-1 review remediation):
 ```rust
+    /// Execute a read query, returning Arrow batches.
+    pub async fn query(&self, gql: &str) -> Result<Vec<RecordBatch>, EngineError> {
+        let Statement::Query(q) = varve_gql::parse(gql)? else {
+            return Err(EngineError::NotAQuery);
+        };
         let now = Instant::from_micros(
             i64::try_from(self.tx_counter.load(Ordering::SeqCst)).unwrap_or(i64::MAX),
         );
-        let live = self.live.read().map_err(|_| EngineError::Poisoned)?;
-        Ok(varve_plan::run_query(&q, &live, now).await?)
+        // Snapshot under the read lock, drop the guard, then run DataFusion
+        // on the owned batch — no await while holding the lock.
+        let snapshot = {
+            let live = self.live.read().map_err(|_| EngineError::Poisoned)?;
+            varve_plan::snapshot_for_query(&q, &live, now)?
+        };
+        Ok(varve_plan::execute_query(&q, snapshot).await?)
+    }
 ```
 
 - [ ] **Step 7: Run the full gate**
@@ -2842,11 +2993,11 @@ fn temporal_fn_columns(func: TemporalFnKind) -> (&'static str, &'static str) {
 }
 ```
 
-In `run_query`, replace `let bounds = TemporalBounds { … at(now) … };` with:
+In `snapshot_for_query`, replace `let bounds = TemporalBounds { … at(now) … };` (and its defaults comment) with:
 ```rust
     let bounds = effective_bounds(stmt, now);
 ```
-and the projection loop with:
+and in `execute_query`, replace the projection loop with:
 ```rust
     let mut projection = Vec::new();
     for item in &stmt.return_items {
@@ -2942,7 +3093,7 @@ impl MonotonicClock {
 ```
 - `TxReceipt` becomes `pub struct TxReceipt { pub tx_id: u64, pub system_time: Instant }` (pulled forward from the roadmap's slice-3 wording — the temporal e2e tests need a handle on assigned tx times; record in STATUS.md).
 - `EngineError` gains `#[error("VALID FROM {from} must be earlier than VALID TO {to}")] InvalidValidRange { from: Instant, to: Instant }`.
-- `Db::execute` semantics: one tx = one `clock.next()` `system_from` shared by all its events. INSERT: `valid_from` defaults to the tx time, `valid_to` to `END_OF_TIME`; the computed pair must satisfy `from < to`. DELETE: run `matching_iids` at `valid: at(tx_time), system: at(tx_time)`, emit one `Op::Delete` event per IID with valid `[tx_time, END_OF_TIME)`; zero matches is a successful empty tx. `Db::query` passes `clock.watermark()` as `now`.
+- `Db::execute` semantics: one tx = one `clock.next()` `system_from` shared by all its events; every event is built and validated BEFORE the first append (slice-1 atomicity fix preserved). INSERT: `valid_from` defaults to the tx time, `valid_to` to `END_OF_TIME`; the computed pair must satisfy `from < to`. DELETE: run `matching_iids` at `valid: at(tx_time), system: at(tx_time)`, emit one `Op::Delete` event per IID with valid `[tx_time, END_OF_TIME)`; zero matches is a successful empty tx — DELETE keeps a documented `#[allow(clippy::await_holding_lock)]` (writes are log-serialized by design, spec D3; dissolves in slice 3's writer loop). `Db::query` passes `clock.watermark()` as `now` and stays lock-split (Task 6).
 
 - [ ] **Step 1: Write the failing parser tests**
 
@@ -3385,7 +3536,11 @@ impl Db {
         if valid_from >= valid_to {
             return Err(EngineError::InvalidValidRange { from: valid_from, to: valid_to });
         }
-        let mut live = self.live.write().map_err(|_| EngineError::Poisoned)?;
+        // Build and validate EVERY event — including the fallible `id_bytes()?`
+        // — before the first append, so a later node's invalid `_id` can't
+        // leave earlier nodes partially committed (slice-1 review fix, pinned
+        // by `multi_node_insert_is_atomic_on_invalid_id`).
+        let mut events = Vec::with_capacity(ins.nodes.len());
         for node in &ins.nodes {
             let mut doc: Doc =
                 node.props.iter().map(|(k, v)| (k.clone(), literal_to_value(v))).collect();
@@ -3400,13 +3555,17 @@ impl Db {
                 }
             };
             let iid = Iid::derive("default", "nodes", &id.id_bytes()?);
-            live.append(Event {
+            events.push(Event {
                 iid,
                 system_from: system,
                 valid_from,
                 valid_to,
                 op: Op::Put { labels: node.labels.clone(), doc },
-            })?;
+            });
+        }
+        let mut live = self.live.write().map_err(|_| EngineError::Poisoned)?;
+        for event in events {
+            live.append(event)?;
         }
         Ok(TxReceipt { tx_id, system_time: system })
     }
@@ -3438,14 +3597,18 @@ impl Db {
     }
 
     /// Execute a read query, returning Arrow batches.
-    #[allow(clippy::await_holding_lock)]
     pub async fn query(&self, gql: &str) -> Result<Vec<RecordBatch>, EngineError> {
         let Statement::Query(q) = varve_gql::parse(gql)? else {
             return Err(EngineError::NotAQuery);
         };
         let now = self.clock.watermark();
-        let live = self.live.read().map_err(|_| EngineError::Poisoned)?;
-        Ok(varve_plan::run_query(&q, &live, now).await?)
+        // Snapshot under the read lock, drop the guard, then run DataFusion
+        // on the owned batch — no await while holding the lock.
+        let snapshot = {
+            let live = self.live.read().map_err(|_| EngineError::Poisoned)?;
+            varve_plan::snapshot_for_query(&q, &live, now)?
+        };
+        Ok(varve_plan::execute_query(&q, snapshot).await?)
     }
 }
 ```
@@ -3794,7 +3957,8 @@ git commit -m "test: end-to-end bitemporal scenarios and time-travel example"
 ## Slice exit checklist
 
 - [ ] `just check` green: fmt, clippy `-D warnings`, all workspace tests (including 2 × 10k property cases).
-- [ ] Roadmap slice-2 exit criteria verified: property tests green; the four canonical bitemporal scenarios pass end-to-end through GQL (`crates/varve/tests/temporal.rs`); slice-1 tests still green untouched (`crates/varve/tests/walking_skeleton.rs`, `examples/hello.rs`).
+- [ ] Roadmap slice-2 exit criteria verified: property tests green; the four canonical bitemporal scenarios pass end-to-end through GQL (`crates/varve/tests/temporal.rs`); slice-1 tests still green untouched (`crates/varve/tests/walking_skeleton.rs` including `multi_node_insert_is_atomic_on_invalid_id`, `examples/hello.rs`).
+- [ ] Slice-1 deferred remediations from STATUS.md verified done: `Db::query` carries NO `await_holding_lock` allow (lock-split via `snapshot_for_query`/`execute_query`); LiveTable all-null/empty-doc test and both `UnknownColumn` tests exist; `id_bytes` rejection arm narrowed + same-length collision test. Update the STATUS.md "DEFERRED slice-1 remediations" open item to RESOLVED (note: `SnapshotSource` trait seam deliberately deferred to slice 4; DELETE's documented write-lock allow dissolves in slice 3's writer loop).
 - [ ] Update `docs/plans/STATUS.md`:
   - Current position: slice 2 ✅ complete; next action = plan slice 3 (durability) via writing-plans.
   - Slice log row: `2 bitemporal core | ✅ complete | <sessions> | cargo run --example time_travel -p varve | events + Ceiling/Polygon + reference-model proptest + temporal GQL`.
