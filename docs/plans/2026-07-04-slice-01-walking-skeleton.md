@@ -1,6 +1,6 @@
 # Slice 1: Walking Skeleton — INSERT → MATCH end-to-end in memory
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** `Db::memory()` accepts `INSERT (:Person {_id: 1, name: 'Ada'})` and answers `MATCH (p:Person) WHERE p.name = 'Ada' RETURN p.name` through the real pipeline: tokenizer → parser → AST → live table → DataFusion → Arrow record batches.
 
@@ -40,7 +40,7 @@ async-trait = "0.1"
 - Produces: `varve_types::Doc` = `std::collections::BTreeMap<String, Value>` (type alias; BTreeMap for deterministic iteration).
 - Modify `TypeError`: add variant `#[error("value cannot be used as an id: {0}")] InvalidId(String)`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/varve-types/src/value.rs`:
 ```rust
@@ -72,12 +72,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-types value`
 Expected: compile error — `Value` not defined.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Prepend to `crates/varve-types/src/value.rs`:
 ```rust
@@ -139,12 +139,12 @@ pub use position::{LogPosition, TypeError};
 pub use value::{Doc, Value};
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-types`
 Expected: all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Cargo.toml crates/varve-types/
@@ -167,7 +167,7 @@ git commit -m "feat: Value type with canonical id encoding"
 - `TokenKind`: `Kw(Keyword)` (`Keyword` enum: `Insert, Match, Where, Return, As, True, False, Null` — extended in later slices), `Ident(String)` (case preserved), `Str(String)` (single-quoted, `''` escape), `Int(i64)`, `Float(f64)`, `LParen, RParen, LBrace, RBrace, Colon, Comma, Dot, Eq, Dollar, Eof`.
 - Keywords are case-insensitive. `GqlError` (thiserror): `Lex { offset, msg }`, `Parse { offset, msg }` (Parse used by Tasks 3–4).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `crates/varve-gql/src/token.rs`:
 ```rust
@@ -220,12 +220,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-gql`
 Expected: compile error.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Prepend to `crates/varve-gql/src/token.rs`:
 ```rust
@@ -387,12 +387,12 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, GqlError> {
 
 (v0: ASCII-oriented string handling — multi-byte UTF-8 inside strings passes through bytes and this is exercised properly when slice 7 adds the full literal grammar; keep a `// v0` note.)
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-gql`
 Expected: 4 passed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-gql/
@@ -447,7 +447,7 @@ pub enum Statement { Insert(InsertStmt), Query(QueryStmt) }
 
 - Produces: `varve_gql::parse(src: &str) -> Result<Statement, GqlError>`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `crates/varve-gql/src/parser.rs`:
 ```rust
@@ -488,12 +488,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-gql parser`
 Expected: compile error — modules missing.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 `crates/varve-gql/src/ast.rs`: exactly the AST from **Interfaces** above.
 
@@ -627,12 +627,12 @@ impl Parser {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-gql`
 Expected: Task-3 tests pass (tokenizer tests still green).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-gql/
@@ -649,7 +649,7 @@ git commit -m "feat: AST and INSERT parser"
 **Interfaces:**
 - Consumes/Produces: the `QueryStmt`, `NodePattern`, `Expr`, `ReturnItem` types from Task 3, via `parse()`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `parser.rs` tests:
 ```rust
@@ -687,12 +687,12 @@ Append to `parser.rs` tests:
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-gql parses_match`
 Expected: FAIL — "MATCH not implemented yet".
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Replace the `query_stmt` stub in `parser.rs`:
 ```rust
@@ -746,12 +746,12 @@ Replace the `query_stmt` stub in `parser.rs`:
     }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-gql`
 Expected: all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-gql/
@@ -788,7 +788,7 @@ impl LiveTable {
 - `IndexError` (thiserror): `MixedPropertyTypes { property: String }`, `Arrow(#[from] arrow::error::ArrowError)`.
 - v0 notes: label filtering happens here (seed of scan-level label pruning, spec §10); `Value::Bytes`/`Value::Null` properties: Bytes → `IndexError::MixedPropertyTypes` is NOT the right error — Bytes maps to `Binary` column; Null values are just nulls in whatever column type wins.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `crates/varve-index/src/live.rs`:
 ```rust
@@ -843,12 +843,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-index`
 Expected: compile error.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Prepend to `crates/varve-index/src/live.rs`:
 ```rust
@@ -998,12 +998,12 @@ impl LiveTable {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-index`
 Expected: 3 passed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-index/
@@ -1026,7 +1026,7 @@ git commit -m "feat: LiveTable v0 with label-filtered Arrow snapshots"
 - `PlanError` (thiserror): `DataFusion(#[from] datafusion::error::DataFusionError)`, `Index(#[from] varve_index::IndexError)`, `UnknownColumn(String)`.
 - v0: `GraphPlan` is implicit (Scan→Filter→Project expressed directly via the DataFrame API); the named `GraphPlan` IR is introduced in slice 2 when temporal scopes need a home. This is a deliberate YAGNI: don't build the IR before there are two consumers.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/varve-plan/tests/exec_test.rs`:
 ```rust
@@ -1080,12 +1080,12 @@ async fn unknown_label_returns_empty() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-plan`
 Expected: compile error.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 `crates/varve-plan/src/exec.rs`:
 ```rust
@@ -1153,12 +1153,12 @@ pub async fn run_query(stmt: &QueryStmt, live: &LiveTable) -> Result<Vec<RecordB
 
 (API sketch note: `MemTable::try_new`, `SessionContext::read_table`, `DataFrame::{filter,select,collect}` have been stable across many DataFusion majors; adapt names if the pinned version differs — tests are the contract.)
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-plan`
 Expected: 2 passed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-plan/ Cargo.toml
@@ -1196,7 +1196,7 @@ impl Db {
 - `varve` facade crate: `pub use varve_engine::{Db, EngineError, TxReceipt}; pub use datafusion::arrow::record_batch::RecordBatch;`
 - Internals: `Db` holds `Arc<RwLock<LiveTable>>` (std RwLock; async wrapper when the writer loop arrives in slice 3) + `AtomicU64` tx counter + `AtomicU64` generated-id counter. `_id` prop used for IID derivation when present; else generated id `Value::Str(format!("varve:gen:{n}"))` inserted into the doc. `_id` is removed from... **no** — `_id` stays in the doc as a property (it is user data).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/varve/tests/walking_skeleton.rs`:
 ```rust
@@ -1238,12 +1238,12 @@ async fn query_via_execute_is_error_and_vice_versa() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve`
 Expected: compile error.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 `crates/varve-engine/src/db.rs`:
 ```rust
@@ -1363,17 +1363,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 (Add `arrow` + `datafusion` to `crates/varve/Cargo.toml` deps for the test/example; `tokio` with `macros` as dev-dependency.)
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve && cargo run --example hello -p varve`
 Expected: 3 tests pass; example prints a one-row table with "Ada".
 
-- [ ] **Step 5: Run the full gate**
+- [x] **Step 5: Run the full gate**
 
 Run: `just check`
 Expected: green. Fix fmt/clippy fallout in this task's code only.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/
@@ -1384,6 +1384,6 @@ git commit -m "feat: Db facade — walking skeleton complete, INSERT→MATCH end
 
 ## Slice exit checklist
 
-- [ ] `just check` green; walking-skeleton test + hello example demonstrably work.
-- [ ] Update `docs/plans/STATUS.md`: slice 1 complete; demo = `cargo run --example hello -p varve`; record the DataFusion/arrow versions actually pinned and any API adaptations made (they feed the slice-2 plan).
-- [ ] Tick slice 1 boxes in `docs/plans/varve-v1-roadmap.md`; commit.
+- [x] `just check` green; walking-skeleton test + hello example demonstrably work.
+- [x] Update `docs/plans/STATUS.md`: slice 1 complete; demo = `cargo run --example hello -p varve`; record the DataFusion/arrow versions actually pinned and any API adaptations made (they feed the slice-2 plan).
+- [x] Tick slice 1 boxes in `docs/plans/varve-v1-roadmap.md`; commit.

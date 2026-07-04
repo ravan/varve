@@ -91,16 +91,16 @@ resolves from TOML by name; unknown name error lists available implementations.
 The whole pipeline with minimal versions of every stage — real parser, real plan, real
 DataFusion execution, real live table — no temporal semantics, no durability, nodes only:
 
-- [ ] `varve-types`: `Value` enum (Bool/Int/Float/Str/Bytes/Null) ↔ Arrow scalar mapping.
-- [ ] `varve-gql`: tokenizer; parser for `INSERT (:Label {k: lit, …})`,
+- [x] `varve-types`: `Value` enum (Bool/Int/Float/Str/Bytes/Null) ↔ Arrow scalar mapping.
+- [x] `varve-gql`: tokenizer; parser for `INSERT (:Label {k: lit, …})`,
       `MATCH (v:Label) [WHERE v.prop = lit] RETURN v.prop [AS name], …`; AST module.
-- [ ] `varve-index`: `LiveTable` v0 — append node events, snapshot → `RecordBatch`
+- [x] `varve-index`: `LiveTable` v0 — append node events, snapshot → `RecordBatch`
       (dynamic schema from observed properties); `_iid`, `_labels`, property columns.
-- [ ] `varve-plan`: AST → `GraphPlan` v0 (`Scan{label}` → `Filter` → `Project`) → DataFusion
+- [x] `varve-plan`: AST → `GraphPlan` v0 (`Scan{label}` → `Filter` → `Project`) → DataFusion
       (`MemTable` over snapshot batches, DF expressions for filter/projection).
-- [ ] `varve-engine` + `varve` facade: `Db::memory()`, `execute()` (parse → event → live
+- [x] `varve-engine` + `varve` facade: `Db::memory()`, `execute()` (parse → event → live
       table, in-memory log v0 assigns `TxId`), `query()` → `Vec<RecordBatch>`.
-- [ ] Walking-skeleton integration test + `examples/hello.rs`.
+- [x] Walking-skeleton integration test + `examples/hello.rs`.
 
 **Exit criteria:** integration test: insert 3 people, `MATCH (p:Person) WHERE p.name = 'Ada'
 RETURN p.name` returns 1 row through the full pipeline; `cargo run --example hello` prints it.

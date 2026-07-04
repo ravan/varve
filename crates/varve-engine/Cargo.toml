@@ -1,0 +1,16 @@
+[package]
+name = "varve-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+varve-types = { path = "../varve-types" }
+varve-gql = { path = "../varve-gql" }
+varve-index = { path = "../varve-index" }
+varve-plan = { path = "../varve-plan" }
+datafusion = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
