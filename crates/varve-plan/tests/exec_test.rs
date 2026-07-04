@@ -34,7 +34,7 @@ fn setup() -> LiveTable {
 
 fn query_stmt(src: &str) -> varve_gql::ast::QueryStmt {
     match varve_gql::parse(src).unwrap() {
-        Statement::Query(q) => q,
+        Statement::Query(q) => *q,
         _ => panic!("not a query"),
     }
 }
