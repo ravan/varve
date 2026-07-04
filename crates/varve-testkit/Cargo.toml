@@ -1,0 +1,13 @@
+[package]
+name = "varve-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+proptest = { workspace = true }
+varve-index = { path = "../varve-index" }
+varve-types = { path = "../varve-types" }
+
+[lints]
+workspace = true
