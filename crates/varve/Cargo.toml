@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 varve-engine = { path = "../varve-engine" }
+varve-types = { path = "../varve-types" }
 datafusion = { workspace = true }
 
 [dev-dependencies]
