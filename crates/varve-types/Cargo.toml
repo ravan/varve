@@ -1,0 +1,12 @@
+[package]
+name = "varve-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+xxhash-rust = { workspace = true }
+
+[lints]
+workspace = true
