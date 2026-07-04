@@ -46,6 +46,15 @@ impl Config {
 }
 
 impl ConfigSection {
+    /// An empty section (no keys). Used wherever config omits an optional
+    /// `[section]`; `get::<T>()` then falls back entirely to `T`'s
+    /// `#[serde(default = ...)]` values.
+    pub fn empty() -> ConfigSection {
+        ConfigSection {
+            table: toml::Table::new(),
+        }
+    }
+
     pub fn backend(&self) -> Option<&str> {
         self.table.get("backend").and_then(|v| v.as_str())
     }
