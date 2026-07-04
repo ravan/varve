@@ -5,21 +5,28 @@
 
 ## Current position
 
-- **Current slice:** 2 (bitemporal core) — ✅ COMPLETE (2026-07-04, 1 session, SDD).
-  Every mutation is now an immutable bitemporal event; queries resolve visibility through
-  ported XTDB Ceiling/Polygon and answer `FOR VALID_TIME`/`FOR SYSTEM_TIME` time-travel,
-  retroactive corrections, and `DELETE` end-to-end through GQL. A naive `varve-testkit`
-  reference model proves the engine correct on 10k randomized histories/CI (200k nightly).
-  Demo: `cargo run --example time_travel -p varve`.
-- **Next action:** generate the slice-3 detailed plan (durability: pluggable log, group commit,
-  crash safety — spec §6) with the writing-plans skill from the roadmap entry + spec, commit
-  it, then execute. Slice 3 is where the writer loop log-serializes writes (dissolves the
-  documented single-writer clock assumption and DELETE's `await_holding_lock` — see decisions).
+- **Current slice:** 3 (durability: log, group commit, crash safety) — ✅ COMPLETE
+  (2026-07-05, 1 session, SDD, 12 tasks). Writes now flow through a log-serialized writer loop
+  with group commit onto a pluggable `Log` (new `varve-log` crate: `Log` trait + prost record
+  envelope + `memory`/`local` backends — CRC32C frames, fsync-before-ack, torn-tail recovery).
+  The loop resolves DML serially, group-commits to the log, applies to the live index ONLY after
+  durability, then acks — so an acked tx is both durable and visible, and concurrent `execute()`
+  is now supported (slice-2 single-writer caveat + DELETE `await_holding_lock` dissolved).
+  `Db::open(Config)` selects the backend by registry name and replays the log into the live index
+  on startup. A `kill -9` crash matrix in `varve-testkit` proves the recovery contract.
+  Demo: `cargo run --release --example write_bench -p varve`.
+- **Next action:** generate the slice-4 detailed plan (blocks & persisted scan — flush Arrow
+  blocks + hash-trie meta to object storage, persisted `BitemporalScan`, restart from manifest —
+  spec §9) with the writing-plans skill from the roadmap entry + spec, commit it, then execute.
+  Slice 4 depends on slice 3's log (block manifest = commit point; replay-from-watermark trims
+  the log). `BuildContext` factory param may finally be needed there (cache tiers) — see open items.
+- **Slice 2 (bitemporal core):** ✅ COMPLETE (2026-07-04). Events + XTDB Ceiling/Polygon port +
+  temporal GQL. Demo: `cargo run --example time_travel -p varve`.
 - **Slice 1 (walking skeleton):** ✅ COMPLETE (2026-07-04). INSERT → MATCH end-to-end in memory.
-  Demo: `cargo run --example hello -p varve` (still green under slice 2's "AS OF now").
+  Demo: `cargo run --example hello -p varve` (still green under slice 3's writer loop).
 - **Detailed plans ready:** slice 0 ✅ (done) · slice 1 ✅ (done) · slice 2 ✅ (done) ·
-  slices 3–11 generated just-in-time from the roadmap (writing-plans skill) at each
-  slice's start.
+  slice 3 ✅ (done) · slices 4–11 generated just-in-time from the roadmap (writing-plans skill)
+  at each slice's start.
 
 ## Environment facts (verify before relying on)
 
@@ -42,13 +49,74 @@
   dates were unified, an initial commit was squashed into the design-spec commit. Content was
   verified 100% intact each time, but this silently orphans any recorded SHAs. If you record
   base commits for review tooling, re-resolve them from `git log` after any long agent run.
+- **Dependency pins (slice 3, verified live 2026-07-04):** `prost = "0.14"` (resolved 0.14.4 —
+  derive-only, NO protoc/build.rs), `crc32c = "0.6"` (0.6.8), `tempfile = "3"` (3.27.0, dev). tokio
+  workspace features grew to `["rt-multi-thread","macros","sync","time"]` (writer-loop channels +
+  group-commit window timer). `varve-log` declares a `fault-injection = []` feature (crash hooks);
+  it is enabled workspace-wide only via `varve-testkit`'s dep (feature unification), inert unless
+  `VARVE_CRASH_TRIGGER` names an armed file — downstream consumers of `varve` never enable it.
 - Gate: `just check` = `cargo fmt --all --check` + `cargo clippy --workspace --all-targets
   -- -D warnings` + `cargo test --workspace`. Same three commands run in CI (`.github/workflows/ci.yml`).
+  CI gained a `crash-matrix` job (slice 3): `cargo test -p varve-testkit --release --test
+  crash_recovery` with `VARVE_CRASH_ITERS=100` (default 3 in the normal `check` run); gated
+  `!= 'schedule'`. `just crash` runs it at 10 iterations locally.
 - `Cargo.lock` IS committed (workspace ships binaries; `xxhash-rust` defines the on-disk `Iid`
   byte format, so it is pinned). `.superpowers/` is SDD scratch (self-ignored).
 
 ## Decisions made during implementation
 
+- **2026-07-05 (slice 3) writer loop = the serialization point (spec §3, D3):** `Db::execute`
+  parses + submits to a bounded mpsc queue (`SUBMISSION_QUEUE_LEN = 256`); a dedicated tokio task
+  assigns `(tx_id, system_time)`, resolves DML SERIALLY (tx N sees tx N−1), group-commits a batch
+  to the `Log` (window OR size trigger OR channel-close), applies events to the `LiveTable` **only
+  after** the batch is durable, then acks. So an acked tx is both durable AND visible
+  (read-your-writes), and queries never observe un-durable data. A reading statement (v1: `DELETE`)
+  flushes the staged batch first so its snapshot includes every earlier tx. This dissolved slice
+  2's single-writer clock caveat and DELETE's `#[allow(await_holding_lock)]` — concurrent
+  `execute()` is now supported and tested (`varve-engine/tests/concurrency.rs`, 50 concurrent).
+- **2026-07-05 (slice 3) failed append ⇒ clean rollback:** nothing was applied, so a failed durable
+  append acks `EngineError::CommitFailed` to every tx in the batch and the loop continues with
+  consistent state. `LocalLog` restores its file to the pre-batch length (poisons itself if the
+  restore fails). The apply-after-durable ordering makes an apply-failure-after-durable path
+  provably unreachable today (LiveTable strict-`<` monotonicity + monotonic assign order) — see
+  open items for the scheduled defense-in-depth.
+- **2026-07-05 (slice 3) positions per-record; batch = durability unit:** `Log::append(Vec<LogRecord>)`
+  durably writes all records with ONE fsync (later: one S3 PUT) and returns the first record's
+  `LogPosition`. One record = one tx, so tx atomicity holds even if a torn batch leaves a durable
+  prefix. `LocalLog` frame = `len u32 LE · crc32c u32 LE · payload`; segment file `{first_pos:016x}.vseg`.
+- **2026-07-05 (slice 3) envelope = protobuf (prost derive, no protoc); effects = per-table Arrow IPC:**
+  `LogRecord { tx_id, system_time_us, user, effects }` (`user` empty in v1). Docs+labels ride as ONE
+  nullable `payload` Binary column via a canonical byte codec owned by us (golden-tested in
+  varve-types). The Event↔Arrow-IPC codec lives in `varve-index` (owns `Event`), keeping `varve-log`
+  payload-agnostic. Arrow IPC bytes are deliberately NOT golden-pinned (no cross-version guarantee)
+  — round-trip + proptest instead. The canonical Value/Doc codec + protobuf wire ARE golden-pinned.
+- **2026-07-05 (slice 3) generated ids now durable:** `varve:gen:{tx_id}:{ordinal}` replaces slice-1's
+  process-local `varve:gen:{n}` (which reset on restart). `tx_id` is recovered from the log, so
+  uniqueness survives restarts (pinned by `replay_recovers_max_tx_id_across_a_burned_id_gap`).
+- **2026-07-05 (slice 3) `Clock` is now a pluggable trait + `Registries` aggregate landed:**
+  `varve_engine::Clock` (builtin `system` = the existing `MonotonicClock`, gaining `advance_to(floor)`
+  for recovery). `Registries { log, clock }` + `with_builtins()` in varve-engine; `Db::open_with(&config,
+  &registries)` is the embedder extension point (spec §4). Discharges the slice-2 "pluggable Clock
+  arrives with durability config" + slice-0 "Registries aggregate deferred to varve-engine" decisions.
+- **2026-07-05 (slice 3) recovery = pure fold over the log:** `Db::open` replays `log.tail(ZERO)` into
+  a fresh `LiveTable`; `next_tx_id = max(record.tx_id)` (NOT a count — a failed resolve burns a tx_id,
+  so the on-disk sequence can have gaps); `clock.advance_to(max system_time)` floors post-restart txs
+  after history. An effect for any table other than `nodes` is a hard `UnknownTable` error (future-format
+  guard). Block-manifest replay-from-watermark arrives in slice 4.
+- **2026-07-05 (slice 3) DEVIATION — `group_commit_max_bytes` is an integer byte count** (default
+  `8388608`). The spec §4 sketch shows the string `"8MiB"`; human-size parsing is config polish
+  deferred to the server slice (9). `group_commit_window_ms` default 15; `Db::memory()` uses window = 0
+  (no fsync to amortize — keeps embedded in-memory latency at slice-2 levels).
+- **2026-07-05 (slice 3) crash contract formalized (design decision 8):** two feature-gated hooks in
+  `LocalLog::append` (`pre-append`, `post-append`) armed via a trigger file; the child announces
+  `CRASH_POINT <name>` and parks; the parent delivers a real `kill -9`. A tx killed BEFORE durability
+  never surfaces; a durable-but-unacked tx (post-append) MAY surface after restart — the standard WAL
+  contract (client saw no ack, must treat the tx as unknown). No lock file on the local log dir
+  (exactly-one-writer enforced by deployment; slice 10 adds a best-effort `writer.json` guard).
+- **2026-07-05 (slice 3) write-throughput smoke bench** (Apple M3 Max, macOS Darwin 25.3.0 arm64,
+  `cargo run --release --example write_bench`, 4000 txs / 8 workers): **memory 6226 tx/s** (642 ms);
+  **local (fsync) 340 tx/s** (11.78 s) — group-commit-bound (real fsync + 15 ms window). Smoke number,
+  not a benchmark (that's slice 11).
 - **2026-07-04 (slice 2) deps pinned:** `chrono = "0.4"` resolved 0.4.45 (already in-tree
   transitively; workspace pin unified it), `proptest = "1"` resolved 1.11.0. Both in root
   `[workspace.dependencies]`; existing `datafusion 54.0.0 / arrow 58.3.0` pins carried forward.
@@ -156,10 +224,29 @@
   unlabeled `MATCH (p) …` returns empty not error (revisit when patterns expand); WHERE/RETURN on
   an all-absent property errors (`UnknownColumn`) rather than yielding null/0 rows — mild GQL
   deviation, revisit slice 7; `Db` derives neither `Clone` nor `Debug` (slice 9, query-node handles).
-- **Deferred slice-0 minors (do before the API grows consumers):** rustdoc on the public
-  `varve-config` API (`Config`, `ConfigSection`, `ConfigError`, `Registry`, `ComponentFactory`,
-  `RegistryError`); `Config::from_file` / `ConfigError::Io` have no direct test; `BuildContext`
-  factory param still deferred (revisit slice 3 — it is a trait break, cheapest before backends exist).
+- **~~Deferred slice-0 minors (rustdoc + `from_file` test)~~ — RESOLVED** 2026-07-05 (slice 3, Task 10,
+  `e5b4519`): full rustdoc sweep on the public `varve-config` API (`Config`/`ConfigSection`/`ConfigError`/
+  `Registry`/`ComponentFactory`/`RegistryError`), `cargo doc` warning-free; `Config::from_file` /
+  `ConfigError::Io` now directly tested (`config_test.rs::from_file_reads_and_missing_file_is_io_error`).
+  STILL DEFERRED: `BuildContext` factory param — config-only factories still suffice (`log/local` gets
+  its dir from `[log.local]`). Revisit at slice 4/5 when a factory genuinely needs another *component*
+  (e.g. cache tiers) — it is a trait break, cheapest before more backends exist.
+- **Slice-3 fast-follows (non-blocking; whole-branch review triaged, verdict READY TO MERGE):**
+  - **T9 apply-failure defense-in-depth (RECOMMENDED, schedule for slice 10):** `writer.rs::flush` on an
+    apply-failure-after-durable-append acks `CommitFailed` and keeps serving — but that path is PROVABLY
+    UNREACHABLE today (LiveTable global strict-`<` monotonicity + the writer's monotonic serial assign
+    order ⇒ `OutOfOrderEvent` cannot fire). Make apply-failure FATAL (stop the writer / mark unavailable)
+    when slice 10's multi-writer or per-entity monotonicity weakens that invariant — else a durable tx
+    could be acked as failed (false-negative ack that only a restart heals).
+  - **T5 `read_range_sync` early-return (defer):** dropped the reference's `position >= to` early break, so
+    a bounded `read_range` scans every frame in every segment and a corrupt frame beyond `to` surfaces as
+    `Corrupt`. Output-equivalent for valid data; full replay uses `tail(ZERO..MAX)` so it's unaffected.
+    Restore the early break when a real bounded `read_range` caller lands (slice 9 query-node tailing).
+  - **4 GiB `len() as u32` truncation (defer, forward-hardening):** `value.rs::write_len_prefixed` and
+    `codec.rs::encode_put_payload` silently truncate a >4 GiB value/label/doc with no `Result` to signal.
+    Unreachable in v1 (statements come from parsed GQL). Harden both together when it can matter.
+  - **T9 `flush` clones every `LogRecord`** (incl. `arrow_ipc`) to build the append arg — doubles peak IPC
+    memory for large batches. Move the record out of `Staged` (apply needs only events/receipt/ack). Efficiency.
 
 ## Slice log
 
@@ -168,7 +255,7 @@
 | 0 foundation | ✅ complete | 1 | `just check` / `cargo test --workspace` (22 tests) | workspace + `varve-types` (Iid, LogPosition) + `varve-config` (Config, Registry, nested/coerced env overrides) + CI |
 | 1 walking skeleton | ✅ complete | 1 | `cargo run --example hello -p varve` | INSERT→MATCH e2e in memory; +`varve-gql`(lexer/parser/AST), `varve-index`(LiveTable→Arrow), `varve-plan`(DataFusion), `varve-engine`(Db), `varve` facade; datafusion 54/arrow 58 pinned; 44 workspace tests |
 | 2 bitemporal core | ✅ complete | 1 | `cargo run --example time_travel -p varve` | events + XTDB Ceiling/Polygon port + per-entity resolve; `varve-testkit` reference model + proptest equivalence (10k CI / 200k nightly); temporal GQL (`FOR VALID_TIME`/`SYSTEM_TIME`, `INSERT … VALID`, `MATCH … DELETE`, history fns); `MonotonicClock`; `TxReceipt.system_time`; lock-split query; ~125 workspace tests |
-| 3 durability (log) | not started | – | – | no detailed plan yet; env-override decision due here |
+| 3 durability (log) | ✅ complete | 1 | `cargo run --release --example write_bench -p varve` | `varve-log` crate: `Log` trait + prost envelope + `memory`/`local` backends (CRC32C frames, fsync-before-ack, torn-tail recovery) + writer loop group commit + `Db::open` replay + pluggable `Clock`/`Registries` + `kill -9` crash matrix; bench memory 6226 / local 340 tx/s (M3 Max); 181 workspace tests |
 | 4 blocks & persisted scan | not started | – | – | no detailed plan yet |
 | 5 s3 backends & caches | not started | – | – | no detailed plan yet |
 | 6 edges & traversal | not started | – | – | no detailed plan yet |

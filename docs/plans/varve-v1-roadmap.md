@@ -141,20 +141,24 @@ just `AS OF now`).
 
 **Sessions:** 2. **Depends:** slice 2.
 
-- [ ] `varve-log`: `Log` trait (append batch → position; read range; tail from position),
+- [x] `varve-log`: `Log` trait (append batch → position; read range; tail from position),
       protobuf record envelope (`prost`): `{tx_id, system_time, effects: per-table Arrow IPC}`;
       registry factories `log/memory`, `log/local`.
-- [ ] Formalize slice-1 in-memory log onto the trait.
-- [ ] Local log: segmented append-only files, CRC32C per record, fsync-before-ack,
+- [x] Formalize slice-1 in-memory log onto the trait.
+- [x] Local log: segmented append-only files, CRC32C per record, fsync-before-ack,
       torn-tail truncation on open (test: corrupt tail bytes → clean recovery).
-- [ ] Group commit: bounded submission queue; window (`group_commit_window_ms`, default 15)
+- [x] Group commit: bounded submission queue; window (`group_commit_window_ms`, default 15)
       + size (`group_commit_max_bytes`) batching; all txs in a batch acked after one durable
       append.
-- [ ] Recovery: `Db::open` replays log into live index from position 0 (blocks arrive in
+- [x] Recovery: `Db::open` replays log into live index from position 0 (blocks arrive in
       slice 4); `TxReceipt { tx_id, system_time }` returned from `execute`.
-- [ ] Crash harness in `varve-testkit`: spawn child process doing writes, `kill -9` at
+      _(TxReceipt was already delivered in slice 2; replay recovers `next_tx_id = max(tx_id)`
+      and floors the clock via `Clock::advance_to`.)_
+- [x] Crash harness in `varve-testkit`: spawn child process doing writes, `kill -9` at
       injected fault points (pre-append, post-append-pre-ack, post-ack), restart, assert:
       every acked tx present, no unacked tx visible, log parses cleanly.
+      _("no unacked tx visible" formalized per design decision 8: a tx killed BEFORE durability
+      never surfaces; a durable-but-unacked tx MAY surface after restart — standard WAL contract.)_
 
 **Exit criteria:** crash matrix green (run 100× in CI without flake); write throughput
 smoke bench recorded in STATUS.md; config selects `log = "local"` vs `"memory"` via registry.

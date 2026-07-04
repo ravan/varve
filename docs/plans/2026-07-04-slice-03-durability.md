@@ -97,7 +97,7 @@ The log stores each Put event's labels+doc as opaque bytes inside an Arrow Binar
   - `TypeError::MalformedEncoding(String)` — new variant: `#[error("malformed canonical encoding: {0}")]`.
 - NOTE: these tags are unrelated to `Value::id_bytes()`'s tags (that is a hash-input encoding for IID derivation) — a code comment must say so at both sites to prevent future conflation.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to the `tests` module in `crates/varve-types/src/value.rs`:
 
@@ -180,12 +180,12 @@ Append to the `tests` module in `crates/varve-types/src/value.rs`:
 
 The test module also needs `use super::*;` (already present).
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-types value`
 Expected: compile error — `encode_doc` / `encode_into` not defined.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add `TypeError::MalformedEncoding` in `crates/varve-types/src/position.rs`:
 
@@ -346,12 +346,12 @@ Also add a mirror comment on `id_bytes` in `value.rs` (above the existing doc co
     /// hash input, never decoded.
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-types`
 Expected: all pass (existing + 4 new).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-types/
@@ -447,7 +447,7 @@ pub trait Log: Send + Sync {
 }
 ```
 
-- [ ] **Step 1: Workspace + crate scaffolding**
+- [x] **Step 1: Workspace + crate scaffolding**
 
 Root `Cargo.toml` — change the tokio line and add three deps in `[workspace.dependencies]`:
 
@@ -500,7 +500,7 @@ pub use log::{Log, LogError};
 pub use record::{LogRecord, TableEffects};
 ```
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 In-module tests in `crates/varve-log/src/record.rs`:
 
@@ -569,12 +569,12 @@ Append to the `tests` module in `crates/varve-types/src/position.rs`:
     }
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Run: `cargo test -p varve-types position && cargo test -p varve-log`
 Expected: compile errors — `ZERO`/`advance` missing; `varve-log` modules missing.
 
-- [ ] **Step 4: Write minimal implementation**
+- [x] **Step 4: Write minimal implementation**
 
 `crates/varve-types/src/position.rs` — add inside `impl LogPosition`:
 
@@ -637,12 +637,12 @@ impl LogRecord {
 
 `crates/varve-log/src/log.rs`: exactly the `LogError` + `Log` trait from **Interfaces** above (with `use crate::record::LogRecord;` and `use varve_types::LogPosition;`).
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p varve-types && cargo test -p varve-log`
 Expected: all pass (3 new record tests, 1 new position test).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add Cargo.toml crates/varve-types/ crates/varve-log/
@@ -669,7 +669,7 @@ Formalizes slice 1's "in-memory log v0" (which was just a tx counter in `Db`) on
   - `varve_log::log_registry() -> Registry<dyn Log>` — kind `"log"`, builtins registered (this task: `memory`; Task 5 adds `local`).
   - `varve_config::ConfigSection::empty() -> ConfigSection` — empty table, used wherever a config omits an optional `[section]`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/varve-log/tests/memory_log.rs`:
 
@@ -772,12 +772,12 @@ fn empty_section_has_no_backend_and_deserializes_defaults() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p varve-log --test memory_log && cargo test -p varve-config`
 Expected: compile errors — `MemoryLog`, `log_registry`, `ConfigSection::empty` missing.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 `crates/varve-config/src/config.rs` — add inside `impl ConfigSection`:
 
@@ -894,12 +894,12 @@ fn register_builtin(
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p varve-log && cargo test -p varve-config`
 Expected: all pass (5 memory-log tests, 1 new config test).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-log/ crates/varve-config/
@@ -938,7 +938,7 @@ The bridge between the engine's `Event` structs and the envelope's per-table `ar
 - **Put payload encoding:** u32 LE label count · per label: u32 LE length + UTF-8 · then `encode_doc(doc)` (Task 1). Trailing bytes after the doc are a decode error.
 - Deliberately NOT columnar docs: dense-union doc structs are slice 4's block format; the log only needs faithful round-trip for replay/follower apply, and this codec must not inherit the live table's v0 mixed-type restriction.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/varve-index/src/codec.rs` (start with the test module):
 
@@ -1158,12 +1158,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p varve-index codec`
 Expected: compile error — module/functions missing.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add to `IndexError` in `crates/varve-index/src/live.rs`:
 
@@ -1378,12 +1378,12 @@ proptest = { workspace = true }
 
 (Note: `StreamWriter::finish` then `drop(writer)` releases the `&mut buf` borrow before returning `buf`. If the pinned arrow API differs anywhere, the tests are the contract — adapt the implementation.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p varve-index`
 Expected: all pass (existing live/bitemporal tests + 6 codec tests + 1 property test at 256 cases).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-index/
@@ -1416,7 +1416,7 @@ The durable backend (spec §6 `local` row: "segmented append-only files; fsync b
 - Blocking file I/O runs inside `tokio::task::spawn_blocking`; `Inner` state sits behind `Arc<Mutex<…>>` (std Mutex, locked only inside the blocking closure).
 - v1 simplification (documented): `read_range` re-reads segment files from disk per call (`fs::read` whole segments, ≤ `segment_max_bytes` each) — reads happen at open/replay/tests only until slice 9 tails.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/varve-log/tests/local_log.rs`:
 
@@ -1552,12 +1552,12 @@ tempfile = { workspace = true }
 toml = { workspace = true }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p varve-log --test local_log`
 Expected: compile error — `LocalLog` missing.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 `crates/varve-log/src/local.rs`:
 
@@ -1962,12 +1962,12 @@ pub fn log_registry() -> Registry<dyn Log> {
 
 (`register_builtin` stays as written in Task 3.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p varve-log`
 Expected: all pass (record + memory + 5 local-log tests). Also update the Task 3 registry test if it asserted the exact available-set — it checked `contains("memory")`, which still holds.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-log/
@@ -1991,7 +1991,7 @@ The recovery behavior is already implemented inside `LocalLog::open` (Task 5 wro
   - damage in a NON-last segment → `LogError::Corrupt` (never silent truncation of committed history);
   - recovery is idempotent.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/varve-log/tests/recovery.rs`:
 
@@ -2159,17 +2159,17 @@ async fn recovery_is_idempotent() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify the pinned behavior**
+- [x] **Step 2: Run tests to verify the pinned behavior**
 
 Run: `cargo test -p varve-log --test recovery`
 Expected: all 5 pass against the Task-5 implementation. If any fails, the implementation has a recovery gap — fix `scan_segment`/`open` (likely candidates: truncation not fsynced, `expected` continuity math, or the mid-frame case) and re-run. Tests are the contract.
 
-- [ ] **Step 3: Run the full crate suite**
+- [x] **Step 3: Run the full crate suite**
 
 Run: `cargo test -p varve-log`
 Expected: all pass.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add crates/varve-log/
@@ -2224,7 +2224,7 @@ impl Registries {
 }
 ```
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to the `tests` module in `crates/varve-engine/src/clock.rs`:
 
@@ -2279,12 +2279,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p varve-engine`
 Expected: compile errors — `advance_to`, `SystemClockFactory`, `registries` missing.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 `crates/varve-engine/Cargo.toml` — add to `[dependencies]`:
 
@@ -2425,12 +2425,12 @@ pub use registries::Registries;
 
 (`db.rs` still refers to `crate::clock::MonotonicClock` — it now also needs `use crate::clock::Clock;` for the trait methods; make that one-line adjustment so the crate compiles. The full `db.rs` rework is Task 9.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p varve-engine`
 Expected: all pass (existing clock/mutations tests + 3 clock tests + 2 registries tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-engine/
@@ -2455,7 +2455,7 @@ git commit -m "feat: pluggable Clock trait and Registries aggregate"
   - `varve_plan::iids_from_snapshot(snapshot: Option<RecordBatch>, where_clause: &Option<Expr>) -> Result<Vec<Iid>, PlanError>` — async; sorted + deduplicated IIDs; no lock needed.
   - `matching_iids` is kept as the one-shot composition of the two (existing signature and tests unchanged).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `crates/varve-plan/tests/exec_test.rs`:
 
@@ -2485,12 +2485,12 @@ async fn split_matching_equals_one_shot() {
 
 (Uses the file's existing `setup()`/`query_stmt()` helpers — `setup()` seeds Ada/Bob/Cyd at system\_from µs 1–3 with open valid ranges, so bounds at µs 100 see all three; the file's `NOW` const is that same instant. Ada and Cyd have age 36 — "2 of 3 match" is the contract.)
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-plan --test exec_test split_matching`
 Expected: compile error — `matching_snapshot`/`iids_from_snapshot` not found.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `crates/varve-plan/src/exec.rs`, replace the body of `matching_iids` with the composition and add the two phases:
 
@@ -2575,12 +2575,12 @@ pub use exec::{
 };
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p varve-plan && cargo test -p varve-engine`
 Expected: all pass (the engine still calls the one-shot `matching_iids` until Task 9).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-plan/
@@ -2613,7 +2613,7 @@ The serialization point (spec §3, D3). `Db::execute` parses and submits; a dedi
   - `Db::execute` / `Db::query` signatures unchanged — every existing caller and test keeps compiling.
 - **Loop invariants (decision 1, verify in review):** (a) all resolution happens in the loop, serially; (b) a reading statement (`Delete`) resolves only after any staged batch is flushed; (c) events reach the live index only after their batch's durable append; (d) acks fire after apply; (e) a failed append acks `CommitFailed` to the whole batch and the loop continues (nothing was applied).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/varve-engine/src/writer.rs` — start with the test module:
 
@@ -2863,12 +2863,12 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p varve-engine`
 Expected: compile error — `writer` module missing.
 
-- [ ] **Step 3: Write the writer loop**
+- [x] **Step 3: Write the writer loop**
 
 `crates/varve-engine/src/writer.rs` (prepend above the test module):
 
@@ -3162,7 +3162,7 @@ fn apply(state: &WriterState, staged: &mut [Staged]) -> Result<(), String> {
 }
 ```
 
-- [ ] **Step 4: Rewrite db.rs on top of the loop**
+- [x] **Step 4: Rewrite db.rs on top of the loop**
 
 `crates/varve-engine/src/db.rs` — full replacement:
 
@@ -3313,17 +3313,17 @@ pub use db::{Db, EngineError, TxReceipt};
 pub use registries::Registries;
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p varve-engine`
 Expected: all pass — 6 in-module writer tests, the concurrency test, and every pre-existing test (`mutations.rs` unchanged: same public behavior through the loop).
 
-- [ ] **Step 6: Verify the whole workspace still holds**
+- [x] **Step 6: Verify the whole workspace still holds**
 
 Run: `cargo test --workspace`
 Expected: green — in particular `varve/tests/walking_skeleton.rs` (incl. `multi_node_insert_is_atomic_on_invalid_id` — atomic validation now lives in `resolve_insert`), `varve/tests/temporal.rs`, and both examples' test builds. `Db::memory()`'s zero window keeps latency at slice-2 levels.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/varve-engine/
@@ -3351,7 +3351,7 @@ Recovery per spec §6: "on writer start — replay log from position 0 into the 
   - Replay contract: fold `log.tail(LogPosition::ZERO)` into a fresh `LiveTable`; `next_tx_id` = max replayed `tx_id`; `clock.advance_to(max replayed system_time)` so new txs sort after history. Effects for any table other than `nodes` are a hard error (future-format guard).
   - `varve` facade re-exports: `Config`, `ConfigError` (from varve-config), `Registries`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/varve/tests/durability.rs`:
 
@@ -3529,12 +3529,12 @@ Add `tempfile` to `crates/varve-config/Cargo.toml` and `crates/varve/Cargo.toml`
 tempfile = { workspace = true }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p varve --test durability`
 Expected: compile errors — `varve::Config` not exported, `Db::open`/`Db::local` missing.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add to `crates/varve-engine/src/db.rs` (imports grow: `use crate::registries::Registries; use crate::writer::NODES_TABLE; use varve_config::{Config, ConfigError, ConfigSection, RegistryError}; use varve_index::decode_events; use varve_log::{LocalLog, Log, DEFAULT_SEGMENT_MAX_BYTES}; use varve_types::LogPosition; use std::path::Path;`):
 
@@ -3654,24 +3654,24 @@ pub use varve_types::{Instant, TemporalBounds, TemporalDimension};
 varve-config = { path = "../varve-config" }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p varve -p varve-config`
 Expected: all pass (7 durability tests + existing walking-skeleton/temporal + new config tests).
 
-- [ ] **Step 5: Rustdoc sweep on varve-config's public API**
+- [x] **Step 5: Rustdoc sweep on varve-config's public API**
 
 Discharges the slice-0 deferred item ("rustdoc on the public varve-config API … before the API grows consumers" — `Db::open_with` is that consumer). Add `///` doc comments in `crates/varve-config/src/config.rs` and `registry.rs` to every public item that lacks one — `Config` (TOML root + env overrides: `VARVE__SECTION__KEY`, `__`-nesting, bool→int→float→string coercion), `Config::from_toml_str`, `Config::from_file`, `Config::section`, `ConfigSection` (+ `backend`, `child`, `get`), `ConfigError` (variant meanings), `ComponentFactory` (contract: `name` is the registry key; `build` reads its own section), `Registry` (+ `new`, `register`, `build`, `names`), `RegistryError`. Two to four lines each, stating contract + one example key path; no behavior changes. Then:
 
 Run: `cargo doc -p varve-config --no-deps 2>&1 | grep -i warn; cargo test -p varve-config`
 Expected: no warnings, tests green.
 
-- [ ] **Step 6: Run the full gate**
+- [x] **Step 6: Run the full gate**
 
 Run: `just check`
 Expected: green (fmt, clippy `-D warnings`, full workspace).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/varve-engine/ crates/varve/ crates/varve-config/
@@ -3696,7 +3696,7 @@ Roadmap: "spawn child process doing writes, `kill -9` at injected fault points (
   - Test `crash_recovery.rs`: for each point × `VARVE_CRASH_ITERS` iterations (default 3; CI job runs 100): spawn child, wait for the `CRASH_POINT` stdout marker (30 s deadline), deliver SIGKILL, then assert per point — **pre-append:** survivors == acked (the in-flight tx never surfaces), log has exactly K records · **post-append:** acked ⊆ survivors, log has K or K+1 records (durable-but-unacked may legally surface) · **post-ack:** survivors == acked == K. In every case the log parses cleanly end-to-end (frames + protobuf + Arrow payload decode) and `Db::local` reopens successfully.
 - Feature note: `varve-testkit`'s dependency enables `fault-injection` for workspace builds via feature unification — the hooks are inert unless `VARVE_CRASH_TRIGGER` names an armed file, and downstream (non-workspace) consumers of `varve` never enable the feature.
 
-- [ ] **Step 1: Wire the manifests and write the child**
+- [x] **Step 1: Wire the manifests and write the child**
 
 `crates/varve-testkit/Cargo.toml` — replace `[dependencies]` (bin targets need regular deps) and add dev-deps:
 
@@ -3791,7 +3791,7 @@ async fn main() {
 }
 ```
 
-- [ ] **Step 2: Write the failing matrix test**
+- [x] **Step 2: Write the failing matrix test**
 
 `crates/varve-testkit/tests/crash_recovery.rs`:
 
@@ -3939,7 +3939,7 @@ async fn crash_matrix() {
 ```
 
 
-- [ ] **Step 3: Run the matrix locally**
+- [x] **Step 3: Run the matrix locally**
 
 Run: `cargo test -p varve-testkit --test crash_recovery`
 Expected: `clean_run_sanity` + `crash_matrix` pass (3 iterations × 3 points). First run will be RED until any harness/child wiring bug is fixed — iterate until deterministically green. Then run once more with more iterations to shake out flake:
@@ -3947,7 +3947,7 @@ Expected: `clean_run_sanity` + `crash_matrix` pass (3 iterations × 3 points). F
 Run: `VARVE_CRASH_ITERS=25 cargo test -p varve-testkit --release --test crash_recovery`
 Expected: green, no flake.
 
-- [ ] **Step 4: CI job + justfile recipe**
+- [x] **Step 4: CI job + justfile recipe**
 
 Append to `.github/workflows/ci.yml` (sibling of the existing jobs — the roadmap exit criterion "run 100× in CI without flake"):
 
@@ -3971,12 +3971,12 @@ crash:
     VARVE_CRASH_ITERS=10 cargo test -p varve-testkit --release --test crash_recovery
 ```
 
-- [ ] **Step 5: Run the full gate**
+- [x] **Step 5: Run the full gate**
 
 Run: `just check`
 Expected: green (the default 3-iteration matrix runs inside `cargo test --workspace` too).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/varve-testkit/ crates/varve-log/ .github/ justfile
@@ -3996,7 +3996,7 @@ Exit criterion: "write throughput smoke bench recorded in STATUS.md". A rough nu
 - Consumes: `Db::memory`, `Db::local` (public API only).
 - Produces: `cargo run --release --example write_bench -p varve` printing tx/s for the `memory` and `local (fsync)` profiles — the slice's demo command.
 
-- [ ] **Step 1: Write the bench example**
+- [x] **Step 1: Write the bench example**
 
 `crates/varve/examples/write_bench.rs`:
 
@@ -4049,22 +4049,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-- [ ] **Step 2: Run it and record the numbers**
+- [x] **Step 2: Run it and record the numbers**
 
 Run: `cargo run --release --example write_bench -p varve`
 Expected: two lines of tx/s output; `local (fsync)` is group-commit-bound (~batches of ≤8 per 15 ms window on this workload — hundreds to thousands of tx/s depending on disk). Copy both numbers into the STATUS.md update below.
 
-- [ ] **Step 3: Verify the demos still work**
+- [x] **Step 3: Verify the demos still work**
 
 Run: `cargo run --example hello -p varve && cargo run --example time_travel -p varve`
 Expected: both print their slice-1/slice-2 outputs unchanged.
 
-- [ ] **Step 4: Run the full gate one last time**
+- [x] **Step 4: Run the full gate one last time**
 
 Run: `just check`
 Expected: green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve/
@@ -4075,21 +4075,21 @@ git commit -m "feat: write-throughput smoke bench example"
 
 ## Slice exit checklist
 
-- [ ] `just check` green: fmt, clippy `-D warnings`, all workspace tests (including the 3-iteration crash matrix and both property suites).
-- [ ] Roadmap slice-3 exit criteria verified:
+- [x] `just check` green: fmt, clippy `-D warnings`, all workspace tests (including the 3-iteration crash matrix and both property suites).
+- [x] Roadmap slice-3 exit criteria verified:
   - crash matrix green and flake-checked (`VARVE_CRASH_ITERS=25` release run in Task 11; CI job runs 100),
   - write-throughput smoke bench numbers recorded in STATUS.md,
   - config selects `log = "local"` vs `"memory"` via registry (`varve/tests/durability.rs::memory_backend_via_config_and_default`, `unknown_backend_error_lists_available`).
-- [ ] Slice-2 deferrals verified dissolved: `grep -rn "await_holding_lock" crates/` returns nothing; the `db.rs` "SINGLE-WRITER" caveat comment is gone; concurrent `execute()` is tested (`varve-engine/tests/concurrency.rs`).
-- [ ] Update `docs/plans/STATUS.md`:
+- [x] Slice-2 deferrals verified dissolved: `grep -rn "await_holding_lock" crates/` returns nothing; the `db.rs` "SINGLE-WRITER" caveat comment is gone; concurrent `execute()` is tested (`varve-engine/tests/concurrency.rs`).
+- [x] Update `docs/plans/STATUS.md`:
   - Current position: slice 3 ✅ complete; next action = generate the slice-4 detailed plan (blocks & persisted scan, spec §9) with the writing-plans skill.
   - Slice log row: `3 durability (log) | ✅ complete | <sessions> | cargo run --release --example write_bench -p varve | Log trait + prost envelope + memory/local backends (CRC32C, fsync, torn-tail recovery) + writer loop group commit + Db::open replay + kill -9 crash matrix; <N> workspace tests`.
   - Record the bench numbers (memory + local tx/s, machine noted).
   - Decisions to record (from this plan's "Design decisions" section, abbreviated): writer loop resolves serially / applies after durable / acks after apply; reading DML flushes the staged batch; failed append ⇒ `CommitFailed` acks, state untouched; per-record positions, batch = durability unit; prost derive without protoc (`prost 0.14.x`, `crc32c 0.6.x`, `tempfile 3.x` resolved versions); doc/labels as canonical-binary `payload` column (columnar docs → slice 4); generated ids now `varve:gen:{tx_id}:{ordinal}` (durable); `Clock` trait + `Registries` landed (slice-0/2 deferrals discharged); `group_commit_max_bytes` is an integer (spec's `"8MiB"` string form deferred); `Db::memory()` window = 0; submission queue constant 256 (slice 10 makes it config); no local-log lock file (deployment enforces one writer); crash contract formalized (durable-but-unacked may surface).
   - Open items: mark the slice-0 "rustdoc + `Config::from_file` test" deferral RESOLVED; update the `BuildContext` item — still deferred deliberately (config-only factories suffice; revisit at slice 5 when a factory needs another component); note `fault-injection` feature unification is workspace-only.
   - Environment facts: tokio workspace features now `rt-multi-thread, macros, sync, time`; CI gained the `crash-matrix` job.
-- [ ] Tick the slice-3 checkboxes in `docs/plans/varve-v1-roadmap.md` (with parenthetical notes: TxReceipt item was already done in slice 2; "no unacked tx visible" formalized as pre-durability kills) and tick all checkboxes in this plan.
-- [ ] Commit:
+- [x] Tick the slice-3 checkboxes in `docs/plans/varve-v1-roadmap.md` (with parenthetical notes: TxReceipt item was already done in slice 2; "no unacked tx visible" formalized as pre-durability kills) and tick all checkboxes in this plan.
+- [x] Commit:
 
 ```bash
 git add docs/plans/
