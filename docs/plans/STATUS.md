@@ -8,12 +8,13 @@
 - **Current slice:** 1 (walking skeleton) — ✅ COMPLETE (2026-07-04, 1 session).
   INSERT → MATCH end-to-end in memory: tokenizer → parser → AST → LiveTable (Arrow) →
   DataFusion → Arrow RecordBatches. Demo: `cargo run --example hello -p varve`.
-- **Next action:** begin slice 2 (bitemporal core) — FIRST generate its detailed plan with
-  the writing-plans skill from the roadmap slice-2 entry + spec §5.2/§7, commit it, THEN
-  execute. Slice 2 is the correctness heart (temporal types, event model, XTDB Ceiling/Polygon
-  port, reference model + proptest). Do the deferred remediations below early in slice 2.
-- **Detailed plans ready:** slice 0 ✅ (done) · slice 1 ✅ (done) · slices 2–11 generated
-  just-in-time from the roadmap (writing-plans skill) at each slice's start.
+- **Next action:** execute `docs/plans/2026-07-04-slice-02-bitemporal-core.md` from Task 1
+  (bitemporal core: temporal types, event model, XTDB Ceiling/Polygon port, varve-testkit
+  reference model + proptest equivalence, temporal GQL). The deferred slice-1 remediations
+  below are folded into that plan (Tasks 1 and 6) — no separate pass needed.
+- **Detailed plans ready:** slice 0 ✅ (done) · slice 1 ✅ (done) · slice 2 ✅ ·
+  slices 3–11 generated just-in-time from the roadmap (writing-plans skill) at each
+  slice's start.
 
 ## Environment facts (verify before relying on)
 
@@ -97,7 +98,9 @@
 - **~~SPEC INCONSISTENCY~~ — RESOLVED** 2026-07-04 (`3e0f539`): §5.2 aligned to §5.3.
 - **~~ENV-OVERRIDE DESIGN (slice 3)~~ — RESOLVED** 2026-07-04 (`1b517e8`): nesting + scalar
   coercion implemented and tested; no longer a slice-3 decision.
-- **DEFERRED slice-1 remediations (do EARLY in slice 2, ideally in one refactor):**
+- **DEFERRED slice-1 remediations — SCHEDULED** in the slice-2 plan (2026-07-04): lock split
+  + deferred tests in Task 6, `id_bytes` narrowing in Task 1; the `SnapshotSource` trait seam
+  deliberately waits for slice 4 (first second scan source). Mark RESOLVED at slice-2 exit.
   - **`await_holding_lock` in `Db::query`** (`varve-engine/src/db.rs`): when slice 2 adds the
     temporal scan, snapshot under the lock → drop the guard → run DataFusion on the owned batch.
     The reviewer's seam: introduce a `SnapshotSource`/scan trait at `Db.live: Arc<RwLock<LiveTable>>`
@@ -127,7 +130,7 @@
 |---|---|---|---|---|
 | 0 foundation | ✅ complete | 1 | `just check` / `cargo test --workspace` (22 tests) | workspace + `varve-types` (Iid, LogPosition) + `varve-config` (Config, Registry, nested/coerced env overrides) + CI |
 | 1 walking skeleton | ✅ complete | 1 | `cargo run --example hello -p varve` | INSERT→MATCH e2e in memory; +`varve-gql`(lexer/parser/AST), `varve-index`(LiveTable→Arrow), `varve-plan`(DataFusion), `varve-engine`(Db), `varve` facade; datafusion 54/arrow 58 pinned; 44 workspace tests |
-| 2 bitemporal core | not started | – | – | no detailed plan yet |
+| 2 bitemporal core | not started | – | – | detailed plan ready (`2026-07-04-slice-02-bitemporal-core.md`, 9 tasks; slice-1 remediations folded into Tasks 1/6) |
 | 3 durability (log) | not started | – | – | no detailed plan yet; env-override decision due here |
 | 4 blocks & persisted scan | not started | – | – | no detailed plan yet |
 | 5 s3 backends & caches | not started | – | – | no detailed plan yet |

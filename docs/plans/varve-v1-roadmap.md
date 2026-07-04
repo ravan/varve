@@ -109,6 +109,7 @@ RETURN p.name` returns 1 row through the full pipeline; `cargo run --example hel
 
 ## Slice 2 — Bitemporal core (spec §5.2, §7; the correctness heart)
 
+**Detailed plan:** `docs/plans/2026-07-04-slice-02-bitemporal-core.md` ✅ written
 **Sessions:** 2–3. **Depends:** slice 1.
 
 - [ ] `varve-types`: temporal types — `Instant` (µs UTC), `END_OF_TIME`, `TemporalBounds`
