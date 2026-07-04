@@ -3,7 +3,7 @@ use datafusion::datasource::MemTable;
 use datafusion::prelude::*;
 use std::sync::Arc;
 use thiserror::Error;
-use varve_gql::ast::{Expr, Literal, QueryStmt};
+use varve_gql::ast::{Expr, Literal, QueryStmt, ReturnItem, TemporalFnKind};
 use varve_index::LiveTable;
 use varve_types::{Instant, TemporalBounds, TemporalDimension};
 
@@ -27,19 +27,41 @@ fn to_df_literal(l: &Literal) -> datafusion::prelude::Expr {
     }
 }
 
-/// Sync phase: resolve + snapshot under the caller's lock. Bounds are the
-/// spec §7 defaults — valid AS OF now, system AS OF now (the writer clock is
-/// monotonic, so at(now) sees exactly the current versions). Task 7 derives
-/// bounds from the statement's FOR clauses.
+/// Resolves the effective `TemporalBounds` for a query: per-`MATCH` clause
+/// wins, else the query-level clause, else the spec §7 default — AS OF `now`
+/// on both axes (the writer clock is monotonic, so `at(now)` sees exactly the
+/// current versions).
+fn effective_bounds(stmt: &QueryStmt, now: Instant) -> TemporalBounds {
+    TemporalBounds {
+        valid: stmt
+            .match_temporal
+            .valid
+            .or(stmt.temporal.valid)
+            .unwrap_or_else(|| TemporalDimension::at(now)),
+        system: stmt
+            .match_temporal
+            .system
+            .or(stmt.temporal.system)
+            .unwrap_or_else(|| TemporalDimension::at(now)),
+    }
+}
+
+/// (hidden column, default output name) for a `RETURN`-position temporal function.
+fn temporal_fn_columns(func: TemporalFnKind) -> (&'static str, &'static str) {
+    match func {
+        TemporalFnKind::ValidFrom => ("_valid_from", "valid_from"),
+        TemporalFnKind::ValidTo => ("_valid_to", "valid_to"),
+        TemporalFnKind::SystemFrom => ("_system_from", "system_from"),
+    }
+}
+
+/// Sync phase: resolve + snapshot under the caller's lock.
 pub fn snapshot_for_query(
     stmt: &QueryStmt,
     live: &LiveTable,
     now: Instant,
 ) -> Result<Option<RecordBatch>, PlanError> {
-    let bounds = TemporalBounds {
-        valid: TemporalDimension::at(now),
-        system: TemporalDimension::at(now),
-    };
+    let bounds = effective_bounds(stmt, now);
     let label = stmt.pattern.label.as_deref().unwrap_or("");
     Ok(live.snapshot_for_label(label, &bounds)?)
 }
@@ -69,11 +91,22 @@ pub async fn execute_query(
 
     let mut projection = Vec::new();
     for item in &stmt.return_items {
-        if !has_col(&item.prop) {
-            return Err(PlanError::UnknownColumn(item.prop.clone()));
-        }
-        let out_name = item.alias.clone().unwrap_or_else(|| item.prop.clone());
-        projection.push(col(item.prop.as_str()).alias(out_name));
+        let (source, out_name) = match item {
+            ReturnItem::Prop { prop, alias, .. } => {
+                if !has_col(prop) {
+                    return Err(PlanError::UnknownColumn(prop.clone()));
+                }
+                (prop.as_str(), alias.clone().unwrap_or_else(|| prop.clone()))
+            }
+            ReturnItem::TemporalFn { func, alias, .. } => {
+                let (hidden, default_name) = temporal_fn_columns(*func);
+                (
+                    hidden,
+                    alias.clone().unwrap_or_else(|| default_name.to_string()),
+                )
+            }
+        };
+        projection.push(col(source).alias(out_name));
     }
     let df = df.select(projection)?;
 
