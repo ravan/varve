@@ -415,6 +415,65 @@ mod tests {
         assert_eq!(names, vec!["y", "x"]); // reversed file order, not re-sorted
     }
 
+    /// A node event (no endpoints) and an edge event (both endpoints), both
+    /// visible under the same bounds and sharing a label, must not be
+    /// snapshotted together — endpoints are all-or-nothing per table
+    /// (spec §5.2).
+    #[test]
+    fn mixed_node_and_edge_events_error() {
+        let node_event = put(1, 1, "Ada"); // label "P", src/dst None
+        let edge_event = Event {
+            iid: iid(2),
+            system_from: us(1),
+            valid_from: us(1),
+            valid_to: Instant::END_OF_TIME,
+            src: Some(iid(10)),
+            dst: Some(iid(20)),
+            op: Op::Put {
+                labels: vec!["P".into()],
+                doc: Doc::new(),
+            },
+        };
+        let mut pairs = vec![
+            (iid(1), std::slice::from_ref(&node_event)),
+            (iid(2), std::slice::from_ref(&edge_event)),
+        ];
+        pairs.sort_by_key(|(iid, _)| *iid);
+        let err = snapshot_entities(pairs, "P", &now_bounds(10)).unwrap_err();
+        match err {
+            IndexError::Codec(msg) => {
+                assert!(msg.contains("mixed node and edge events in one snapshot"))
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// Every visible row's event carries `src`, but one is missing `dst` —
+    /// the defensive guard against a malformed edge event slipping through
+    /// (src/dst are stamped together by the writer, but this branch exists
+    /// in case that invariant is ever violated).
+    #[test]
+    fn edge_event_missing_dst_endpoint_error() {
+        let bad_edge = Event {
+            iid: iid(1),
+            system_from: us(1),
+            valid_from: us(1),
+            valid_to: Instant::END_OF_TIME,
+            src: Some(iid(10)),
+            dst: None,
+            op: Op::Put {
+                labels: vec!["KNOWS".into()],
+                doc: Doc::new(),
+            },
+        };
+        let pairs = vec![(bad_edge.iid, std::slice::from_ref(&bad_edge))];
+        let err = snapshot_entities(pairs, "KNOWS", &now_bounds(10)).unwrap_err();
+        match err {
+            IndexError::Codec(msg) => assert!(msg.contains("edge event missing dst endpoint")),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
     #[test]
     fn edge_snapshot_carries_endpoint_columns() {
         // Inline edge helper (same shape as live.rs's test helper).
