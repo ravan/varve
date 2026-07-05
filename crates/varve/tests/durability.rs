@@ -3,9 +3,13 @@ use std::path::Path;
 use varve::{Config, Db};
 
 fn local_config(dir: &Path) -> Config {
-    let dir_toml = toml_escaped(dir);
+    let log_dir = toml_escaped(&dir.join("log"));
+    let store_dir = toml_escaped(&dir.join("store"));
     Config::from_toml_str(&format!(
-        "[log]\nbackend = \"local\"\ngroup_commit_window_ms = 1\n[log.local]\ndir = {dir_toml}\n"
+        "[log]\nbackend = \"local\"\ngroup_commit_window_ms = 1\n\
+         [log.local]\ndir = {log_dir}\n\
+         [storage]\nbackend = \"local\"\n\
+         [storage.local]\ndir = {store_dir}\n"
     ))
     .unwrap()
 }
@@ -198,12 +202,15 @@ async fn unknown_backend_error_lists_available() {
 async fn open_from_config_file() {
     let dir = tempfile::tempdir().unwrap();
     let log_dir = dir.path().join("log");
+    let store_dir = dir.path().join("store");
     let config_path = dir.path().join("varve.toml");
     std::fs::write(
         &config_path,
         format!(
-            "[log]\nbackend = \"local\"\n[log.local]\ndir = {}\n",
-            toml_escaped(&log_dir)
+            "[log]\nbackend = \"local\"\n[log.local]\ndir = {}\n\
+             [storage]\nbackend = \"local\"\n[storage.local]\ndir = {}\n",
+            toml_escaped(&log_dir),
+            toml_escaped(&store_dir),
         ),
     )
     .unwrap();
