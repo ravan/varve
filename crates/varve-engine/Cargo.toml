@@ -11,10 +11,12 @@ varve-index = { path = "../varve-index" }
 varve-plan = { path = "../varve-plan" }
 varve-log = { path = "../varve-log" }
 varve-config = { path = "../varve-config" }
+varve-storage = { path = "../varve-storage" }
 datafusion = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
+bytes = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

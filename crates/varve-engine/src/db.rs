@@ -1,6 +1,8 @@
 use crate::clock::{Clock, MonotonicClock};
 use crate::registries::Registries;
-use crate::writer::{spawn_writer, Submission, WriterConfig, WriterState, NODES_TABLE};
+use crate::scan::merged_snapshot;
+use crate::state::{TableState, DEFAULT_GRAPH, NODES_TABLE};
+use crate::writer::{spawn_writer, Submission, WriterConfig, WriterState};
 use datafusion::arrow::record_batch::RecordBatch;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -13,6 +15,7 @@ use varve_gql::token::GqlError;
 use varve_index::{decode_events, IndexError, LiveTable};
 use varve_log::{LocalLog, Log, LogError, MemoryLog, DEFAULT_SEGMENT_MAX_BYTES};
 use varve_plan::PlanError;
+use varve_storage::{memory_store, CachedStore, MemoryCache, ObjectStore, StorageError};
 use varve_types::{Instant, LogPosition, TypeError};
 
 #[derive(Debug, Error)]
@@ -45,6 +48,8 @@ pub enum EngineError {
     Config(#[from] ConfigError),
     #[error("log record references unknown table '{0}'")]
     UnknownTable(String),
+    #[error(transparent)]
+    Storage(#[from] StorageError),
 }
 
 /// Group-commit tuning read from `[log]` (spec §6): a batch flushes when its
@@ -73,15 +78,26 @@ pub struct TxReceipt {
     pub system_time: Instant,
 }
 
+/// Default in-memory cache budget until `[cache]` wiring lands (Task 11).
+const DEFAULT_CACHE_MEMORY_BYTES: usize = 512 * 1024 * 1024;
+
 /// Embedded, in-process database handle. All mutations flow through the
 /// writer loop (spec §3, D3): submissions are resolved serially, group-
 /// committed to the log, applied to the live index after durability, then
 /// acked — so concurrent `execute()` calls are fully supported, and an
 /// acked transaction is both durable and visible.
 pub struct Db {
-    live: Arc<RwLock<LiveTable>>,
+    state: Arc<RwLock<TableState>>,
+    store: Arc<dyn ObjectStore>,
     clock: Arc<dyn Clock>,
     submit: mpsc::Sender<Submission>,
+}
+
+fn cached(store: Arc<dyn ObjectStore>) -> Arc<dyn ObjectStore> {
+    Arc::new(CachedStore::new(
+        store,
+        Arc::new(MemoryCache::new(DEFAULT_CACHE_MEMORY_BYTES)),
+    ))
 }
 
 impl std::fmt::Debug for Db {
@@ -101,6 +117,7 @@ impl Db {
         Db::assemble(
             live,
             Arc::new(MemoryLog::new()),
+            cached(memory_store()),
             Arc::new(MonotonicClock::new()),
             WriterConfig {
                 window: Duration::ZERO,
@@ -113,20 +130,25 @@ impl Db {
     fn assemble(
         live: LiveTable,
         log: Arc<dyn varve_log::Log>,
+        store: Arc<dyn ObjectStore>,
         clock: Arc<dyn Clock>,
         cfg: WriterConfig,
         next_tx_id: u64,
     ) -> Db {
-        let live = Arc::new(RwLock::new(live));
-        let state = WriterState {
-            live: Arc::clone(&live),
+        let mut table_state = TableState::new();
+        table_state.live = live;
+        let state = Arc::new(RwLock::new(table_state));
+        let writer_state = WriterState {
+            state: Arc::clone(&state),
+            store: Arc::clone(&store),
             clock: Arc::clone(&clock),
             log,
             next_tx_id,
         };
-        let submit = spawn_writer(state, cfg);
+        let submit = spawn_writer(writer_state, cfg);
         Db {
-            live,
+            state,
+            store,
             clock,
             submit,
         }
@@ -155,7 +177,10 @@ impl Db {
             max_bytes: tuning.group_commit_max_bytes,
         };
         let (live, next_tx_id) = replay(log.as_ref(), clock.as_ref()).await?;
-        Ok(Self::assemble(live, log, clock, cfg, next_tx_id))
+        // storage config selection + manifest recovery land in Task 11 —
+        // nothing writes to storage before Task 10's flush.
+        let store = cached(memory_store());
+        Ok(Self::assemble(live, log, store, clock, cfg, next_tx_id))
     }
 
     /// Local-filesystem database at `dir` with default tuning (spec §11
@@ -164,9 +189,13 @@ impl Db {
         let log: Arc<dyn Log> = Arc::new(LocalLog::open(dir.as_ref(), DEFAULT_SEGMENT_MAX_BYTES)?);
         let clock: Arc<dyn Clock> = Arc::new(MonotonicClock::new());
         let (live, next_tx_id) = replay(log.as_ref(), clock.as_ref()).await?;
+        // storage config selection + manifest recovery land in Task 11 —
+        // nothing writes to storage before Task 10's flush.
+        let store = cached(memory_store());
         Ok(Self::assemble(
             live,
             log,
+            store,
             clock,
             WriterConfig::default(),
             next_tx_id,
@@ -195,13 +224,10 @@ impl Db {
             return Err(EngineError::NotAQuery);
         };
         let now = self.clock.watermark();
-        // Snapshot under the read lock, drop the guard, then run DataFusion
-        // on the owned batch — no await while holding the lock (slice-2
-        // pattern).
-        let snapshot = {
-            let live = self.live.read().map_err(|_| EngineError::Poisoned)?;
-            varve_plan::snapshot_for_query(&q, &live, now)?
-        };
+        let bounds = varve_plan::effective_bounds(&q, now);
+        let label = q.pattern.label.as_deref().unwrap_or("");
+        let iid = varve_plan::iid_point(&q.where_clause, DEFAULT_GRAPH, NODES_TABLE);
+        let snapshot = merged_snapshot(&self.state, &self.store, label, &bounds, iid).await?;
         Ok(varve_plan::execute_query(&q, snapshot).await?)
     }
 }

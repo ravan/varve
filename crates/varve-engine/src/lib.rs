@@ -1,6 +1,8 @@
 pub mod clock;
 pub mod db;
 pub mod registries;
+mod scan;
+mod state;
 mod writer;
 
 pub use clock::{Clock, MonotonicClock};
