@@ -284,6 +284,8 @@ fn resolve_insert(
             system_from: system,
             valid_from,
             valid_to,
+            src: None,
+            dst: None,
             op: Op::Put {
                 labels: node.labels.clone(),
                 doc,
@@ -316,6 +318,8 @@ async fn resolve_delete(
             system_from: system,
             valid_from: system,
             valid_to: Instant::END_OF_TIME,
+            src: None,
+            dst: None,
             op: Op::Delete,
         })
         .collect())

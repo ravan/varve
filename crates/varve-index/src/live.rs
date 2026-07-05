@@ -129,6 +129,8 @@ mod tests {
             system_from: us(sf),
             valid_from: us(vf),
             valid_to: EOT,
+            src: None,
+            dst: None,
             op: Op::Put {
                 labels: vec![label.into()],
                 doc: d,
@@ -249,6 +251,8 @@ mod tests {
             system_from: us(10),
             valid_from: us(10),
             valid_to: EOT,
+            src: None,
+            dst: None,
             op: Op::Delete,
         })
         .unwrap();

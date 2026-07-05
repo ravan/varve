@@ -74,6 +74,8 @@ mod tests {
             system_from: us(sf),
             valid_from: vf,
             valid_to: vt,
+            src: None,
+            dst: None,
             op: Op::Put {
                 labels: vec!["P".into()],
                 doc,
@@ -118,6 +120,8 @@ mod tests {
             system_from: us(10),
             valid_from: us(0),
             valid_to: EOT,
+            src: None,
+            dst: None,
             op: Op::Delete,
         });
         assert_eq!(store.visible_at(iid1(), us(1), us(12)), None);
@@ -133,6 +137,8 @@ mod tests {
             system_from: us(10),
             valid_from: Instant::MIN,
             valid_to: EOT,
+            src: None,
+            dst: None,
             op: Op::Erase,
         });
         store.append(put(15, us(0), EOT, 2));

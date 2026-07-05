@@ -255,6 +255,8 @@ mod tests {
             system_from: us(sf),
             valid_from: us(sf),
             valid_to: Instant::END_OF_TIME,
+            src: None,
+            dst: None,
             op: Op::Put {
                 labels: vec!["P".into()],
                 doc,

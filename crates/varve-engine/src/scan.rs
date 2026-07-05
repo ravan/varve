@@ -104,6 +104,8 @@ mod tests {
             system_from: us(sf),
             valid_from: us(sf),
             valid_to: EOT,
+            src: None,
+            dst: None,
             op: Op::Put {
                 labels: vec!["P".into()],
                 doc,
@@ -212,6 +214,8 @@ mod tests {
             system_from: us(5),
             valid_from: us(5),
             valid_to: EOT,
+            src: None,
+            dst: None,
             op: Op::Delete,
         };
         let (state, store) = seeded(&[put(1, 1, "Ada")], std::slice::from_ref(&delete)).await;
@@ -232,6 +236,8 @@ mod tests {
             system_from: us(5),
             valid_from: Instant::MIN,
             valid_to: EOT,
+            src: None,
+            dst: None,
             op: Op::Erase,
         };
         let (state, store) = seeded(&[put(1, 1, "Ada")], std::slice::from_ref(&erase)).await;

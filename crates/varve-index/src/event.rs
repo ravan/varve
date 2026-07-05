@@ -13,11 +13,18 @@ pub enum Op {
 /// valid ranges are never stored — always derived at read time (spec §5.2).
 /// `Op::Erase` events carry `valid_from: Instant::MIN, valid_to:
 /// Instant::END_OF_TIME` by convention (an erase removes the whole entity).
+///
+/// `src`/`dst` are the edge endpoints (spec §5.2): `Some` on EVERY event of
+/// an edges table — including Delete/Erase, so adjacency families co-locate
+/// an edge's full history under its endpoint sort keys — and `None` on node
+/// events. Endpoints are immutable per edge `_id`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
     pub iid: Iid,
     pub system_from: Instant,
     pub valid_from: Instant,
     pub valid_to: Instant,
+    pub src: Option<Iid>,
+    pub dst: Option<Iid>,
     pub op: Op,
 }

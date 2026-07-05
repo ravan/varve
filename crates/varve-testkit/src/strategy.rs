@@ -78,6 +78,8 @@ pub fn arb_history(max_events: usize) -> impl Strategy<Value = Vec<Event>> {
                     system_from: Instant::from_micros(system),
                     valid_from,
                     valid_to,
+                    src: None,
+                    dst: None,
                     op,
                 }
             })

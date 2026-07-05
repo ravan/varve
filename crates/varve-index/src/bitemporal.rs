@@ -591,6 +591,8 @@ mod tests {
             system_from: us(sf),
             valid_from: vf,
             valid_to: vt,
+            src: None,
+            dst: None,
             op: Op::Put {
                 labels: vec!["P".into()],
                 doc,
@@ -604,6 +606,8 @@ mod tests {
             system_from: us(sf),
             valid_from: vf,
             valid_to: vt,
+            src: None,
+            dst: None,
             op: Op::Delete,
         }
     }
@@ -614,6 +618,8 @@ mod tests {
             system_from: us(sf),
             valid_from: TMIN,
             valid_to: EOT,
+            src: None,
+            dst: None,
             op: Op::Erase,
         }
     }
