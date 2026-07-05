@@ -257,12 +257,25 @@ fn resolve_insert(
             to: valid_to,
         });
     }
+    // v1: `MATCH … INSERT` and multi-element paths land in task 5 of slice
+    // 6 — for now every INSERT path must be a single, hop-free node.
+    if ins.match_part.is_some() {
+        return Err(EngineError::Unsupported(
+            "MATCH … INSERT lands in task 5 of slice 6".into(),
+        ));
+    }
+    if ins.paths.iter().any(|p| !p.hops.is_empty()) {
+        return Err(EngineError::Unsupported(
+            "multi-element INSERT paths land in task 5 of slice 6".into(),
+        ));
+    }
     // Build and validate EVERY node's (iid, labels, doc) triple — including
     // the fallible `id_bytes()?` — before returning, so a later node's
     // invalid `_id` can't leave earlier nodes committed (slice-1 review fix,
     // pinned by `multi_node_insert_is_atomic_on_invalid_id`).
-    let mut events = Vec::with_capacity(ins.nodes.len());
-    for (ordinal, node) in ins.nodes.iter().enumerate() {
+    let mut events = Vec::with_capacity(ins.paths.len());
+    for (ordinal, path) in ins.paths.iter().enumerate() {
+        let node = &path.start;
         let mut doc: Doc = node
             .props
             .iter()
@@ -307,7 +320,12 @@ async fn resolve_delete(
         valid: TemporalDimension::at(system),
         system: TemporalDimension::at(system),
     };
-    let label = del.pattern.label.as_deref().unwrap_or("");
+    if del.detach {
+        return Err(EngineError::Unsupported(
+            "DETACH DELETE lands in task 7 of slice 6".into(),
+        ));
+    }
+    let label = del.pattern.labels.first().map(String::as_str).unwrap_or("");
     let iid = varve_plan::iid_point(&del.where_clause, DEFAULT_GRAPH, NODES_TABLE);
     let snapshot = merged_snapshot(&state.state, &state.store, label, &bounds, iid).await?;
     let iids = varve_plan::iids_from_snapshot(snapshot, &del.where_clause).await?;

@@ -197,9 +197,10 @@ async fn split_matching_equals_one_shot() {
         system: TemporalDimension::at(varve_types::Instant::from_micros(100)),
     };
 
-    let snapshot = matching_snapshot(&q.pattern, &live, &bounds).unwrap();
+    let pattern = q.single_node().unwrap();
+    let snapshot = matching_snapshot(pattern, &live, &bounds).unwrap();
     let split = iids_from_snapshot(snapshot, &q.where_clause).await.unwrap();
-    let one_shot = matching_iids(&q.pattern, &q.where_clause, &live, &bounds)
+    let one_shot = matching_iids(pattern, &q.where_clause, &live, &bounds)
         .await
         .unwrap();
 
