@@ -7,11 +7,12 @@
 use crate::clock::Clock;
 use crate::db::{EngineError, TxReceipt};
 use crate::scan::merged_snapshot;
-use crate::state::{TableState, DEFAULT_GRAPH, NODES_TABLE};
+use crate::state::{TableKind, TableState, DEFAULT_GRAPH, EDGES_TABLE, NODES_TABLE};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
-use varve_gql::ast::{DeleteStmt, InsertStmt, Literal, Statement};
+use varve_gql::ast::{DeleteStmt, Direction, Expr, InsertStmt, Literal, NodePattern, Statement};
 use varve_index::{encode_events, Event, Op};
 use varve_log::{Log, LogRecord, TableEffects};
 use varve_types::{Doc, Iid, Instant, LogPosition, TemporalBounds, TemporalDimension, Value};
@@ -63,14 +64,22 @@ pub(crate) struct WriterState {
     pub durable_watermark: LogPosition,
 }
 
-/// One staged-but-not-yet-durable transaction: its log record, the events it
-/// will apply to the live index once durable, its receipt, and the caller's
-/// ack channel.
+/// One staged-but-not-yet-durable transaction: its log record, the per-table
+/// effect events it will apply to the live index once durable, its receipt,
+/// and the caller's ack channel.
 struct Staged {
     record: LogRecord,
-    events: Vec<Event>,
+    events: Effects,
     receipt: TxReceipt,
     ack: oneshot::Sender<Result<TxReceipt, EngineError>>,
+}
+
+/// A resolved mutation's effect events, split by target table. Applied to the
+/// live tables (nodes then edges) only after the batch is durable.
+#[derive(Default)]
+pub(crate) struct Effects {
+    pub nodes: Vec<Event>,
+    pub edges: Vec<Event>,
 }
 
 /// Distinguishes a real submission from a flush-timer wakeup in the writer
@@ -123,11 +132,7 @@ pub(crate) fn spawn_writer(mut state: WriterState, cfg: WriterConfig) -> mpsc::S
 }
 
 fn live_rows(state: &WriterState) -> usize {
-    state
-        .state
-        .read()
-        .map(|s| s.live.event_count())
-        .unwrap_or(0)
+    state.state.read().map(|s| s.live_rows()).unwrap_or(0)
 }
 
 /// The flush timer is armed once (on the OLDEST unflushed row) and left
@@ -192,46 +197,61 @@ async fn run_batch(
     }
 }
 
+/// A statement "reads" if resolving it must observe every earlier tx — so
+/// the writer flushes any staged (not-yet-applied) batch before resolving it.
+/// `MATCH … DELETE` and `MATCH … INSERT` both read the live∪persisted
+/// snapshot; a plain `INSERT` (no MATCH) does not.
 fn statement_reads(stmt: &Statement) -> bool {
-    matches!(stmt, Statement::Delete(_))
+    match stmt {
+        Statement::Delete(_) => true,
+        Statement::Insert(ins) => ins.match_part.is_some(),
+        Statement::Query(_) => false,
+    }
 }
 
-/// Assigns `(tx_id, system_time)` and resolves a statement into its effect
-/// events and log record.
+/// Assigns `(tx_id, system_time)` and resolves a statement into its per-table
+/// effect events and log record.
 async fn resolve(
     state: &mut WriterState,
     stmt: Statement,
-) -> Result<(LogRecord, Vec<Event>, TxReceipt), EngineError> {
+) -> Result<(LogRecord, Effects, TxReceipt), EngineError> {
     state.next_tx_id += 1;
     let tx_id = state.next_tx_id;
     let system = state.clock.next();
 
-    let events = match &stmt {
-        Statement::Insert(ins) => resolve_insert(ins, tx_id, system)?,
+    let effects = match &stmt {
+        Statement::Insert(ins) => resolve_insert(state, ins, tx_id, system).await?,
         Statement::Delete(del) => resolve_delete(state, del, system).await?,
         Statement::Query(_) => return Err(EngineError::NotAMutation),
     };
 
-    let effects = if events.is_empty() {
-        // e.g. a DELETE that matched nothing: still a real, durable tx.
-        Vec::new()
-    } else {
-        vec![TableEffects {
+    // One log effect batch per table that actually produced events (nodes
+    // first, then edges) — an empty tx (e.g. a DELETE that matched nothing)
+    // carries no effects but is still a real, durable tx.
+    let mut table_effects = Vec::new();
+    if !effects.nodes.is_empty() {
+        table_effects.push(TableEffects {
             table: NODES_TABLE.to_string(),
-            arrow_ipc: encode_events(&events)?,
-        }]
-    };
+            arrow_ipc: encode_events(&effects.nodes)?,
+        });
+    }
+    if !effects.edges.is_empty() {
+        table_effects.push(TableEffects {
+            table: EDGES_TABLE.to_string(),
+            arrow_ipc: encode_events(&effects.edges)?,
+        });
+    }
     let record = LogRecord {
         tx_id,
         system_time_us: system.as_micros(),
         user: String::new(),
-        effects,
+        effects: table_effects,
     };
     let receipt = TxReceipt {
         tx_id,
         system_time: system,
     };
-    Ok((record, events, receipt))
+    Ok((record, effects, receipt))
 }
 
 fn literal_to_value(l: &Literal) -> Value {
@@ -244,11 +264,19 @@ fn literal_to_value(l: &Literal) -> Value {
     }
 }
 
-fn resolve_insert(
+/// Resolves an `INSERT` (optionally `MATCH … INSERT`) into node + edge
+/// events. The MATCH part (decision 6c) resolves per-variable candidate iids
+/// against the live∪persisted snapshot, and the INSERT paths run once per
+/// Cartesian binding row — statement-local bindings extend each row as new
+/// nodes are created. Atomic: any resolution error returns `Err` before the
+/// tx is staged, so NOTHING (not even syntactically-valid earlier paths) is
+/// applied.
+async fn resolve_insert(
+    state: &WriterState,
     ins: &InsertStmt,
     tx_id: u64,
     system: Instant,
-) -> Result<Vec<Event>, EngineError> {
+) -> Result<Effects, EngineError> {
     let valid_from = ins.valid_from.unwrap_or(system);
     let valid_to = ins.valid_to.unwrap_or(Instant::END_OF_TIME);
     if valid_from >= valid_to {
@@ -257,55 +285,179 @@ fn resolve_insert(
             to: valid_to,
         });
     }
-    // v1: `MATCH … INSERT` and multi-element paths land in task 5 of slice
-    // 6 — for now every INSERT path must be a single, hop-free node.
-    if ins.match_part.is_some() {
-        return Err(EngineError::Unsupported(
-            "MATCH … INSERT lands in task 5 of slice 6".into(),
-        ));
-    }
-    if ins.paths.iter().any(|p| !p.hops.is_empty()) {
-        return Err(EngineError::Unsupported(
-            "multi-element INSERT paths land in task 5 of slice 6".into(),
-        ));
-    }
-    // Build and validate EVERY node's (iid, labels, doc) triple — including
-    // the fallible `id_bytes()?` — before returning, so a later node's
-    // invalid `_id` can't leave earlier nodes committed (slice-1 review fix,
-    // pinned by `multi_node_insert_is_atomic_on_invalid_id`).
-    let mut events = Vec::with_capacity(ins.paths.len());
-    for (ordinal, path) in ins.paths.iter().enumerate() {
-        let node = &path.start;
-        let mut doc: Doc = node
-            .props
-            .iter()
-            .map(|(k, v)| (k.clone(), literal_to_value(v)))
-            .collect();
-        let id = match doc.get("_id") {
-            Some(v) => v.clone(),
-            None => {
-                // Durable generated id: (tx_id, ordinal) replaces slice-1's
-                // process-local counter.
-                let v = Value::Str(format!("varve:gen:{tx_id}:{ordinal}"));
-                doc.insert("_id".into(), v.clone());
-                v
+
+    // 1. Resolve the match part (decision 6c): per-variable candidate iids.
+    let binding_rows: Vec<HashMap<String, Iid>> = match &ins.match_part {
+        None => vec![HashMap::new()],
+        Some(mp) => {
+            let bounds = TemporalBounds {
+                valid: TemporalDimension::at(system),
+                system: TemporalDimension::at(system),
+            };
+            let mut per_var: Vec<(String, Vec<Iid>)> = Vec::new();
+            for pattern in &mp.patterns {
+                let var = pattern.var.clone().ok_or_else(|| {
+                    EngineError::UnboundVariable("match pattern without variable".into())
+                })?;
+                let label = pattern.labels.first().map(String::as_str).unwrap_or("");
+                let where_for_var = mp
+                    .where_clause
+                    .clone()
+                    .filter(|Expr::PropEq { var: v, .. }| *v == var);
+                let point = varve_plan::iid_point(&where_for_var, DEFAULT_GRAPH, NODES_TABLE);
+                let snapshot = merged_snapshot(
+                    &state.state,
+                    &state.store,
+                    TableKind::Nodes,
+                    label,
+                    &bounds,
+                    point,
+                )
+                .await?;
+                let iids = varve_plan::iids_from_snapshot(snapshot, &where_for_var, &pattern.props)
+                    .await?;
+                per_var.push((var, iids));
             }
-        };
-        let iid = Iid::derive(DEFAULT_GRAPH, NODES_TABLE, &id.id_bytes()?);
-        events.push(Event {
-            iid,
-            system_from: system,
-            valid_from,
-            valid_to,
-            src: None,
-            dst: None,
-            op: Op::Put {
-                labels: node.labels.clone(),
-                doc,
-            },
-        });
+            // Cartesian product; any empty variable ⇒ zero binding rows ⇒ empty tx.
+            let mut rows: Vec<HashMap<String, Iid>> = vec![HashMap::new()];
+            for (var, iids) in per_var {
+                let mut next = Vec::with_capacity(rows.len() * iids.len());
+                for row in &rows {
+                    for iid in &iids {
+                        let mut r = row.clone();
+                        r.insert(var.clone(), *iid);
+                        next.push(r);
+                    }
+                }
+                rows = next;
+            }
+            rows
+        }
+    };
+
+    // 2. Per binding row, walk the INSERT paths creating events.
+    let mut effects = Effects::default();
+    let mut ordinal: usize = 0;
+    for row in binding_rows {
+        let mut bound = row; // statement-local bindings extend the row
+        for path in &ins.paths {
+            let mut prev = resolve_insert_node(
+                &path.start,
+                &mut bound,
+                &mut effects,
+                &mut ordinal,
+                tx_id,
+                system,
+                valid_from,
+                valid_to,
+            )?;
+            for (edge, end) in &path.hops {
+                let next = resolve_insert_node(
+                    end,
+                    &mut bound,
+                    &mut effects,
+                    &mut ordinal,
+                    tx_id,
+                    system,
+                    valid_from,
+                    valid_to,
+                )?;
+                let (src, dst) = match edge.direction {
+                    Direction::Out => (prev, next),
+                    Direction::In => (next, prev),
+                };
+                let mut doc: Doc = edge
+                    .props
+                    .iter()
+                    .map(|(k, v)| (k.clone(), literal_to_value(v)))
+                    .collect();
+                let id = match doc.get("_id") {
+                    Some(v) => v.clone(),
+                    None => {
+                        let v = Value::Str(format!("varve:gen:{tx_id}:{ordinal}"));
+                        doc.insert("_id".into(), v.clone());
+                        v
+                    }
+                };
+                ordinal += 1;
+                let iid = Iid::derive(DEFAULT_GRAPH, EDGES_TABLE, &id.id_bytes()?);
+                effects.edges.push(Event {
+                    iid,
+                    system_from: system,
+                    valid_from,
+                    valid_to,
+                    src: Some(src),
+                    dst: Some(dst),
+                    op: Op::Put {
+                        labels: vec![edge.label.clone()],
+                        doc,
+                    },
+                });
+                prev = next;
+            }
+        }
     }
-    Ok(events)
+    Ok(effects)
+}
+
+/// A node element inside INSERT: a bound reference `(a)` (must be bare — no
+/// labels/props) or a new node. Building the whole event before returning —
+/// including the fallible `id_bytes()?` — keeps a later node's invalid `_id`
+/// from leaving earlier events committed (atomicity, pinned by
+/// `multi_node_insert_is_atomic_on_invalid_id`).
+#[allow(clippy::too_many_arguments)]
+fn resolve_insert_node(
+    node: &NodePattern,
+    bound: &mut HashMap<String, Iid>,
+    effects: &mut Effects,
+    ordinal: &mut usize,
+    tx_id: u64,
+    system: Instant,
+    valid_from: Instant,
+    valid_to: Instant,
+) -> Result<Iid, EngineError> {
+    if let Some(var) = &node.var {
+        if let Some(iid) = bound.get(var) {
+            if !node.labels.is_empty() || !node.props.is_empty() {
+                return Err(EngineError::AlreadyBoundVariable(var.clone()));
+            }
+            return Ok(*iid);
+        }
+        if node.labels.is_empty() && node.props.is_empty() {
+            return Err(EngineError::UnboundVariable(var.clone()));
+        }
+    }
+    let mut doc: Doc = node
+        .props
+        .iter()
+        .map(|(k, v)| (k.clone(), literal_to_value(v)))
+        .collect();
+    let id = match doc.get("_id") {
+        Some(v) => v.clone(),
+        None => {
+            let v = Value::Str(format!("varve:gen:{tx_id}:{ordinal}"));
+            doc.insert("_id".into(), v.clone());
+            v
+        }
+    };
+    *ordinal += 1;
+    let iid = Iid::derive(DEFAULT_GRAPH, NODES_TABLE, &id.id_bytes()?);
+    effects.nodes.push(Event {
+        iid,
+        system_from: system,
+        valid_from,
+        valid_to,
+        src: None,
+        dst: None,
+        op: Op::Put {
+            labels: node.labels.clone(),
+            doc,
+        },
+    });
+    if let Some(var) = &node.var {
+        bound.insert(var.clone(), iid);
+    }
+    Ok(iid)
 }
 
 /// MATCH … DELETE (spec §10 DML): resolves the read side against the merged
@@ -315,12 +467,13 @@ async fn resolve_delete(
     state: &WriterState,
     del: &DeleteStmt,
     system: Instant,
-) -> Result<Vec<Event>, EngineError> {
+) -> Result<Effects, EngineError> {
     let bounds = TemporalBounds {
         valid: TemporalDimension::at(system),
         system: TemporalDimension::at(system),
     };
     if del.detach {
+        // DETACH DELETE cascade (edge removal) lands in task 7 of slice 6.
         return Err(EngineError::Unsupported(
             "DETACH DELETE lands in task 7 of slice 6".into(),
         ));
@@ -332,9 +485,17 @@ async fn resolve_delete(
     }
     let label = del.pattern.labels.first().map(String::as_str).unwrap_or("");
     let iid = varve_plan::iid_point(&del.where_clause, DEFAULT_GRAPH, NODES_TABLE);
-    let snapshot = merged_snapshot(&state.state, &state.store, label, &bounds, iid).await?;
-    let iids = varve_plan::iids_from_snapshot(snapshot, &del.where_clause).await?;
-    Ok(iids
+    let snapshot = merged_snapshot(
+        &state.state,
+        &state.store,
+        TableKind::Nodes,
+        label,
+        &bounds,
+        iid,
+    )
+    .await?;
+    let iids = varve_plan::iids_from_snapshot(snapshot, &del.where_clause, &[]).await?;
+    let nodes = iids
         .into_iter()
         .map(|iid| Event {
             iid,
@@ -345,7 +506,13 @@ async fn resolve_delete(
             dst: None,
             op: Op::Delete,
         })
-        .collect())
+        .collect();
+    // Edge cascade (DETACH DELETE) lands in task 7; a node-only DELETE emits
+    // no edge events.
+    Ok(Effects {
+        nodes,
+        edges: Vec::new(),
+    })
 }
 
 /// Durable append → apply → ack, strictly in that order (decision 1).
@@ -387,11 +554,15 @@ fn apply(state: &WriterState, staged: &mut [Staged]) -> Result<(), String> {
         .write()
         .map_err(|_| "table state lock poisoned".to_string())?;
     for s in staged.iter_mut() {
-        for event in std::mem::take(&mut s.events) {
-            // OutOfOrderEvent cannot happen here: the writer loop is the only
-            // caller of `append`, and `system` is assigned monotonically by
-            // this same loop just before the event was built.
-            shared.live.append(event).map_err(|e| e.to_string())?;
+        // OutOfOrderEvent cannot happen here: the writer loop is the only
+        // caller of `append`, and `system` is assigned monotonically by this
+        // same loop just before the events were built. Nodes then edges (per
+        // tx), routed to their own live tables.
+        for event in std::mem::take(&mut s.events.nodes) {
+            shared.nodes.live.append(event).map_err(|e| e.to_string())?;
+        }
+        for event in std::mem::take(&mut s.events.edges) {
+            shared.edges.live.append(event).map_err(|e| e.to_string())?;
         }
     }
     Ok(())
@@ -608,11 +779,11 @@ mod tests {
             Err(EngineError::CommitFailed(_))
         ));
         // Apply-after-durable: the failed batch never touched the live index.
-        assert_eq!(state.read().unwrap().live.event_count(), 0);
+        assert_eq!(state.read().unwrap().nodes.live.event_count(), 0);
 
         let second = submit(&sender, "INSERT (:P {_id: 2})");
         second.await.unwrap().unwrap();
-        assert_eq!(state.read().unwrap().live.event_count(), 1);
+        assert_eq!(state.read().unwrap().nodes.live.event_count(), 1);
         assert_eq!(log.inner.tail(LogPosition::ZERO).await.unwrap().len(), 1);
     }
 

@@ -4,11 +4,11 @@
 //! (slice-4 plan, decisions 5, 6, 7, 8, 10).
 
 use crate::db::EngineError;
-use crate::state::{PersistedTrie, DEFAULT_GRAPH, NODES_TABLE};
+use crate::state::{PersistedTrie, TableKind, DEFAULT_GRAPH};
 use crate::writer::WriterState;
 use bytes::Bytes;
 use std::sync::Arc;
-use varve_index::block::{encode_block, EncodedBlock};
+use varve_index::block::{encode_block, EncodedBlock, PageMeta};
 use varve_index::LiveTable;
 use varve_storage::{keys, BlockManifest, TableTries, TrieEntry};
 
@@ -16,77 +16,125 @@ use varve_storage::{keys, BlockManifest, TableTries, TrieEntry};
 /// default, reused verbatim for every flush.
 pub(crate) const PAGE_ROWS: usize = varve_index::block::DEFAULT_PAGE_ROWS;
 
-/// Encodes the live table into one L0 block and commits it: data + meta
-/// PUTs, then the manifest PUT (THE atomic commit point, spec §9) — only
-/// once that succeeds does this atomically push the new trie into the
-/// inventory and reset the live table, then best-effort trim the log.
+/// Encodes BOTH tables' live tails into ONE L0 block and commits it under a
+/// SINGLE manifest PUT (THE atomic commit point, spec §9) — only once that
+/// succeeds does this atomically push each flushed table's new trie into its
+/// inventory and reset that table's live tail, then best-effort trim the log.
+/// One flush = one `block_id` = one manifest PUT (both tables share the
+/// `trie_key`; data/meta object keys are namespaced by table).
 ///
-/// No-op on an empty live table: never writes an empty block/manifest.
+/// No-op when both live tails are empty: never writes an empty block/manifest.
 ///
 /// Failure keeps serving (decision 10): if any PUT before the manifest
-/// fails, the live table is untouched and the flush simply retries at the
+/// fails, the live tables are untouched and the flush simply retries at the
 /// next trigger. Already-PUT data/meta without a manifest entry are
 /// invisible garbage (GC arrives in slice 8), never corruption.
 pub(crate) async fn flush_block(state: &mut WriterState) -> Result<(), EngineError> {
-    // Encode under a read lock. The writer loop is the only mutator of
-    // `TableState`, so it cannot change between this snapshot and the
-    // write-lock swap below; concurrent queries keep reading the pre-flush
-    // state meanwhile (decision 8).
-    let (encoded, prior, max_system_us) = {
+    // Encode both tables under ONE read lock. The writer loop is the only
+    // mutator of `TableState`, so it cannot change between this snapshot and
+    // the write-lock swap below; concurrent queries keep reading the
+    // pre-flush state meanwhile (decision 8).
+    let (nodes_enc, edges_enc, prior_nodes, prior_edges, max_system_us) = {
         let s = state.state.read().map_err(|_| EngineError::Poisoned)?;
-        if s.live.event_count() == 0 {
-            return Ok(());
-        }
-        let max_system_us = s
-            .live
-            .last_system_from()
-            .map(|t| t.as_micros())
-            .unwrap_or(0);
-        let prior: Vec<TrieEntry> = s.tries.iter().map(|t| t.entry.clone()).collect();
-        (encode_block(&s.live, PAGE_ROWS)?, prior, max_system_us)
+        let nodes_enc = if s.nodes.live.event_count() > 0 {
+            Some(encode_block(&s.nodes.live, PAGE_ROWS)?)
+        } else {
+            None
+        };
+        let edges_enc = if s.edges.live.event_count() > 0 {
+            Some(encode_block(&s.edges.live, PAGE_ROWS)?)
+        } else {
+            None
+        };
+        let prior_nodes: Vec<TrieEntry> = s.nodes.tries.iter().map(|t| t.entry.clone()).collect();
+        let prior_edges: Vec<TrieEntry> = s.edges.tries.iter().map(|t| t.entry.clone()).collect();
+        // The manifest's clock floor spans both tables' newest events.
+        let max_system_us = [
+            s.nodes.live.last_system_from(),
+            s.edges.live.last_system_from(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|t| t.as_micros())
+        .max()
+        .unwrap_or(0);
+        (
+            nodes_enc,
+            edges_enc,
+            prior_nodes,
+            prior_edges,
+            max_system_us,
+        )
     };
-    let EncodedBlock { data, meta, pages } = encoded;
+
+    // Nothing to flush in either table: never write an empty block/manifest.
+    if nodes_enc.is_none() && edges_enc.is_none() {
+        return Ok(());
+    }
 
     let block_id = state.next_block_id;
     let trie_key = keys::l0_trie_key(block_id);
-    let entry = TrieEntry {
-        trie_key: trie_key.clone(),
-        row_count: pages.iter().map(|p| p.rows).sum(),
-        data_len: data.len() as u64,
-    };
 
-    // Data + meta first: without a manifest entry they are invisible
-    // garbage on failure (GC cleans up orphans in slice 8), never
-    // corruption — and the live table is still untouched at this point.
-    state
-        .store
-        .put(
-            &keys::data_key(DEFAULT_GRAPH, NODES_TABLE, &trie_key),
-            Bytes::from(data),
-        )
-        .await?;
-    state
-        .store
-        .put(
-            &keys::meta_key(DEFAULT_GRAPH, NODES_TABLE, &trie_key),
-            Bytes::from(meta),
-        )
-        .await?;
+    // Data + meta first, per present table (nodes then edges): without a
+    // manifest entry they are invisible garbage on failure (GC cleans up
+    // orphans in slice 8), never corruption — and the live tables are still
+    // untouched at this point.
+    let mut flushed: Vec<(TableKind, TrieEntry, Vec<PageMeta>)> = Vec::new();
+    for (kind, enc) in [(TableKind::Nodes, nodes_enc), (TableKind::Edges, edges_enc)] {
+        let Some(EncodedBlock { data, meta, pages }) = enc else {
+            continue;
+        };
+        let entry = TrieEntry {
+            trie_key: trie_key.clone(),
+            row_count: pages.iter().map(|p| p.rows).sum(),
+            data_len: data.len() as u64,
+        };
+        state
+            .store
+            .put(
+                &keys::data_key(DEFAULT_GRAPH, kind.name(), &trie_key),
+                Bytes::from(data),
+            )
+            .await?;
+        state
+            .store
+            .put(
+                &keys::meta_key(DEFAULT_GRAPH, kind.name(), &trie_key),
+                Bytes::from(meta),
+            )
+            .await?;
+        flushed.push((kind, entry, pages));
+    }
 
     crash_point("pre-manifest-put");
 
-    let mut tries = prior;
-    tries.push(entry.clone());
+    // manifest.tables: one `TableTries` per table that has prior OR new
+    // tries (full inventory) — INCLUDING a table with prior tries that
+    // flushed nothing this block, so recovery from this manifest never
+    // drops an earlier block. Nodes first, then edges.
+    let mut tables = Vec::new();
+    for (kind, prior) in [
+        (TableKind::Nodes, prior_nodes),
+        (TableKind::Edges, prior_edges),
+    ] {
+        let mut tries = prior;
+        if let Some((_, entry, _)) = flushed.iter().find(|(k, _, _)| *k == kind) {
+            tries.push(entry.clone());
+        }
+        if !tries.is_empty() {
+            tables.push(TableTries {
+                graph: DEFAULT_GRAPH.to_string(),
+                table: kind.name().to_string(),
+                tries,
+            });
+        }
+    }
     let manifest = BlockManifest {
         block_id,
         watermark: state.durable_watermark.as_u64(),
         max_tx_id: state.next_tx_id,
         max_system_time_us: max_system_us,
-        tables: vec![TableTries {
-            graph: DEFAULT_GRAPH.to_string(),
-            table: NODES_TABLE.to_string(),
-            tries,
-        }],
+        tables,
     };
 
     // THE manifest PUT (spec §9): the atomic commit point. Everything
@@ -102,17 +150,21 @@ pub(crate) async fn flush_block(state: &mut WriterState) -> Result<(), EngineErr
 
     crash_point("post-manifest-put");
 
-    // ONE write lock: push the new trie AND reset the live table
-    // atomically (decision 8/7) — flushed events can never be observed in
-    // neither or both sources. Purely synchronous (no `.await` inside the
-    // guard), so this never holds the lock across an await point.
+    // ONE write lock: push each flushed table's new trie AND reset THAT
+    // table's live tail atomically (decision 8/7) — flushed events can never
+    // be observed in neither or both sources. Purely synchronous (no
+    // `.await` inside the guard), so this never holds the lock across an
+    // await point.
     {
         let mut s = state.state.write().map_err(|_| EngineError::Poisoned)?;
-        s.tries.push(PersistedTrie {
-            entry,
-            pages: Arc::new(pages),
-        });
-        s.live = LiveTable::new();
+        for (kind, entry, pages) in flushed {
+            let core = s.core_mut(kind);
+            core.tries.push(PersistedTrie {
+                entry,
+                pages: Arc::new(pages),
+            });
+            core.live = LiveTable::new();
+        }
     }
     state.next_block_id += 1;
 
@@ -155,7 +207,7 @@ mod tests {
     use crate::clock::{Clock, MonotonicClock};
     use crate::db::{EngineError, TxReceipt};
     use crate::scan::merged_snapshot;
-    use crate::state::TableState;
+    use crate::state::{TableKind, TableState};
     use crate::writer::{spawn_writer, Submission, WriterConfig, WriterState};
     use bytes::Bytes;
     use std::sync::{Arc, RwLock};
@@ -257,13 +309,13 @@ mod tests {
 
         {
             let s = state.read().unwrap();
-            assert_eq!(s.live.event_count(), 0);
-            assert_eq!(s.tries.len(), 1);
+            assert_eq!(s.nodes.live.event_count(), 0);
+            assert_eq!(s.nodes.tries.len(), 1);
         }
 
         assert!(log.tail(LogPosition::ZERO).await.unwrap().is_empty());
 
-        let batch = merged_snapshot(&state, &store, "P", &now_bounds(), None)
+        let batch = merged_snapshot(&state, &store, TableKind::Nodes, "P", &now_bounds(), None)
             .await
             .unwrap()
             .unwrap();
@@ -293,9 +345,9 @@ mod tests {
         assert_eq!(tries.len(), 2, "manifest lists FULL inventory");
         assert_eq!(tries[0].trie_key, "l00-rc-b00");
         assert_eq!(tries[1].trie_key, "l00-rc-b01");
-        assert_eq!(state.read().unwrap().tries.len(), 2);
+        assert_eq!(state.read().unwrap().nodes.tries.len(), 2);
 
-        let batch = merged_snapshot(&state, &store, "P", &now_bounds(), None)
+        let batch = merged_snapshot(&state, &store, TableKind::Nodes, "P", &now_bounds(), None)
             .await
             .unwrap()
             .unwrap();
@@ -312,7 +364,7 @@ mod tests {
             .unwrap();
         let manifest = wait_for_manifest(&store).await;
         assert_eq!(manifest.tables[0].tries[0].row_count, 1);
-        assert_eq!(state.read().unwrap().live.event_count(), 0);
+        assert_eq!(state.read().unwrap().nodes.live.event_count(), 0);
     }
 
     #[tokio::test]
@@ -323,7 +375,7 @@ mod tests {
             spawn_with(Arc::clone(&store), 1000, Duration::from_millis(30));
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(latest_manifest(store.as_ref()).await.unwrap().is_none());
-        assert_eq!(state.read().unwrap().live.event_count(), 0);
+        assert_eq!(state.read().unwrap().nodes.live.event_count(), 0);
     }
 
     /// Every PUT fails: acks still succeed, nothing lost, no manifest
@@ -367,11 +419,11 @@ mod tests {
         {
             let s = state.read().unwrap();
             assert_eq!(
-                s.live.event_count(),
+                s.nodes.live.event_count(),
                 3,
                 "a failed flush must not touch the live table"
             );
-            assert!(s.tries.is_empty());
+            assert!(s.nodes.tries.is_empty());
         }
         assert_eq!(
             log.tail(LogPosition::ZERO).await.unwrap().len(),
@@ -397,7 +449,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let batch = merged_snapshot(&state, &store, "P", &now_bounds(), None)
+        let batch = merged_snapshot(&state, &store, TableKind::Nodes, "P", &now_bounds(), None)
             .await
             .unwrap()
             .unwrap();

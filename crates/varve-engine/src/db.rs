@@ -1,7 +1,9 @@
 use crate::clock::{Clock, MonotonicClock};
 use crate::registries::Registries;
 use crate::scan::merged_snapshot;
-use crate::state::{PersistedTrie, TableState, DEFAULT_GRAPH, NODES_TABLE};
+use crate::state::{
+    PersistedTrie, TableCore, TableKind, TableState, DEFAULT_GRAPH, EDGES_TABLE, NODES_TABLE,
+};
 use crate::writer::{spawn_writer, Submission, WriterConfig, WriterState};
 use datafusion::arrow::record_batch::RecordBatch;
 use std::path::Path;
@@ -61,6 +63,10 @@ pub enum EngineError {
     VolatileBlockStore,
     #[error("unsupported in v1: {0}")]
     Unsupported(String),
+    #[error("INSERT references unbound variable '{0}' (a bare `(x)` must be bound earlier in the same statement)")]
+    UnboundVariable(String),
+    #[error("INSERT re-binds already-bound variable '{0}' (a reference must be a bare `(x)` — no labels or properties)")]
+    AlreadyBoundVariable(String),
 }
 
 /// Group-commit tuning read from `[log]` (spec §6): a batch flushes when its
@@ -336,7 +342,15 @@ impl Db {
         }
         let label = node.labels.first().map(String::as_str).unwrap_or("");
         let iid = varve_plan::iid_point(&q.where_clause, DEFAULT_GRAPH, NODES_TABLE);
-        let snapshot = merged_snapshot(&self.state, &self.store, label, &bounds, iid).await?;
+        let snapshot = merged_snapshot(
+            &self.state,
+            &self.store,
+            TableKind::Nodes,
+            label,
+            &bounds,
+            iid,
+        )
+        .await?;
         Ok(varve_plan::execute_query(&q, snapshot).await?)
     }
 
@@ -391,16 +405,22 @@ async fn recover(
     store: &Arc<dyn ObjectStore>,
 ) -> Result<Recovered, EngineError> {
     let manifest = varve_storage::latest_manifest(store.as_ref()).await?;
-    let mut tries = Vec::new();
+    let mut nodes_tries = Vec::new();
+    let mut edges_tries = Vec::new();
     let (mut next_tx_id, next_block_id, mut watermark, mut max_system) = match &manifest {
         Some(m) => {
             for table in &m.tables {
-                if table.graph != DEFAULT_GRAPH || table.table != NODES_TABLE {
-                    return Err(EngineError::UnknownTable(format!(
-                        "{}/{}",
-                        table.graph, table.table
-                    )));
-                }
+                // v1 tables: default/nodes and default/edges (spec §5.1).
+                let dest = match (table.graph.as_str(), table.table.as_str()) {
+                    (DEFAULT_GRAPH, NODES_TABLE) => &mut nodes_tries,
+                    (DEFAULT_GRAPH, EDGES_TABLE) => &mut edges_tries,
+                    _ => {
+                        return Err(EngineError::UnknownTable(format!(
+                            "{}/{}",
+                            table.graph, table.table
+                        )))
+                    }
+                };
                 for entry in &table.tries {
                     let meta = store
                         .get(&varve_storage::keys::meta_key(
@@ -409,7 +429,7 @@ async fn recover(
                             &entry.trie_key,
                         ))
                         .await?;
-                    tries.push(PersistedTrie {
+                    dest.push(PersistedTrie {
                         entry: entry.clone(),
                         pages: Arc::new(varve_index::block::decode_meta(&meta)?),
                     });
@@ -425,12 +445,17 @@ async fn recover(
         None => (0, 0, LogPosition::ZERO, None),
     };
 
-    let mut live = LiveTable::new();
+    let mut nodes_live = LiveTable::new();
+    let mut edges_live = LiveTable::new();
     for (position, record) in log.tail(watermark).await? {
         for effect in &record.effects {
-            if effect.table != NODES_TABLE {
-                return Err(EngineError::UnknownTable(effect.table.clone()));
-            }
+            // The table check precedes `decode_events` so an unknown table
+            // hard-fails before we ever touch (possibly bad) effect bytes.
+            let live = match effect.table.as_str() {
+                NODES_TABLE => &mut nodes_live,
+                EDGES_TABLE => &mut edges_live,
+                _ => return Err(EngineError::UnknownTable(effect.table.clone())),
+            };
             for event in decode_events(&effect.arrow_ipc)? {
                 live.append(event)?;
             }
@@ -444,7 +469,18 @@ async fn recover(
         clock.advance_to(floor);
     }
     Ok(Recovered {
-        state: TableState { live, tries },
+        state: TableState {
+            nodes: TableCore {
+                live: nodes_live,
+                tries: nodes_tries,
+            },
+            edges: TableCore {
+                live: edges_live,
+                tries: edges_tries,
+            },
+            adj_out: Vec::new(),
+            adj_in: Vec::new(),
+        },
         next_tx_id,
         next_block_id,
         watermark,
@@ -455,12 +491,168 @@ async fn recover(
 mod tests {
     use super::*;
     use varve_log::{LogRecord, TableEffects};
+    use varve_types::{Iid, Value};
+
+    #[tokio::test]
+    async fn insert_edge_with_inline_nodes_populates_edges_live() {
+        let db = Db::memory();
+        db.execute("INSERT (:Person {_id: 1, name: 'Ada'})-[:KNOWS {since: 2020}]->(:Person {_id: 2, name: 'Bob'})")
+            .await
+            .unwrap();
+        let s = db.state.read().unwrap();
+        assert_eq!(s.nodes.live.event_count(), 2);
+        assert_eq!(s.edges.live.event_count(), 1);
+        let ada = Iid::derive("default", "nodes", &Value::Int(1).id_bytes().unwrap());
+        let out: Vec<_> = s.edges.live.out_edges(&ada).collect();
+        assert_eq!(out.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn insert_edge_var_reuse_binds_within_statement() {
+        let db = Db::memory();
+        db.execute("INSERT (a:Person {_id: 1}), (a)-[:KNOWS]->(b:Person {_id: 2})")
+            .await
+            .unwrap();
+        let s = db.state.read().unwrap();
+        assert_eq!(s.nodes.live.event_count(), 2);
+        assert_eq!(s.edges.live.event_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn insert_edge_binding_errors() {
+        let db = Db::memory();
+        // Bare (a) with no prior binding in THIS statement (bindings are
+        // statement-local, never carried across execute calls):
+        let err = db
+            .execute("INSERT (a)-[:K]->(:P {_id: 9})")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::UnboundVariable(_)));
+        // Re-using a bound var with labels/props is an error — a reference must
+        // be a bare (x):
+        let err2 = db
+            .execute("INSERT (x:P {_id: 3}), (x:P)-[:K]->(:P {_id: 4})")
+            .await
+            .unwrap_err();
+        assert!(matches!(err2, EngineError::AlreadyBoundVariable(_)));
+        // Atomicity: both statements failed at resolve, so NOTHING was applied —
+        // not even the syntactically fine (:P {_id: 9}) / (x:P {_id: 3}) parts.
+        let s = db.state.read().unwrap();
+        assert_eq!(s.nodes.live.event_count(), 0);
+        assert_eq!(s.edges.live.event_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn match_insert_binds_matched_nodes_cartesian() {
+        let db = Db::memory();
+        db.execute("INSERT (:Person {_id: 1, name: 'Ada'}), (:Person {_id: 2, name: 'Bob'}), (:Person {_id: 3, name: 'Bob'})")
+            .await
+            .unwrap();
+        db.execute(
+            "MATCH (a:Person {name: 'Ada'}), (b:Person {name: 'Bob'}) INSERT (a)-[:KNOWS]->(b)",
+        )
+        .await
+        .unwrap();
+        let s = db.state.read().unwrap();
+        // 1 Ada × 2 Bobs = 2 edges.
+        assert_eq!(s.edges.live.event_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn edge_ids_user_supplied_and_derived_are_durable() {
+        let db = Db::memory();
+        db.execute("INSERT (:P {_id: 1})-[:K {_id: 7}]->(:P {_id: 2})")
+            .await
+            .unwrap();
+        db.execute("INSERT (:P {_id: 3})-[:K]->(:P {_id: 4})")
+            .await
+            .unwrap();
+        let s = db.state.read().unwrap();
+        let user = Iid::derive("default", "edges", &Value::Int(7).id_bytes().unwrap());
+        assert!(s.edges.live.events_for(&user).is_some());
+        assert_eq!(s.edges.live.event_count(), 2);
+    }
+
+    /// log + storage both `local` under `dir`, `max_block_rows` low so any
+    /// committed tx trips the size-flush trigger — the exact slice-4 block
+    /// mechanism (see `crates/varve/tests/blocks.rs`), reused here so
+    /// `force_flush` can push a replayed live tail into a durable block.
+    fn blocks_config(dir: &std::path::Path, max_block_rows: usize) -> Config {
+        let log_dir = format!("{:?}", dir.join("log").display().to_string());
+        let store_dir = format!("{:?}", dir.join("store").display().to_string());
+        Config::from_toml_str(&format!(
+            "[log]\nbackend = \"local\"\ngroup_commit_window_ms = 1\n\
+             [log.local]\ndir = {log_dir}\n\
+             [storage]\nbackend = \"local\"\nmax_block_rows = {max_block_rows}\n\
+             [storage.local]\ndir = {store_dir}\n"
+        ))
+        .unwrap()
+    }
+
+    /// Forces the writer to flush its live tail to a block: the `db` must have
+    /// been opened with a low `max_block_rows` (via `blocks_config`), so one
+    /// committed tx trips the post-batch size trigger. Polls the trie
+    /// inventory (populated under the flush's write lock, strictly after the
+    /// atomic manifest PUT) until the flush has landed.
+    async fn force_flush(db: &Db) {
+        db.execute("INSERT (:_Flush {_id: 0})").await.unwrap();
+        for _ in 0..200 {
+            {
+                let s = db.state.read().unwrap();
+                if !s.edges.tries.is_empty() && !s.nodes.tries.is_empty() {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("force_flush: block flush did not land within 5s");
+    }
+
+    #[tokio::test]
+    async fn edges_survive_log_replay_and_block_flush_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            // `Db::local` uses the default (high) block threshold, so this tx
+            // stays in the log only — segment 2 must recover it via replay.
+            let db = Db::local(dir.path()).await.unwrap();
+            db.execute("INSERT (:P {_id: 1, name: 'Ada'})-[:KNOWS]->(:P {_id: 2, name: 'Bob'})")
+                .await
+                .unwrap();
+        } // drop = close; events only in the log
+        {
+            // Reopen with a flush-forcing config over the SAME dirs: replay
+            // restores the edge to the live tail, then `force_flush` commits
+            // a block.
+            let db = Db::open(blocks_config(dir.path(), 1)).await.unwrap();
+            {
+                let s = db.state.read().unwrap();
+                assert_eq!(
+                    s.edges.live.event_count(),
+                    1,
+                    "log replay must restore edges"
+                );
+            }
+            force_flush(&db).await;
+        }
+        {
+            let db = Db::local(dir.path()).await.unwrap();
+            let s = db.state.read().unwrap();
+            assert_eq!(s.edges.live.event_count(), 0, "flushed");
+            assert_eq!(
+                s.edges.tries.len(),
+                1,
+                "edges primary trie recovered from manifest"
+            );
+        }
+    }
 
     /// `recover`'s log-tail loop checks `effect.table` before ever touching
-    /// `arrow_ipc` (spec v1: nodes is the only effect batch target), so a
-    /// non-`nodes` table must hard-fail with `UnknownTable` — even though the
-    /// log record here carries deliberately undecodable bytes that would
-    /// blow up `decode_events` if the guard were ever removed or reordered.
+    /// `arrow_ipc` (v1 targets are `nodes` and `edges`), so an unknown table
+    /// must hard-fail with `UnknownTable` — even though the log record here
+    /// carries deliberately undecodable bytes that would blow up
+    /// `decode_events` if the guard were ever removed or reordered. (Slice 6
+    /// flip: `edges` is now a real table, so the rejection case uses an
+    /// invented `widgets` table instead.)
     #[tokio::test]
     async fn recover_rejects_unknown_table_in_the_log_tail() {
         let log = MemoryLog::new();
@@ -469,7 +661,7 @@ mod tests {
             system_time_us: 0,
             user: String::new(),
             effects: vec![TableEffects {
-                table: "edges".to_string(),
+                table: "widgets".to_string(),
                 arrow_ipc: vec![0xAA], // never decoded: table check happens first
             }],
         }])
@@ -479,10 +671,55 @@ mod tests {
         let clock = MonotonicClock::new();
         let store = memory_store();
         match recover(&log, &clock, &store).await {
-            Err(EngineError::UnknownTable(t)) => assert_eq!(t, "edges"),
+            Err(EngineError::UnknownTable(t)) => assert_eq!(t, "widgets"),
             Err(other) => panic!("expected UnknownTable, got {other:?}"),
-            Ok(_) => panic!("expected recover to fail on the non-nodes table"),
+            Ok(_) => panic!("expected recover to fail on the unknown table"),
         }
+    }
+
+    /// The slice-6 flip's positive half: a log record carrying an `edges`
+    /// effect batch now REPLAYS (rather than hard-failing) — its events land
+    /// in the edges live table.
+    #[tokio::test]
+    async fn recover_replays_edges_effect_batch_from_the_log_tail() {
+        use crate::state::{DEFAULT_GRAPH, EDGES_TABLE, NODES_TABLE};
+        use varve_index::{encode_events, Event, Op};
+        use varve_types::Doc;
+
+        let edge = Event {
+            iid: Iid::derive(
+                DEFAULT_GRAPH,
+                EDGES_TABLE,
+                &Value::Int(7).id_bytes().unwrap(),
+            ),
+            system_from: Instant::from_micros(1),
+            valid_from: Instant::from_micros(1),
+            valid_to: Instant::END_OF_TIME,
+            src: Some(Iid::derive(DEFAULT_GRAPH, NODES_TABLE, &[1])),
+            dst: Some(Iid::derive(DEFAULT_GRAPH, NODES_TABLE, &[2])),
+            op: Op::Put {
+                labels: vec!["KNOWS".into()],
+                doc: Doc::new(),
+            },
+        };
+        let log = MemoryLog::new();
+        log.append(vec![LogRecord {
+            tx_id: 1,
+            system_time_us: 1,
+            user: String::new(),
+            effects: vec![TableEffects {
+                table: EDGES_TABLE.to_string(),
+                arrow_ipc: encode_events(std::slice::from_ref(&edge)).unwrap(),
+            }],
+        }])
+        .await
+        .unwrap();
+
+        let clock = MonotonicClock::new();
+        let store = memory_store();
+        let recovered = recover(&log, &clock, &store).await.unwrap();
+        assert_eq!(recovered.state.edges.live.event_count(), 1);
+        assert_eq!(recovered.state.nodes.live.event_count(), 0);
     }
 
     /// Replay starts AT the manifest watermark: records below it (still in
@@ -573,11 +810,11 @@ mod tests {
         let clock = MonotonicClock::new();
         let recovered = recover(&log, &clock, &store).await.unwrap();
         assert_eq!(
-            recovered.state.live.event_count(),
+            recovered.state.nodes.live.event_count(),
             1,
             "only the post-watermark record replays"
         );
-        assert_eq!(recovered.state.tries.len(), 1);
+        assert_eq!(recovered.state.nodes.tries.len(), 1);
         assert_eq!(recovered.next_tx_id, 3);
         assert_eq!(recovered.next_block_id, 1);
         assert_eq!(recovered.watermark.as_u64(), 3);
@@ -596,7 +833,8 @@ mod tests {
             max_system_time_us: 0,
             tables: vec![TableTries {
                 graph: "default".to_string(),
-                table: "edges".to_string(), // slice 6 format — must hard-fail
+                // `edges` recovers now (slice 6); an invented table must fail.
+                table: "widgets".to_string(),
                 tries: vec![],
             }],
         };
@@ -607,7 +845,7 @@ mod tests {
         let log = MemoryLog::new();
         let clock = MonotonicClock::new();
         match recover(&log, &clock, &store).await {
-            Err(EngineError::UnknownTable(t)) => assert!(t.contains("edges"), "{t}"),
+            Err(EngineError::UnknownTable(t)) => assert!(t.contains("widgets"), "{t}"),
             other => panic!("expected UnknownTable, got {other:?}"),
         }
     }

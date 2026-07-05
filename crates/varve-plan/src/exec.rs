@@ -180,12 +180,16 @@ pub fn matching_snapshot(
     Ok(live.snapshot_for_label(label, bounds)?)
 }
 
-/// Async phase: WHERE filter + IID extraction over an OWNED snapshot —
-/// callers drop their live-table lock before awaiting this. Sorted and
-/// deduplicated so mutation application order is deterministic.
+/// Async phase: WHERE filter + inline-prop equality filters + IID extraction
+/// over an OWNED snapshot — callers drop their live-table lock before awaiting
+/// this. `props` are extra `prop = literal` equalities (a matched pattern's
+/// inline `{k: v}` props, e.g. `MATCH (b:Person {name: 'Bob'})`), ANDed with
+/// `where_clause`. Sorted and deduplicated so mutation application order is
+/// deterministic.
 pub async fn iids_from_snapshot(
     snapshot: Option<RecordBatch>,
     where_clause: &Option<Expr>,
+    props: &[(String, Literal)],
 ) -> Result<Vec<Iid>, PlanError> {
     let Some(batch) = snapshot else {
         return Ok(vec![]);
@@ -198,6 +202,12 @@ pub async fn iids_from_snapshot(
     let mut df = ctx.read_table(Arc::new(table))?;
 
     if let Some(Expr::PropEq { prop, value, .. }) = where_clause {
+        if !has_col(prop) {
+            return Err(PlanError::UnknownColumn(prop.clone()));
+        }
+        df = df.filter(col(prop.as_str()).eq(to_df_literal(value)))?;
+    }
+    for (prop, value) in props {
         if !has_col(prop) {
             return Err(PlanError::UnknownColumn(prop.clone()));
         }
@@ -235,7 +245,12 @@ pub async fn matching_iids(
     live: &LiveTable,
     bounds: &TemporalBounds,
 ) -> Result<Vec<Iid>, PlanError> {
-    iids_from_snapshot(matching_snapshot(pattern, live, bounds)?, where_clause).await
+    iids_from_snapshot(
+        matching_snapshot(pattern, live, bounds)?,
+        where_clause,
+        &pattern.props,
+    )
+    .await
 }
 
 /// One-shot convenience for tests and non-locking callers.
