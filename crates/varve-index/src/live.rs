@@ -56,6 +56,14 @@ impl LiveTable {
         self.event_count
     }
 
+    /// Max `system_from` ever appended (`None` on an empty/new table).
+    /// Stamps the manifest's clock floor (`max_system_time_us`): flushed
+    /// events may predate the process's own clock after a restart replays
+    /// them, so the writer cannot derive this from its own clock.
+    pub fn last_system_from(&self) -> Option<Instant> {
+        self.last_system_from
+    }
+
     /// Resolve all entities against `bounds` and snapshot the visible
     /// versions carrying `label` into one RecordBatch. Returns `None` when
     /// nothing is visible. See [`crate::scan::snapshot_entities`] (delegates

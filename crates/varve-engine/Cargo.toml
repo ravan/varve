@@ -21,5 +21,10 @@ bytes = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 
+[features]
+# Test-only crash hooks for the varve-testkit kill -9 harness (mirrors
+# varve-log's). Inert unless VARVE_CRASH_TRIGGER points at an armed file.
+fault-injection = []
+
 [lints]
 workspace = true

@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 use varve_gql::ast::{DeleteStmt, InsertStmt, Literal, Statement};
 use varve_index::{encode_events, Event, Op};
 use varve_log::{Log, LogRecord, TableEffects};
-use varve_types::{Doc, Iid, Instant, TemporalBounds, TemporalDimension, Value};
+use varve_types::{Doc, Iid, Instant, LogPosition, TemporalBounds, TemporalDimension, Value};
 
 /// Bounded submission queue (roadmap slice 3). Config-driven backpressure
 /// semantics arrive in slice 10.
@@ -26,11 +26,17 @@ pub(crate) struct Submission {
 }
 
 /// Group-commit tuning (spec §6): a batch flushes when its window elapses OR
-/// its encoded size reaches `max_bytes`, whichever comes first.
+/// its encoded size reaches `max_bytes`, whichever comes first. Block-flush
+/// tuning (spec §9, slice-4 plan): the live table flushes to a block once it
+/// reaches `max_block_rows`, or once `flush_interval` elapses since the
+/// first unflushed row landed — whichever comes first. `Duration::ZERO`
+/// disables the timer (size-only flushing).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct WriterConfig {
     pub window: Duration,
     pub max_bytes: usize,
+    pub max_block_rows: usize,
+    pub flush_interval: Duration,
 }
 
 impl Default for WriterConfig {
@@ -38,6 +44,8 @@ impl Default for WriterConfig {
         WriterConfig {
             window: Duration::from_millis(15),
             max_bytes: 8 * 1024 * 1024,
+            max_block_rows: 100_000,
+            flush_interval: Duration::from_secs(300),
         }
     }
 }
@@ -48,6 +56,11 @@ pub(crate) struct WriterState {
     pub clock: Arc<dyn Clock>,
     pub log: Arc<dyn Log>,
     pub next_tx_id: u64,
+    /// Next L0 block id (recovered from the latest manifest in Task 11).
+    pub next_block_id: u64,
+    /// Exclusive end of the durably-appended log prefix — becomes the next
+    /// flushed block's manifest watermark (decision 6).
+    pub durable_watermark: LogPosition,
 }
 
 /// One staged-but-not-yet-durable transaction: its log record, the events it
@@ -60,17 +73,75 @@ struct Staged {
     ack: oneshot::Sender<Result<TxReceipt, EngineError>>,
 }
 
+/// Distinguishes a real submission from a flush-timer wakeup in the writer
+/// loop's `select!` below.
+enum Received {
+    Submission(Option<Submission>),
+    FlushTimeout,
+}
+
 /// Spawns the writer loop on a dedicated task and returns the submission
 /// channel `Db` sends statements through.
 pub(crate) fn spawn_writer(mut state: WriterState, cfg: WriterConfig) -> mpsc::Sender<Submission> {
     let (sender, mut rx) = mpsc::channel::<Submission>(SUBMISSION_QUEUE_LEN);
     tokio::spawn(async move {
-        while let Some(first) = rx.recv().await {
-            run_batch(&mut state, &cfg, &mut rx, first).await;
+        // Armed (Some) while unflushed rows exist and a flush interval is
+        // configured; disarmed after every flush and whenever the live
+        // table is empty.
+        let mut flush_deadline: Option<tokio::time::Instant> = None;
+        loop {
+            let received = match flush_deadline {
+                Some(deadline) => tokio::select! {
+                    sub = rx.recv() => Received::Submission(sub),
+                    _ = tokio::time::sleep_until(deadline) => Received::FlushTimeout,
+                },
+                None => Received::Submission(rx.recv().await),
+            };
+            match received {
+                Received::Submission(Some(first)) => {
+                    run_batch(&mut state, &cfg, &mut rx, first).await;
+                    if live_rows(&state) >= cfg.max_block_rows {
+                        // A failed flush leaves the live table intact and
+                        // retries at the next trigger (decision 10).
+                        let _ = crate::flush::flush_block(&mut state).await;
+                    }
+                    flush_deadline = next_deadline(&state, &cfg, flush_deadline);
+                }
+                Received::Submission(None) => {
+                    // Sender dropped (Db closed) and channel drained:
+                    // nothing left to do.
+                    break;
+                }
+                Received::FlushTimeout => {
+                    let _ = crate::flush::flush_block(&mut state).await;
+                    flush_deadline = next_deadline(&state, &cfg, None);
+                }
+            }
         }
-        // Sender dropped (Db closed) and channel drained: nothing left to do.
     });
     sender
+}
+
+fn live_rows(state: &WriterState) -> usize {
+    state
+        .state
+        .read()
+        .map(|s| s.live.event_count())
+        .unwrap_or(0)
+}
+
+/// The flush timer is armed once (on the OLDEST unflushed row) and left
+/// alone until the next flush disarms it — a steady trickle of inserts
+/// below `max_block_rows` still flushes within `flush_interval`.
+fn next_deadline(
+    state: &WriterState,
+    cfg: &WriterConfig,
+    current: Option<tokio::time::Instant>,
+) -> Option<tokio::time::Instant> {
+    if cfg.flush_interval.is_zero() || live_rows(state) == 0 {
+        return None;
+    }
+    current.or_else(|| Some(tokio::time::Instant::now() + cfg.flush_interval))
 }
 
 /// One group-commit batch: stage `first`, then keep staging until the window
@@ -253,8 +324,16 @@ async fn resolve_delete(
 /// Durable append → apply → ack, strictly in that order (decision 1).
 async fn flush(state: &mut WriterState, mut staged: Vec<Staged>) {
     let records: Vec<LogRecord> = staged.iter().map(|s| s.record.clone()).collect();
+    let count = records.len() as u64;
     match state.log.append(records).await {
-        Ok(_first_position) => {
+        Ok(first) => {
+            // Exclusive end of the durable prefix — becomes the next
+            // manifest's watermark (decision 6; positions are consecutive
+            // per the `Log` contract). On (unreachable) 48-bit offset
+            // overflow, keep the old, still-conservative watermark.
+            if let Ok(end) = first.advance(count) {
+                state.durable_watermark = end;
+            }
             let applied = apply(state, &mut staged);
             for s in staged {
                 let _ = s.ack.send(match &applied {
@@ -370,6 +449,8 @@ mod tests {
             clock: Arc::new(MonotonicClock::new()),
             log,
             next_tx_id: 0,
+            next_block_id: 0,
+            durable_watermark: LogPosition::ZERO,
         };
         (spawn_writer(writer_state, cfg), state)
     }
@@ -393,6 +474,7 @@ mod tests {
             WriterConfig {
                 window: Duration::from_secs(1),
                 max_bytes: 8 * 1024 * 1024,
+                ..WriterConfig::default()
             },
         );
         let acks: Vec<_> = (1..=5)
@@ -417,6 +499,7 @@ mod tests {
             WriterConfig {
                 window: Duration::from_secs(3600),
                 max_bytes: 1, // every record trips the threshold
+                ..WriterConfig::default()
             },
         );
         for i in 0..2 {
@@ -439,6 +522,7 @@ mod tests {
             WriterConfig {
                 window: Duration::from_secs(1),
                 max_bytes: 8 * 1024 * 1024,
+                ..WriterConfig::default()
             },
         );
         let insert = submit(&sender, "INSERT (:P {_id: 1})");
@@ -464,6 +548,7 @@ mod tests {
             WriterConfig {
                 window: Duration::ZERO,
                 max_bytes: 8 * 1024 * 1024,
+                ..WriterConfig::default()
             },
         );
         // valid_from defaults to tx time (2026+) which lands AFTER VALID TO.
@@ -487,6 +572,7 @@ mod tests {
             WriterConfig {
                 window: Duration::ZERO,
                 max_bytes: 8 * 1024 * 1024,
+                ..WriterConfig::default()
             },
         );
         let first = submit(&sender, "INSERT (:P {_id: 1})");
@@ -511,6 +597,7 @@ mod tests {
             WriterConfig {
                 window: Duration::from_secs(3600),
                 max_bytes: 8 * 1024 * 1024,
+                ..WriterConfig::default()
             },
         );
         let ack = submit(&sender, "INSERT (:P {_id: 1})");

@@ -124,9 +124,12 @@ impl Db {
                 ..WriterConfig::default()
             },
             0,
+            0,
+            LogPosition::ZERO,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn assemble(
         live: LiveTable,
         log: Arc<dyn varve_log::Log>,
@@ -134,6 +137,8 @@ impl Db {
         clock: Arc<dyn Clock>,
         cfg: WriterConfig,
         next_tx_id: u64,
+        next_block_id: u64,
+        durable_watermark: LogPosition,
     ) -> Db {
         let mut table_state = TableState::new();
         table_state.live = live;
@@ -144,6 +149,8 @@ impl Db {
             clock: Arc::clone(&clock),
             log,
             next_tx_id,
+            next_block_id,
+            durable_watermark,
         };
         let submit = spawn_writer(writer_state, cfg);
         Db {
@@ -175,12 +182,16 @@ impl Db {
         let cfg = WriterConfig {
             window: Duration::from_millis(tuning.group_commit_window_ms),
             max_bytes: tuning.group_commit_max_bytes,
+            ..WriterConfig::default()
         };
-        let (live, next_tx_id) = replay(log.as_ref(), clock.as_ref()).await?;
+        let (live, next_tx_id, watermark) = replay(log.as_ref(), clock.as_ref()).await?;
         // storage config selection + manifest recovery land in Task 11 —
-        // nothing writes to storage before Task 10's flush.
+        // nothing writes to storage before Task 10's flush, so block
+        // recovery always starts from block 0.
         let store = cached(memory_store());
-        Ok(Self::assemble(live, log, store, clock, cfg, next_tx_id))
+        Ok(Self::assemble(
+            live, log, store, clock, cfg, next_tx_id, 0, watermark,
+        ))
     }
 
     /// Local-filesystem database at `dir` with default tuning (spec §11
@@ -188,9 +199,10 @@ impl Db {
     pub async fn local(dir: impl AsRef<Path>) -> Result<Db, EngineError> {
         let log: Arc<dyn Log> = Arc::new(LocalLog::open(dir.as_ref(), DEFAULT_SEGMENT_MAX_BYTES)?);
         let clock: Arc<dyn Clock> = Arc::new(MonotonicClock::new());
-        let (live, next_tx_id) = replay(log.as_ref(), clock.as_ref()).await?;
+        let (live, next_tx_id, watermark) = replay(log.as_ref(), clock.as_ref()).await?;
         // storage config selection + manifest recovery land in Task 11 —
-        // nothing writes to storage before Task 10's flush.
+        // nothing writes to storage before Task 10's flush, so block
+        // recovery always starts from block 0.
         let store = cached(memory_store());
         Ok(Self::assemble(
             live,
@@ -199,6 +211,8 @@ impl Db {
             clock,
             WriterConfig::default(),
             next_tx_id,
+            0,
+            watermark,
         ))
     }
 
@@ -233,16 +247,20 @@ impl Db {
 }
 
 /// Spec §6 recovery: fold the whole log into a fresh live index; floor the
-/// clock and tx counter above everything replayed. Blocks + manifest
-/// watermarks (replay-from-position) arrive in slice 4.
+/// clock and tx counter above everything replayed. Also returns the
+/// watermark (the position just past the last replayed record) so a fresh
+/// flush's manifest watermark starts from the right place. Manifest
+/// recovery (replay-from-position, skipping already-flushed rows) arrives
+/// in Task 11 — v1 always replays the whole log.
 async fn replay(
     log: &dyn varve_log::Log,
     clock: &dyn Clock,
-) -> Result<(LiveTable, u64), EngineError> {
+) -> Result<(LiveTable, u64, LogPosition), EngineError> {
     let mut live = LiveTable::new();
     let mut next_tx_id = 0u64;
     let mut max_system: Option<Instant> = None;
-    for (_position, record) in log.tail(LogPosition::ZERO).await? {
+    let mut watermark = LogPosition::ZERO;
+    for (position, record) in log.tail(LogPosition::ZERO).await? {
         for effect in &record.effects {
             if effect.table != NODES_TABLE {
                 return Err(EngineError::UnknownTable(effect.table.clone()));
@@ -254,11 +272,12 @@ async fn replay(
         next_tx_id = next_tx_id.max(record.tx_id);
         let system = Instant::from_micros(record.system_time_us);
         max_system = Some(max_system.map_or(system, |m| m.max(system)));
+        watermark = position.advance(1)?;
     }
     if let Some(floor) = max_system {
         clock.advance_to(floor);
     }
-    Ok((live, next_tx_id))
+    Ok((live, next_tx_id, watermark))
 }
 
 #[cfg(test)]
