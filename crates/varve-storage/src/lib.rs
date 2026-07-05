@@ -1,3 +1,4 @@
+pub mod keys;
 pub mod local;
 pub mod memory;
 pub mod store;
