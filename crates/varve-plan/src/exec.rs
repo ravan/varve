@@ -4,7 +4,7 @@ use datafusion::datasource::MemTable;
 use datafusion::prelude::*;
 use std::sync::Arc;
 use thiserror::Error;
-use varve_gql::ast::{Expr, Literal, NodePattern, QueryStmt, ReturnItem, TemporalFnKind};
+use varve_gql::ast::{Expr, Literal, NodePattern, QueryStmt, TemporalFnKind};
 use varve_index::LiveTable;
 use varve_types::{Iid, Instant, TemporalBounds, TemporalDimension};
 
@@ -16,13 +16,15 @@ pub enum PlanError {
     Index(#[from] varve_index::IndexError),
     #[error("unknown column '{0}' in RETURN/WHERE")]
     UnknownColumn(String),
+    #[error("unknown variable '{0}' in WHERE/RETURN")]
+    UnknownVariable(String),
     #[error("internal: _iid column malformed")]
     MalformedIid,
     #[error("unsupported in v1: {0}")]
     Unsupported(String),
 }
 
-fn to_df_literal(l: &Literal) -> datafusion::prelude::Expr {
+pub(crate) fn to_df_literal(l: &Literal) -> datafusion::prelude::Expr {
     match l {
         Literal::Int(i) => lit(*i),
         Literal::Float(f) => lit(*f),
@@ -75,97 +77,25 @@ pub fn iid_point(where_clause: &Option<Expr>, graph: &str, table: &str) -> Optio
     if prop != "_id" {
         return None;
     }
-    let bytes = literal_value(value).id_bytes().ok()?;
+    iid_of(graph, table, value)
+}
+
+/// The IID a `_id = <literal>` binding points at, or `None` when the literal
+/// can't be an id (Float/Null). The shared literal→`Iid` derivation behind
+/// both [`iid_point`] (WHERE `_id` pushdown) and `pattern::scan_specs`
+/// (inline `{_id: …}` prop pushdown per element).
+pub(crate) fn iid_of(graph: &str, table: &str, lit: &Literal) -> Option<Iid> {
+    let bytes = literal_value(lit).id_bytes().ok()?;
     Some(Iid::derive(graph, table, &bytes))
 }
 
 /// (hidden column, default output name) for a `RETURN`-position temporal function.
-fn temporal_fn_columns(func: TemporalFnKind) -> (&'static str, &'static str) {
+pub(crate) fn temporal_fn_columns(func: TemporalFnKind) -> (&'static str, &'static str) {
     match func {
         TemporalFnKind::ValidFrom => ("_valid_from", "valid_from"),
         TemporalFnKind::ValidTo => ("_valid_to", "valid_to"),
         TemporalFnKind::SystemFrom => ("_system_from", "system_from"),
     }
-}
-
-/// v1: only a single-node, hop-free, unnamed MATCH is supported (multi-
-/// element MATCH lands in task 8 of slice 6); a node pattern with props is
-/// likewise deferred — there is no plan-level filtering on them yet.
-fn require_single_node(stmt: &QueryStmt) -> Result<&NodePattern, PlanError> {
-    let node = stmt.single_node().ok_or_else(|| {
-        PlanError::Unsupported("multi-element MATCH lands in task 8 of slice 6".into())
-    })?;
-    if !node.props.is_empty() {
-        return Err(PlanError::Unsupported(
-            "multi-element MATCH lands in task 8 of slice 6".into(),
-        ));
-    }
-    Ok(node)
-}
-
-/// Sync phase: resolve + snapshot under the caller's lock.
-pub fn snapshot_for_query(
-    stmt: &QueryStmt,
-    live: &LiveTable,
-    now: Instant,
-) -> Result<Option<RecordBatch>, PlanError> {
-    let bounds = effective_bounds(stmt, now);
-    let node = require_single_node(stmt)?;
-    let label = node.labels.first().map(String::as_str).unwrap_or("");
-    Ok(live.snapshot_for_label(label, &bounds)?)
-}
-
-/// Async phase: DataFusion filter/projection over an OWNED snapshot — callers
-/// drop their live-table lock before awaiting this.
-pub async fn execute_query(
-    stmt: &QueryStmt,
-    snapshot: Option<RecordBatch>,
-) -> Result<Vec<RecordBatch>, PlanError> {
-    require_single_node(stmt)?;
-    let Some(batch) = snapshot else {
-        return Ok(vec![]);
-    };
-    let schema = batch.schema();
-    let has_col = |name: &str| schema.column_with_name(name).is_some();
-
-    let ctx = SessionContext::new();
-    let table = MemTable::try_new(schema.clone(), vec![vec![batch]])?;
-    let mut df = ctx.read_table(Arc::new(table))?;
-
-    if let Some(Expr::PropEq { prop, value, .. }) = &stmt.where_clause {
-        if !has_col(prop) {
-            return Err(PlanError::UnknownColumn(prop.clone()));
-        }
-        df = df.filter(col(prop.as_str()).eq(to_df_literal(value)))?;
-    }
-
-    let mut projection = Vec::new();
-    for item in &stmt.return_items {
-        let (source, out_name) = match item {
-            ReturnItem::Prop { prop, alias, .. } => {
-                if !has_col(prop) {
-                    return Err(PlanError::UnknownColumn(prop.clone()));
-                }
-                (prop.as_str(), alias.clone().unwrap_or_else(|| prop.clone()))
-            }
-            ReturnItem::TemporalFn { func, alias, .. } => {
-                let (hidden, default_name) = temporal_fn_columns(*func);
-                (
-                    hidden,
-                    alias.clone().unwrap_or_else(|| default_name.to_string()),
-                )
-            }
-            ReturnItem::Var { .. } => {
-                return Err(PlanError::Unsupported(
-                    "path variables land in task 9 of slice 6".into(),
-                ));
-            }
-        };
-        projection.push(col(source).alias(out_name));
-    }
-    let df = df.select(projection)?;
-
-    Ok(df.collect().await?)
 }
 
 /// Sync phase of DML matching (MATCH … DELETE, spec §10): resolve the
@@ -253,11 +183,36 @@ pub async fn matching_iids(
     .await
 }
 
-/// One-shot convenience for tests and non-locking callers.
+/// One-shot convenience for tests and non-locking callers, over a bare
+/// [`LiveTable`] (no persisted blocks, no store). Lowers through the same
+/// [`crate::pattern`] path the engine uses, so single-element MATCH exercises
+/// `execute_pattern`'s zero-join case directly. Only node scans can be served
+/// from a `LiveTable` alone; edge/expansion elements need the engine's
+/// `merged_snapshot`, so a multi-element query here returns `Unsupported`.
 pub async fn run_query(
     stmt: &QueryStmt,
     live: &LiveTable,
     now: Instant,
 ) -> Result<Vec<RecordBatch>, PlanError> {
-    execute_query(stmt, snapshot_for_query(stmt, live, now)?).await
+    use crate::pattern::{execute_pattern, scan_specs, ScanInput, SpecKind};
+    let bounds = effective_bounds(stmt, now);
+    let specs = scan_specs(
+        stmt,
+        crate::pattern::DEFAULT_GRAPH,
+        crate::pattern::DEFAULT_MAX_PATH_DEPTH,
+    )?;
+    let mut inputs = Vec::with_capacity(specs.len());
+    for spec in &specs {
+        match &spec.kind {
+            SpecKind::Node { label, .. } => inputs.push(ScanInput::Batch(
+                live.snapshot_for_label(label.as_deref().unwrap_or(""), &bounds)?,
+            )),
+            _ => {
+                return Err(PlanError::Unsupported(
+                    "run_query serves single-node LiveTable queries only".into(),
+                ))
+            }
+        }
+    }
+    execute_pattern(stmt, &specs, inputs).await
 }
