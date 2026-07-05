@@ -3607,10 +3607,12 @@ name = "varve-testkit"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "bytes",
  "proptest",
  "tempfile",
  "tokio",
  "varve",
+ "varve-config",
  "varve-engine",
  "varve-index",
  "varve-log",

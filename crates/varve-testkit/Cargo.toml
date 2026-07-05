@@ -14,11 +14,15 @@ varve-log = { path = "../varve-log", features = ["fault-injection"] }
 # pattern); varve-engine is listed for its feature alone.
 varve-engine = { path = "../varve-engine", features = ["fault-injection"] }
 varve-storage = { path = "../varve-storage" }
+varve-config = { path = "../varve-config" }
 tokio = { workspace = true }
+# backends.rs is library code (not test-only) that shells out to docker and
+# needs scratch config directories, so tempfile lives here, not dev-deps.
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 arrow = { workspace = true }
+bytes = { workspace = true }
 
 [lints]
 workspace = true
