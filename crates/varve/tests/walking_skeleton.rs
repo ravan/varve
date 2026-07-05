@@ -57,3 +57,18 @@ async fn multi_node_insert_is_atomic_on_invalid_id() {
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 0);
 }
+
+#[tokio::test]
+async fn probe_capabilities_reports_through_the_facade() {
+    use varve::ProbeVerdict;
+    let db = Db::memory();
+    // Db::memory wraps an InMemory store in the cache — Supported proves
+    // both the blanket conditional impl and the CachedStore delegation.
+    let report = db.probe_capabilities().await.unwrap();
+    assert_eq!(report.verdict, ProbeVerdict::Supported);
+    assert!(
+        report.probe_key.starts_with("v1/probe/"),
+        "{}",
+        report.probe_key
+    );
+}

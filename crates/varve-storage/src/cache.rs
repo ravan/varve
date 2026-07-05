@@ -168,6 +168,10 @@ impl ObjectStore for CachedStore {
     async fn list(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
         self.inner.list(prefix).await
     }
+
+    fn conditional(&self) -> Option<&dyn crate::store::ConditionalStore> {
+        self.inner.conditional()
+    }
 }
 
 #[derive(serde::Deserialize)]

@@ -15,7 +15,9 @@ use varve_gql::token::GqlError;
 use varve_index::{decode_events, IndexError, LiveTable};
 use varve_log::{LocalLog, Log, LogError, MemoryLog, DEFAULT_SEGMENT_MAX_BYTES};
 use varve_plan::PlanError;
-use varve_storage::{memory_store, CachedStore, MemoryCache, ObjectStore, StorageError};
+use varve_storage::{
+    memory_store, CachedStore, MemoryCache, ObjectStore, ProbeReport, StorageError,
+};
 use varve_types::{Instant, LogPosition, TypeError};
 
 #[derive(Debug, Error)]
@@ -322,6 +324,21 @@ impl Db {
         let iid = varve_plan::iid_point(&q.where_clause, DEFAULT_GRAPH, NODES_TABLE);
         let snapshot = merged_snapshot(&self.state, &self.store, label, &bounds, iid).await?;
         Ok(varve_plan::execute_query(&q, snapshot).await?)
+    }
+
+    /// Report-only capability probe (spec §12, D5): classifies whether the
+    /// store's conditional-PUT semantics actually hold, against a fresh key
+    /// under `v1/probe/`. Slice-10's cas-failover coordinator gates on this
+    /// verdict at startup; nothing in v1 changes behavior based on it.
+    /// Burns one clock tick for key uniqueness (harmless: tx times only
+    /// ever need to keep increasing).
+    pub async fn probe_capabilities(&self) -> Result<ProbeReport, EngineError> {
+        let key = format!(
+            "{}/{}",
+            varve_storage::PROBE_PREFIX,
+            self.clock.next().as_micros()
+        );
+        Ok(varve_storage::probe_conditional_put(self.store.as_ref(), &key).await?)
     }
 }
 

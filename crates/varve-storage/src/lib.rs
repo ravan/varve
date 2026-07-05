@@ -4,6 +4,7 @@ pub mod keys;
 pub mod local;
 pub mod manifest;
 pub mod memory;
+pub mod probe;
 #[cfg(feature = "s3")]
 pub mod s3;
 pub mod store;
@@ -13,9 +14,10 @@ pub use disk::{DiskCache, DiskCacheFactory};
 pub use local::{local_store, LocalStoreFactory};
 pub use manifest::{latest_manifest, BlockManifest, TableTries, TrieEntry};
 pub use memory::{memory_store, MemoryStoreFactory};
+pub use probe::{probe_conditional_put, ProbeReport, ProbeVerdict, PROBE_PREFIX};
 #[cfg(feature = "s3")]
 pub use s3::S3StoreFactory;
-pub use store::{ObjectStore, StorageError};
+pub use store::{CondPut, ConditionalStore, ObjectStore, StorageError};
 
 use varve_config::{ComponentFactory, Registry};
 
