@@ -485,3 +485,75 @@ async fn project_return(
     let df = df.select(projection)?;
     Ok(df.collect().await?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use varve_gql::ast::Statement;
+
+    /// Parses `gql` and unwraps the `Query` variant — every case here is a
+    /// `MATCH … RETURN …` read, never an INSERT/DELETE.
+    fn query(gql: &str) -> QueryStmt {
+        match varve_gql::parse(gql).unwrap() {
+            Statement::Query(q) => *q,
+            other => panic!("expected a query statement, got {other:?}"),
+        }
+    }
+
+    // ---- scan_specs rejection branches -------------------------------
+
+    #[test]
+    fn scan_specs_rejects_multi_label_node() {
+        // `node_spec` rejects as soon as a node pattern carries >1 label;
+        // the grammar itself allows `(a:A:B)` (see varve-gql's
+        // `parses_node_props_and_multi_labels_in_match`), so this must be
+        // rejected at the lowering layer, not the parser.
+        let stmt = query("MATCH (a:A:B) RETURN a.name");
+        let err = scan_specs(&stmt, DEFAULT_GRAPH, DEFAULT_MAX_PATH_DEPTH).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("multi-label MATCH lands in slice 7"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn scan_specs_rejects_comma_separated_multi_path() {
+        // `scan_specs` only lowers `stmt.paths[0]`; more than one
+        // comma-separated path in a MATCH is rejected up front.
+        let stmt = query("MATCH (a:A)-[:K]->(b:A), (c:A)-[:K]->(d:A) RETURN a.name");
+        let err = scan_specs(&stmt, DEFAULT_GRAPH, DEFAULT_MAX_PATH_DEPTH).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("comma-separated MATCH paths in queries land in slice 7"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn scan_specs_rejects_quantifier_max_exceeding_max_path_depth() {
+        // The quantifier's own `{1,99}` max is within the parser's bounds,
+        // but 99 exceeds the `max_path_depth` we pass to `scan_specs`.
+        let stmt = query("MATCH (a:A)-[:K]->{1,99}(b:A) RETURN a.name");
+        let err = scan_specs(&stmt, DEFAULT_GRAPH, 10).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("quantifier max 99 exceeds max_path_depth 10"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn scan_specs_rejects_path_var_on_non_single_quantified_hop() {
+        // A path variable is only meaningful (in v1) over a single
+        // quantified hop (`p = (a)-[:K*1..3]->(b)`); this path var sits on
+        // a single but *unquantified* hop, so it must be rejected.
+        let stmt = query("MATCH p = (a:A)-[:K]->(b:A) RETURN p");
+        let err = scan_specs(&stmt, DEFAULT_GRAPH, DEFAULT_MAX_PATH_DEPTH).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("path variables need a single quantified hop in v1"),
+            "unexpected error: {err}"
+        );
+    }
+}
