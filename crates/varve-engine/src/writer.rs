@@ -6,9 +6,9 @@
 
 use crate::clock::Clock;
 use crate::db::{EngineError, TxReceipt};
-use crate::scan::merged_snapshot;
+use crate::scan::{incident_edges, merged_snapshot, AdjDirection};
 use crate::state::{TableKind, TableState, DEFAULT_GRAPH, EDGES_TABLE, NODES_TABLE};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -463,6 +463,15 @@ fn resolve_insert_node(
 /// MATCH … DELETE (spec §10 DML): resolves the read side against the merged
 /// live∪persisted snapshot at (valid=now, system=now) — a delete must find
 /// flushed entities too (slice-4 plan, decision 13).
+///
+/// Cascade semantics (task 7 of slice 6): for each matched node, every
+/// incident edge (either direction, ANY label) is collected via the
+/// label-blind `incident_edges`, deduped by edge iid — a self-loop is
+/// incident via both `Out` and `In` but must be deleted exactly once. A
+/// plain `DELETE` on a still-connected node fails the whole tx atomically
+/// (`Err` returned before anything is staged); `DETACH DELETE` emits the
+/// node delete(s) plus every distinct incident-edge delete in this one
+/// `Effects` batch, so the cascade commits in a single tx.
 async fn resolve_delete(
     state: &WriterState,
     del: &DeleteStmt,
@@ -472,17 +481,6 @@ async fn resolve_delete(
         valid: TemporalDimension::at(system),
         system: TemporalDimension::at(system),
     };
-    if del.detach {
-        // DETACH DELETE cascade (edge removal) lands in task 7 of slice 6.
-        return Err(EngineError::Unsupported(
-            "DETACH DELETE lands in task 7 of slice 6".into(),
-        ));
-    }
-    if !del.pattern.props.is_empty() {
-        return Err(EngineError::Unsupported(
-            "inline props on a matched DELETE node land in task 7 of slice 6".into(),
-        ));
-    }
     let label = del.pattern.labels.first().map(String::as_str).unwrap_or("");
     let iid = varve_plan::iid_point(&del.where_clause, DEFAULT_GRAPH, NODES_TABLE);
     let snapshot = merged_snapshot(
@@ -494,10 +492,43 @@ async fn resolve_delete(
         iid,
     )
     .await?;
-    let iids = varve_plan::iids_from_snapshot(snapshot, &del.where_clause, &[]).await?;
-    let nodes = iids
-        .into_iter()
-        .map(|iid| Event {
+    let iids =
+        varve_plan::iids_from_snapshot(snapshot, &del.where_clause, &del.pattern.props).await?;
+
+    // Incident edges per matched node, both directions, deduped by edge iid.
+    // Label "" would match nothing through edge_adjacency's label filter, so
+    // incident lookup scans ALL labels: collect via a label-blind variant.
+    let mut incident: BTreeMap<Iid, (Iid, Iid)> = BTreeMap::new(); // edge → (src, dst)
+    for node in &iids {
+        for dir in [AdjDirection::Out, AdjDirection::In] {
+            for entry in incident_edges(&state.state, &state.store, dir, *node, &bounds).await? {
+                let (src, dst) = match dir {
+                    AdjDirection::Out => (entry.node, entry.neighbor),
+                    AdjDirection::In => (entry.neighbor, entry.node),
+                };
+                incident.insert(entry.edge, (src, dst));
+            }
+        }
+    }
+
+    if !del.detach && !incident.is_empty() {
+        return Err(EngineError::StillConnected(incident.len()));
+    }
+
+    let mut effects = Effects::default();
+    for (edge, (src, dst)) in incident {
+        effects.edges.push(Event {
+            iid: edge,
+            system_from: system,
+            valid_from: system,
+            valid_to: Instant::END_OF_TIME,
+            src: Some(src),
+            dst: Some(dst),
+            op: Op::Delete,
+        });
+    }
+    for iid in iids {
+        effects.nodes.push(Event {
             iid,
             system_from: system,
             valid_from: system,
@@ -505,14 +536,9 @@ async fn resolve_delete(
             src: None,
             dst: None,
             op: Op::Delete,
-        })
-        .collect();
-    // Edge cascade (DETACH DELETE) lands in task 7; a node-only DELETE emits
-    // no edge events.
-    Ok(Effects {
-        nodes,
-        edges: Vec::new(),
-    })
+        });
+    }
+    Ok(effects)
 }
 
 /// Durable append → apply → ack, strictly in that order (decision 1).

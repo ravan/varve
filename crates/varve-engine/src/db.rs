@@ -67,6 +67,8 @@ pub enum EngineError {
     UnboundVariable(String),
     #[error("INSERT re-binds already-bound variable '{0}' (a reference must be a bare `(x)` — no labels or properties)")]
     AlreadyBoundVariable(String),
+    #[error("cannot DELETE {0} still-connected node(s); use DETACH DELETE")]
+    StillConnected(usize),
 }
 
 /// Group-commit tuning read from `[log]` (spec §6): a batch flushes when its
@@ -621,6 +623,32 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         panic!("force_flush: block flush did not land within 5s");
+    }
+
+    /// Still-connected incidence (T7) must see FLUSHED edges, not just live
+    /// ones: `force_flush` needs a low `max_block_rows` to actually trigger
+    /// (its own doc comment), so this reuses `blocks_config(dir, 1)` — the
+    /// same size-flush setup as `node_only_flush_preserves_prior_edges_trie_inventory`
+    /// below, whose block-0 step persists this exact edge shape.
+    #[tokio::test]
+    async fn detach_delete_sees_flushed_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(blocks_config(dir.path(), 1)).await.unwrap();
+        db.execute("INSERT (:P {_id: 1})-[:K]->(:P {_id: 2})")
+            .await
+            .unwrap();
+        force_flush(&db).await;
+        let err = db
+            .execute("MATCH (p:P) WHERE p._id = 1 DELETE p")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::StillConnected(1)));
+        db.execute("MATCH (p:P) WHERE p._id = 1 DETACH DELETE p")
+            .await
+            .unwrap();
+        let s = db.state.read().unwrap();
+        // Two edge events now exist for the edge (Put flushed + Delete live).
+        assert_eq!(s.edges.live.event_count(), 1);
     }
 
     #[tokio::test]
