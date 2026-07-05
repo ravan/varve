@@ -308,14 +308,13 @@
   - **T9 `flush` clones every `LogRecord`** (incl. `arrow_ipc`) to build the append arg — doubles peak IPC
     memory for large batches. Move the record out of `Staged` (apply needs only events/receipt/ack). Efficiency.
 - **Slice-4 fast-follows (non-blocking; whole-branch review verdict = READY TO MERGE):**
-  - **Flush-equivalence property tests the SHIPPED merge, not a copy (RECOMMENDED, from Task 12 review + whole-branch):**
-    `varve-testkit/tests/flush_equivalence.rs` reimplements a local `merged()` line-for-line identical to
-    `varve-engine::scan::merged_snapshot` — over 10k randomized flush points it guards the decision-9 codec+prune+merge
-    algorithm, but the shipped `merged_snapshot`/`Db` path is only covered end-to-end by Task 11 `blocks.rs` + Task 13's
-    crash matrix, NOT over randomized flush points. Residual risk = the copy drifting from `merged_snapshot`. FAST-FOLLOW:
-    add a `Db`-driven flush-equivalence variant at a modest case count (~256) vs a memory store to pin the two together.
-    (Was flagged mid-slice via AskUserQuestion; user away — held to the plan's explicit "pure/fast CI" mandate and
-    escalated to the whole-branch review, which ruled it an acceptable fast-follow.)
+  - **~~Flush-equivalence property tests the SHIPPED merge, not a copy~~ RESOLVED** 2026-07-05 (post-slice, commit
+    `refactor: extract pure merge_sources core`): the decision-9 merge/reversal/concat logic was extracted from
+    `varve-engine::scan::merged_snapshot` into a pure, shared `varve_index::merge_sources`; `merged_snapshot` (I/O
+    shell) and `varve-testkit/tests/flush_equivalence.rs` now BOTH call it, so the 10k-case property guards the
+    SHIPPED merge with no copy to drift. Behavior-preserving (all 6 scan unit tests + proptest assertions unchanged);
+    added 2 non-vacuous `merge_sources` unit tests (per-block reversal + block-order + live-last; same-`system_from`
+    intra-block tie via stable reversal — also closes the Task-6 tie-coverage note). 247 workspace tests.
   - **Flush-failure observability (slice 10):** on any PUT failure the flush silently keeps serving + retries next
     trigger (decision 10) — no log/metric surface yet. Add when observability lands (slice 10).
   - **GC of orphaned data/meta objects (slice 8):** a crash between data/meta PUTs and the manifest PUT leaves
@@ -335,7 +334,7 @@
 | 1 walking skeleton | ✅ complete | 1 | `cargo run --example hello -p varve` | INSERT→MATCH e2e in memory; +`varve-gql`(lexer/parser/AST), `varve-index`(LiveTable→Arrow), `varve-plan`(DataFusion), `varve-engine`(Db), `varve` facade; datafusion 54/arrow 58 pinned; 44 workspace tests |
 | 2 bitemporal core | ✅ complete | 1 | `cargo run --example time_travel -p varve` | events + XTDB Ceiling/Polygon port + per-entity resolve; `varve-testkit` reference model + proptest equivalence (10k CI / 200k nightly); temporal GQL (`FOR VALID_TIME`/`SYSTEM_TIME`, `INSERT … VALID`, `MATCH … DELETE`, history fns); `MonotonicClock`; `TxReceipt.system_time`; lock-split query; ~125 workspace tests |
 | 3 durability (log) | ✅ complete | 1 | `cargo run --release --example write_bench -p varve` | `varve-log` crate: `Log` trait + prost envelope + `memory`/`local` backends (CRC32C frames, fsync-before-ack, torn-tail recovery) + writer loop group commit + `Db::open` replay + pluggable `Clock`/`Registries` + `kill -9` crash matrix; bench memory 6226 / local 340 tx/s (M3 Max); 181 workspace tests |
-| 4 blocks & persisted scan | ✅ complete | 1 | `cargo run --release --example block_bench -p varve` | `varve-storage` crate (sovereign `ObjectStore` over object_store 0.13, §9 lex-hex keys, `BlockManifest` commit point, memory cache) + paged block codec/prune in `varve-index` + `Log::trim` + one-lock merged live∪persisted scan + writer-loop flush (data/meta→manifest→reset→trim) + `Db::open` manifest+log-tail recovery + kill-during-flush crash matrix + flush-equivalence proptest; bench 1M events @ 39.8k ev/s, reopen 38 ms, warm point lookup 7.6 ms (<100 ms); 245 workspace tests |
+| 4 blocks & persisted scan | ✅ complete | 1 | `cargo run --release --example block_bench -p varve` | `varve-storage` crate (sovereign `ObjectStore` over object_store 0.13, §9 lex-hex keys, `BlockManifest` commit point, memory cache) + paged block codec/prune in `varve-index` + `Log::trim` + one-lock merged live∪persisted scan + writer-loop flush (data/meta→manifest→reset→trim) + `Db::open` manifest+log-tail recovery + kill-during-flush crash matrix + flush-equivalence proptest; bench 1M events @ 39.8k ev/s, reopen 38 ms, warm point lookup 7.6 ms (<100 ms); 247 workspace tests (incl. post-slice `merge_sources` extraction fast-follow) |
 | 5 s3 backends & caches | not started | – | – | no detailed plan yet |
 | 6 edges & traversal | not started | – | – | no detailed plan yet |
 | 7 GQL completion & TCK | not started | – | – | no detailed plan yet |
