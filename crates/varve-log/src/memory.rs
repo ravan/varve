@@ -4,12 +4,29 @@ use std::sync::{Arc, Mutex};
 use varve_config::{ComponentFactory, ConfigSection, RegistryError};
 use varve_types::LogPosition;
 
+struct Inner {
+    records: Vec<(LogPosition, LogRecord)>,
+    /// Position the next appended record will receive. Explicit (not derived
+    /// from `records.last()`) so a trim never resets the sequence.
+    next: LogPosition,
+}
+
 /// Volatile in-process log (spec §6). Records live only for the process
 /// lifetime — restart loses everything. Useful for tests and non-durable
 /// deployments; the `local` factory (Task 5) adds real durability.
-#[derive(Default)]
 pub struct MemoryLog {
-    records: Mutex<Vec<(LogPosition, LogRecord)>>,
+    inner: Mutex<Inner>,
+}
+
+impl Default for MemoryLog {
+    fn default() -> Self {
+        MemoryLog {
+            inner: Mutex::new(Inner {
+                records: Vec::new(),
+                next: LogPosition::ZERO,
+            }),
+        }
+    }
 }
 
 impl MemoryLog {
@@ -24,18 +41,16 @@ impl Log for MemoryLog {
         if records.is_empty() {
             return Err(LogError::EmptyAppend);
         }
-
-        let mut stored = self.records.lock().map_err(|_| LogError::Poisoned)?;
-        let first = match stored.last() {
-            Some((last, _)) => last.advance(1)?,
-            None => LogPosition::ZERO,
-        };
+        let mut inner = self.inner.lock().map_err(|_| LogError::Poisoned)?;
+        let first = inner.next;
         // Pre-compute positions so an overflow fails before any mutation.
+        let after_batch = first.advance(records.len() as u64)?;
         let mut positioned = Vec::with_capacity(records.len());
         for (i, record) in records.into_iter().enumerate() {
             positioned.push((first.advance(i as u64)?, record));
         }
-        stored.extend(positioned);
+        inner.records.extend(positioned);
+        inner.next = after_batch;
         Ok(first)
     }
 
@@ -44,12 +59,19 @@ impl Log for MemoryLog {
         from: LogPosition,
         to: LogPosition,
     ) -> Result<Vec<(LogPosition, LogRecord)>, LogError> {
-        let stored = self.records.lock().map_err(|_| LogError::Poisoned)?;
-        Ok(stored
+        let inner = self.inner.lock().map_err(|_| LogError::Poisoned)?;
+        Ok(inner
+            .records
             .iter()
             .filter(|(p, _)| *p >= from && *p < to)
             .cloned()
             .collect())
+    }
+
+    async fn trim(&self, up_to: LogPosition) -> Result<(), LogError> {
+        let mut inner = self.inner.lock().map_err(|_| LogError::Poisoned)?;
+        inner.records.retain(|(p, _)| *p >= up_to);
+        Ok(())
     }
 }
 

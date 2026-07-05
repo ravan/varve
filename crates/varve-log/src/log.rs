@@ -42,4 +42,11 @@ pub trait Log: Send + Sync {
     async fn tail(&self, from: LogPosition) -> Result<Vec<(LogPosition, LogRecord)>, LogError> {
         self.read_range(from, LogPosition::from_u64(u64::MAX)).await
     }
+    /// Physically discards records with `position < up_to` where that is
+    /// cheap in whole durability units (whole segments / whole objects).
+    /// Records at or after `up_to` are NEVER removed; earlier ones MAY be
+    /// retained. Positions are never reused after a trim. Called by the
+    /// writer once a block manifest commits (spec §9: the manifest trims
+    /// the log-replay watermark).
+    async fn trim(&self, up_to: LogPosition) -> Result<(), LogError>;
 }

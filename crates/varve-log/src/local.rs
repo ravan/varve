@@ -310,6 +310,30 @@ fn read_range_sync(
     Ok(out)
 }
 
+/// Whole-segment trim: a segment is deletable iff the NEXT segment exists
+/// and starts at or below `up_to` (every record in it is then < up_to). The
+/// active (last) segment is never deleted, so `next`/`segment_len` stay
+/// valid and positions never regress. No mid-segment truncation.
+fn trim_sync(inner: &Inner, up_to: LogPosition) -> Result<(), LogError> {
+    if inner.poisoned {
+        return Err(LogError::Poisoned);
+    }
+    let segments = list_segments(&inner.dir)?;
+    let mut removed = false;
+    for pair in segments.windows(2) {
+        let (_, path) = &pair[0];
+        let (next_first, _) = &pair[1];
+        if *next_first <= up_to.as_u64() {
+            fs::remove_file(path)?;
+            removed = true;
+        }
+    }
+    if removed {
+        fsync_dir(&inner.dir)?;
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl Log for LocalLog {
     async fn append(&self, records: Vec<LogRecord>) -> Result<LogPosition, LogError> {
@@ -331,6 +355,16 @@ impl Log for LocalLog {
         tokio::task::spawn_blocking(move || {
             let guard = inner.lock().map_err(|_| LogError::Poisoned)?;
             read_range_sync(&guard, from, to)
+        })
+        .await
+        .map_err(|e| LogError::Io(std::io::Error::other(e)))?
+    }
+
+    async fn trim(&self, up_to: LogPosition) -> Result<(), LogError> {
+        let inner = Arc::clone(&self.inner);
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| LogError::Poisoned)?;
+            trim_sync(&guard, up_to)
         })
         .await
         .map_err(|e| LogError::Io(std::io::Error::other(e)))?
