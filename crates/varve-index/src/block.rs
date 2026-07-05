@@ -415,6 +415,37 @@ mod tests {
         assert_eq!(events[2].iid, Iid::derive("g", "edges", &[1]));
     }
 
+    /// Mirrors `encode_by_src_sorts_and_stats_by_src` for the `In` family's
+    /// `SortOrder::ByDst`: same shape (arrival order reversed by the sort
+    /// key, a delete landing before its put via `system_from desc`), but
+    /// keyed on `dst` instead of `src` — this direction was never exercised
+    /// by the original BySrc-only coverage.
+    #[test]
+    fn encode_by_dst_sorts_and_stats_by_dst() {
+        let mut live = LiveTable::new();
+        // dst 30 first by arrival, dst 10 second — ByDst must reorder.
+        live.append(edge(1, 100, 30, 1)).unwrap();
+        live.append(edge(2, 200, 10, 2)).unwrap();
+        live.append(Event {
+            op: Op::Delete,
+            ..edge(2, 200, 10, 3)
+        })
+        .unwrap();
+        let block = encode_block_by(&live, 1024, SortOrder::ByDst).unwrap();
+        assert_eq!(block.pages.len(), 1);
+        let page = &block.pages[0];
+        assert_eq!(page.min_iid, Iid::derive("g", "nodes", &[10]));
+        assert_eq!(page.max_iid, Iid::derive("g", "nodes", &[30]));
+        let events = crate::codec::decode_events(
+            &block.data[page.offset as usize..(page.offset + page.len) as usize],
+        )
+        .unwrap();
+        // (dst asc, iid asc, system_from desc): edge 2's two events (delete first) then edge 1.
+        assert_eq!(events[0].iid, Iid::derive("g", "edges", &[2]));
+        assert!(matches!(events[0].op, Op::Delete));
+        assert_eq!(events[2].iid, Iid::derive("g", "edges", &[1]));
+    }
+
     #[test]
     fn encode_by_src_without_endpoints_errors() {
         let mut live = LiveTable::new();

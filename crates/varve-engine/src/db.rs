@@ -921,27 +921,44 @@ mod tests {
     /// Anchor-pruned adjacency must return exactly the full-scan result
     /// filtered to that anchor — across a LIVE tail, a FLUSHED adjacency
     /// family, and a fresh recovery from the manifest. Uses the T5 flush-
-    /// forcing route: `blocks_config` with a threshold of 6 so the three
-    /// setup statements (live_rows 3 → 4 → 5) accumulate WITHOUT flushing,
-    /// then `force_flush`'s one `_Flush` node pushes live_rows to 6 and
-    /// commits block 0 (2 edges → adj families) — after which one more
-    /// matched edge stays live, so `edge_adjacency` genuinely merges the
-    /// live tail with the persisted family.
+    /// forcing route: `blocks_config` with a threshold of 8 so the setup
+    /// statements accumulate WITHOUT flushing (live_rows 3 → 4 → 5 → 6 → 7),
+    /// then `force_flush`'s one `_Flush` node pushes live_rows to 8 and
+    /// commits block 0 (nodes 1-4 + `_Flush`, edges 1→2, 3→4, 1→3) — after
+    /// which one more edge (3→2) stays live.
+    ///
+    /// Node 1 (`ada`)'s two out-edges (1→2, 1→3) are BOTH persisted, so an
+    /// anchored query there alone would never exercise the live-merge path
+    /// — node 3 (`cyd`) instead gets ONE persisted out-edge (3→4, added
+    /// before the flush) AND the one live out-edge (3→2), so `edge_adjacency`
+    /// under that anchor genuinely merges both sources. Node 2 (`bob`)
+    /// symmetrically gets one persisted (1→2) and one live (3→2) in-edge,
+    /// giving `AdjDirection::In` — never functionally exercised before —
+    /// the same live+persisted merge coverage.
     #[tokio::test]
     async fn adjacency_matches_across_live_and_flushed_and_restart() {
         let dir = tempfile::tempdir().unwrap();
         let ada = Iid::derive("default", "nodes", &Value::Int(1).id_bytes().unwrap());
+        let bob = Iid::derive("default", "nodes", &Value::Int(2).id_bytes().unwrap());
+        let cyd = Iid::derive("default", "nodes", &Value::Int(3).id_bytes().unwrap());
         {
-            let db = Db::open(blocks_config(dir.path(), 6)).await.unwrap();
+            let db = Db::open(blocks_config(dir.path(), 8)).await.unwrap();
             db.execute("INSERT (:P {_id: 1})-[:KNOWS]->(:P {_id: 2})")
                 .await
                 .unwrap();
             db.execute("INSERT (:P {_id: 3})").await.unwrap();
+            db.execute("INSERT (:P {_id: 4})").await.unwrap();
+            // Node 3's out-edge to node 4 lands BEFORE the flush — it will
+            // be persisted, so it merges with node 3's LIVE out-edge added
+            // after the flush below (Gap A: anchored-live-merge coverage).
+            db.execute("MATCH (a:P {_id: 3}), (b:P {_id: 4}) INSERT (a)-[:KNOWS]->(b)")
+                .await
+                .unwrap();
             db.execute("MATCH (a:P {_id: 1}), (b:P {_id: 3}) INSERT (a)-[:KNOWS]->(b)")
                 .await
                 .unwrap();
-            // Flush the two edges into the adj families, then add one more
-            // LIVE edge so BOTH sources contribute to the merge below.
+            // Flush the three edges into the adj families, then add one more
+            // LIVE edge so BOTH sources contribute to the merges below.
             force_flush(&db).await;
             db.execute("MATCH (a:P {_id: 3}), (b:P {_id: 2}) INSERT (a)-[:KNOWS]->(b)")
                 .await
@@ -973,20 +990,106 @@ mod tests {
             )
             .await
             .unwrap();
-            let expected: Vec<_> = all.into_iter().filter(|e| e.node == ada).collect();
+            let expected: Vec<_> = all.iter().filter(|e| e.node == ada).copied().collect();
             assert_eq!(out, expected);
+
+            // Gap A: anchored `Out` at node 3 has a persisted (3→4) AND a
+            // live (3→2) out-edge — the live contribution is non-empty and
+            // must survive the anchor narrowing.
+            let out_cyd = edge_adjacency(
+                &db.state,
+                &db.store,
+                "KNOWS",
+                AdjDirection::Out,
+                Some(cyd),
+                &bounds,
+            )
+            .await
+            .unwrap();
+            assert!(!out_cyd.is_empty());
+            assert!(
+                out_cyd.iter().any(|e| e.neighbor == bob),
+                "anchored Out at node 3 must include the LIVE edge 3→2, got {out_cyd:?}"
+            );
+            let expected_cyd: Vec<_> = all.iter().filter(|e| e.node == cyd).copied().collect();
+            assert_eq!(out_cyd, expected_cyd);
+
+            // Gap B: `AdjDirection::In` was never functionally tested.
+            // Node 2's in-edges are the dst-side mirror of node 3's
+            // out-edges above: one persisted (1→2), one live (3→2).
+            let in_bob = edge_adjacency(
+                &db.state,
+                &db.store,
+                "KNOWS",
+                AdjDirection::In,
+                Some(bob),
+                &bounds,
+            )
+            .await
+            .unwrap();
+            assert!(!in_bob.is_empty());
+            let all_in = edge_adjacency(
+                &db.state,
+                &db.store,
+                "KNOWS",
+                AdjDirection::In,
+                None,
+                &bounds,
+            )
+            .await
+            .unwrap();
+            let expected_in: Vec<_> = all_in.into_iter().filter(|e| e.node == bob).collect();
+            assert_eq!(in_bob, expected_in);
         }
         {
             // Restart: the persisted adj families recover from the manifest,
             // in lockstep with the edges primary inventory.
             let db = Db::local(dir.path()).await.unwrap();
-            let s = db.state.read().unwrap();
-            assert_eq!(s.adj_out.len(), s.edges.tries.len());
-            assert_eq!(s.adj_in.len(), s.edges.tries.len());
+            {
+                let s = db.state.read().unwrap();
+                assert_eq!(s.adj_out.len(), s.edges.tries.len());
+                assert_eq!(s.adj_in.len(), s.edges.tries.len());
+                assert!(
+                    !s.edges.tries.is_empty(),
+                    "at least one edges block flushed"
+                );
+            }
+
+            // Gap C: the anchor==full-filtered contract must also hold
+            // against RECOVERED data, not just live state. `ada`'s two
+            // out-edges (1→2, 1→3) were both persisted in block 0, so this
+            // exercises the recovered adj-out family specifically.
+            let now = db.clock.watermark();
+            let bounds = TemporalBounds {
+                valid: TemporalDimension::at(now),
+                system: TemporalDimension::at(now),
+            };
+            let out = edge_adjacency(
+                &db.state,
+                &db.store,
+                "KNOWS",
+                AdjDirection::Out,
+                Some(ada),
+                &bounds,
+            )
+            .await
+            .unwrap();
             assert!(
-                !s.edges.tries.is_empty(),
-                "at least one edges block flushed"
+                !out.is_empty(),
+                "recovered persisted out-edges for node 1 must be non-empty"
             );
+            let all = edge_adjacency(
+                &db.state,
+                &db.store,
+                "KNOWS",
+                AdjDirection::Out,
+                None,
+                &bounds,
+            )
+            .await
+            .unwrap();
+            let expected: Vec<_> = all.into_iter().filter(|e| e.node == ada).collect();
+            assert_eq!(out, expected);
         }
     }
 
