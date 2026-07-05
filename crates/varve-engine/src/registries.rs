@@ -35,7 +35,10 @@ mod tests {
     #[test]
     fn builtins_cover_log_and_clock() {
         let registries = Registries::with_builtins();
-        assert_eq!(registries.log.names(), vec!["local", "memory"]);
+        assert_eq!(
+            registries.log.names(),
+            vec!["local", "memory", "object-store"]
+        );
         assert_eq!(registries.clock.names(), vec!["system"]);
         assert_eq!(registries.storage.names(), vec!["local", "memory", "s3"]);
     }

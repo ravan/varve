@@ -13,6 +13,7 @@ s3 = ["object_store/aws"]
 
 [dependencies]
 varve-config = { path = "../varve-config" }
+varve-types = { path = "../varve-types" }
 object_store = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }

@@ -19,6 +19,9 @@ pub enum LogError {
     Poisoned,
     #[error(transparent)]
     Type(#[from] varve_types::TypeError),
+    #[cfg(feature = "object-store")]
+    #[error("log storage backend error: {0}")]
+    Storage(#[from] varve_storage::StorageError),
 }
 
 /// Ordered, durable stream of transaction records (spec §6). One `LogRecord`

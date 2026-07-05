@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+default = ["object-store"]
+# One object per group-commit batch over the shared block store (spec §6).
+object-store = ["dep:varve-storage", "dep:bytes"]
 # Test-only crash hooks for the varve-testkit kill -9 harness. Inert unless
 # the VARVE_CRASH_TRIGGER env var points at an armed trigger file.
 fault-injection = []
@@ -12,6 +15,8 @@ fault-injection = []
 [dependencies]
 varve-types = { path = "../varve-types" }
 varve-config = { path = "../varve-config" }
+varve-storage = { path = "../varve-storage", optional = true }
+bytes = { workspace = true, optional = true }
 prost = { workspace = true }
 crc32c = { workspace = true }
 serde = { workspace = true }
