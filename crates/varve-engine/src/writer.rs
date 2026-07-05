@@ -6,16 +6,15 @@
 
 use crate::clock::Clock;
 use crate::db::{EngineError, TxReceipt};
+use crate::scan::merged_snapshot;
+use crate::state::{TableState, DEFAULT_GRAPH, NODES_TABLE};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use varve_gql::ast::{DeleteStmt, InsertStmt, Literal, Statement};
-use varve_index::{encode_events, Event, LiveTable, Op};
+use varve_index::{encode_events, Event, Op};
 use varve_log::{Log, LogRecord, TableEffects};
 use varve_types::{Doc, Iid, Instant, TemporalBounds, TemporalDimension, Value};
-
-/// v1: single default graph, and nodes are the only effect batch's target table.
-pub(crate) const NODES_TABLE: &str = "nodes";
 
 /// Bounded submission queue (roadmap slice 3). Config-driven backpressure
 /// semantics arrive in slice 10.
@@ -44,7 +43,8 @@ impl Default for WriterConfig {
 }
 
 pub(crate) struct WriterState {
-    pub live: Arc<RwLock<LiveTable>>,
+    pub state: Arc<RwLock<TableState>>,
+    pub store: Arc<dyn varve_storage::ObjectStore>,
     pub clock: Arc<dyn Clock>,
     pub log: Arc<dyn Log>,
     pub next_tx_id: u64,
@@ -207,7 +207,7 @@ fn resolve_insert(
                 v
             }
         };
-        let iid = Iid::derive("default", NODES_TABLE, &id.id_bytes()?);
+        let iid = Iid::derive(DEFAULT_GRAPH, NODES_TABLE, &id.id_bytes()?);
         events.push(Event {
             iid,
             system_from: system,
@@ -222,11 +222,9 @@ fn resolve_insert(
     Ok(events)
 }
 
-/// MATCH … DELETE (spec §10 DML): resolves the read side against the current
-/// live index — this IS the slice-2 `matching_iids` composition, just called
-/// from inside the writer loop instead of holding a lock across an await.
-/// The lock is dropped before the DataFusion phase, so no await ever spans
-/// the live-table lock — the old single-writer clippy suppression is gone.
+/// MATCH … DELETE (spec §10 DML): resolves the read side against the merged
+/// live∪persisted snapshot at (valid=now, system=now) — a delete must find
+/// flushed entities too (slice-4 plan, decision 13).
 async fn resolve_delete(
     state: &WriterState,
     del: &DeleteStmt,
@@ -236,10 +234,9 @@ async fn resolve_delete(
         valid: TemporalDimension::at(system),
         system: TemporalDimension::at(system),
     };
-    let snapshot = {
-        let live = state.live.read().map_err(|_| EngineError::Poisoned)?;
-        varve_plan::matching_snapshot(&del.pattern, &live, &bounds)?
-    };
+    let label = del.pattern.label.as_deref().unwrap_or("");
+    let iid = varve_plan::iid_point(&del.where_clause, DEFAULT_GRAPH, NODES_TABLE);
+    let snapshot = merged_snapshot(&state.state, &state.store, label, &bounds, iid).await?;
     let iids = varve_plan::iids_from_snapshot(snapshot, &del.where_clause).await?;
     Ok(iids
         .into_iter()
@@ -279,16 +276,16 @@ async fn flush(state: &mut WriterState, mut staged: Vec<Staged>) {
 }
 
 fn apply(state: &WriterState, staged: &mut [Staged]) -> Result<(), String> {
-    let mut live = state
-        .live
+    let mut shared = state
+        .state
         .write()
-        .map_err(|_| "live index lock poisoned".to_string())?;
+        .map_err(|_| "table state lock poisoned".to_string())?;
     for s in staged.iter_mut() {
         for event in std::mem::take(&mut s.events) {
             // OutOfOrderEvent cannot happen here: the writer loop is the only
             // caller of `append`, and `system` is assigned monotonically by
             // this same loop just before the event was built.
-            live.append(event).map_err(|e| e.to_string())?;
+            shared.live.append(event).map_err(|e| e.to_string())?;
         }
     }
     Ok(())
@@ -365,15 +362,16 @@ mod tests {
     fn spawn(
         log: Arc<dyn Log>,
         cfg: WriterConfig,
-    ) -> (mpsc::Sender<Submission>, Arc<RwLock<LiveTable>>) {
-        let live = Arc::new(RwLock::new(LiveTable::new()));
-        let state = WriterState {
-            live: Arc::clone(&live),
+    ) -> (mpsc::Sender<Submission>, Arc<RwLock<TableState>>) {
+        let state = Arc::new(RwLock::new(TableState::new()));
+        let writer_state = WriterState {
+            state: Arc::clone(&state),
+            store: varve_storage::memory_store(),
             clock: Arc::new(MonotonicClock::new()),
             log,
             next_tx_id: 0,
         };
-        (spawn_writer(state, cfg), live)
+        (spawn_writer(writer_state, cfg), state)
     }
 
     /// try_send keeps submission order deterministic (mpsc is FIFO).
@@ -484,7 +482,7 @@ mod tests {
             inner: MemoryLog::new(),
             failed: AtomicBool::new(false),
         });
-        let (sender, live) = spawn(
+        let (sender, state) = spawn(
             Arc::clone(&log) as Arc<dyn Log>,
             WriterConfig {
                 window: Duration::ZERO,
@@ -497,11 +495,11 @@ mod tests {
             Err(EngineError::CommitFailed(_))
         ));
         // Apply-after-durable: the failed batch never touched the live index.
-        assert_eq!(live.read().unwrap().event_count(), 0);
+        assert_eq!(state.read().unwrap().live.event_count(), 0);
 
         let second = submit(&sender, "INSERT (:P {_id: 2})");
         second.await.unwrap().unwrap();
-        assert_eq!(live.read().unwrap().event_count(), 1);
+        assert_eq!(state.read().unwrap().live.event_count(), 1);
         assert_eq!(log.inner.tail(LogPosition::ZERO).await.unwrap().len(), 1);
     }
 
