@@ -11,6 +11,7 @@ pub mod store;
 
 pub use cache::{CacheKey, CacheTier, CachedStore, MemoryCache, MemoryCacheFactory};
 pub use disk::{DiskCache, DiskCacheFactory};
+pub use keys::{adj_data_key, adj_meta_key, ADJ_IN, ADJ_OUT};
 pub use local::{local_store, LocalStoreFactory};
 pub use manifest::{latest_manifest, BlockManifest, TableTries, TrieEntry};
 pub use memory::{memory_store, MemoryStoreFactory};

@@ -72,25 +72,87 @@ pub struct EncodedBlock {
     pub pages: Vec<PageMeta>,
 }
 
+/// Which key a block file is sorted (and page-pruned) by (slice-6 decision 4).
+/// The primary table sorts by `_iid`; the adjacency families co-locate an
+/// edge's full history under its `src`/`dst` endpoint so anchor lookups prune
+/// pages via `PageMeta::selected` with zero new prune code.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SortOrder {
+    ByIid,
+    BySrc,
+    ByDst,
+}
+
 /// Serializes the live table into one L0 block: rows in `(_iid asc,
 /// _system_from desc)` file order (spec §5.2) chunked into pages of
 /// `page_rows`. Pure function of the table (determinism constraint):
 /// BTreeMap iteration + stable per-entity reversal, no clocks, no maps
-/// with random order.
+/// with random order. Thin wrapper over [`encode_block_by`] with the primary
+/// [`SortOrder::ByIid`] order.
 pub fn encode_block(live: &LiveTable, page_rows: usize) -> Result<EncodedBlock, IndexError> {
-    let mut rows: Vec<Event> = Vec::with_capacity(live.event_count());
-    for (_iid, events) in live.entities() {
+    encode_block_by(live, page_rows, SortOrder::ByIid)
+}
+
+/// Like [`encode_block`] but sorted by `(sort_key asc, iid asc, system_from
+/// desc)`, where `sort_key` is `_iid` ([`SortOrder::ByIid`]), `src`
+/// ([`SortOrder::BySrc`]), or `dst` ([`SortOrder::ByDst`]). `PageMeta.min_iid`/
+/// `max_iid` record the SORT KEY's range (not the row iids) so
+/// `PageMeta::selected` prunes adjacency lookups by anchor unchanged.
+/// `BySrc`/`ByDst` on an event that lacks that endpoint ⇒ `IndexError::Codec`.
+///
+/// For `ByIid` the sort key equals each row's iid, so both the row order and
+/// the page min/max iid are byte-identical to the pre-refactor `encode_block`.
+pub fn encode_block_by(
+    live: &LiveTable,
+    page_rows: usize,
+    order: SortOrder,
+) -> Result<EncodedBlock, IndexError> {
+    // Per-entity event lists in (system_from desc) file order, keyed for sorting.
+    let mut groups: Vec<(Iid, Iid, Vec<Event>)> = Vec::new(); // (sort_key, iid, desc events)
+    for (iid, events) in live.entities() {
         // Stable reversal: arrival order → system_from desc, ties reversed
         // exactly; the scan's reversal restores arrival order (decision 9).
-        rows.extend(events.iter().rev().cloned());
+        let desc: Vec<Event> = events.iter().rev().cloned().collect();
+        let sort_key = match order {
+            SortOrder::ByIid => *iid,
+            SortOrder::BySrc => desc.first().and_then(|e| e.src).ok_or_else(|| {
+                IndexError::Codec("edge event missing src endpoint in adjacency encode".into())
+            })?,
+            SortOrder::ByDst => desc.first().and_then(|e| e.dst).ok_or_else(|| {
+                IndexError::Codec("edge event missing dst endpoint in adjacency encode".into())
+            })?,
+        };
+        groups.push((sort_key, *iid, desc));
     }
+    // Total order over (sort_key, iid) ⇒ deterministic file layout.
+    groups.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+
+    let mut rows: Vec<Event> = Vec::with_capacity(live.event_count());
+    let mut keys: Vec<Iid> = Vec::with_capacity(live.event_count()); // sort key per row
+    for (key, _iid, events) in groups {
+        for e in events {
+            rows.push(e);
+            keys.push(key);
+        }
+    }
+
     let mut data = Vec::new();
     let mut pages = Vec::new();
-    for chunk in rows.chunks(page_rows.max(1)) {
+    let chunk = page_rows.max(1);
+    for (i, events) in rows.chunks(chunk).enumerate() {
         let offset = data.len() as u64;
-        let bytes = encode_events(chunk)?;
+        let bytes = encode_events(events)?;
         data.extend_from_slice(&bytes);
-        pages.push(page_meta(chunk, offset, bytes.len() as u64));
+        let key_chunk = &keys[i * chunk..i * chunk + events.len()];
+        let mut meta = page_meta(events, offset, bytes.len() as u64);
+        // Record the SORT KEY's range, not the row iids — this is what
+        // `PageMeta::selected` prunes an adjacency anchor against. For ByIid
+        // the sort key IS the iid, so this equals `page_meta`'s own min/max.
+        // A chunk is never empty (`chunks` skips empties), so the fallback
+        // is unreachable; `unwrap_or` only exists to satisfy the no-unwrap rule.
+        meta.min_iid = *key_chunk.iter().min().unwrap_or(&meta.min_iid);
+        meta.max_iid = *key_chunk.iter().max().unwrap_or(&meta.max_iid);
+        pages.push(meta);
     }
     let meta = encode_meta(&pages)?;
     Ok(EncodedBlock { data, meta, pages })
@@ -308,6 +370,72 @@ mod tests {
             valid: TemporalDimension::at(us(n)),
             system: TemporalDimension::at(us(n)),
         }
+    }
+
+    /// Edge event with endpoints (Task 2 helper shape): edge iid `n`, `src`/
+    /// `dst` node iids, arrival `at`. Used by the adjacency-family encode tests.
+    fn edge(n: u8, src: u8, dst: u8, at: i64) -> Event {
+        Event {
+            iid: Iid::derive("g", "edges", &[n]),
+            system_from: us(at),
+            valid_from: us(at),
+            valid_to: EOT,
+            src: Some(Iid::derive("g", "nodes", &[src])),
+            dst: Some(Iid::derive("g", "nodes", &[dst])),
+            op: Op::Put {
+                labels: vec!["KNOWS".into()],
+                doc: BTreeMap::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn encode_by_src_sorts_and_stats_by_src() {
+        let mut live = LiveTable::new();
+        // src 30 first by arrival, src 10 second — BySrc must reorder.
+        live.append(edge(1, 30, 40, 1)).unwrap();
+        live.append(edge(2, 10, 20, 2)).unwrap();
+        live.append(Event {
+            op: Op::Delete,
+            ..edge(2, 10, 20, 3)
+        })
+        .unwrap();
+        let block = encode_block_by(&live, 1024, SortOrder::BySrc).unwrap();
+        assert_eq!(block.pages.len(), 1);
+        let page = &block.pages[0];
+        assert_eq!(page.min_iid, Iid::derive("g", "nodes", &[10]));
+        assert_eq!(page.max_iid, Iid::derive("g", "nodes", &[30]));
+        let events = crate::codec::decode_events(
+            &block.data[page.offset as usize..(page.offset + page.len) as usize],
+        )
+        .unwrap();
+        // (src asc, iid asc, system_from desc): edge 2's two events (delete first) then edge 1.
+        assert_eq!(events[0].iid, Iid::derive("g", "edges", &[2]));
+        assert!(matches!(events[0].op, Op::Delete));
+        assert_eq!(events[2].iid, Iid::derive("g", "edges", &[1]));
+    }
+
+    #[test]
+    fn encode_by_src_without_endpoints_errors() {
+        let mut live = LiveTable::new();
+        live.append(Event {
+            src: None,
+            dst: None,
+            ..edge(1, 0, 0, 1)
+        })
+        .unwrap();
+        assert!(encode_block_by(&live, 1024, SortOrder::BySrc).is_err());
+    }
+
+    #[test]
+    fn primary_encode_is_unchanged_by_the_refactor() {
+        let mut live = LiveTable::new();
+        live.append(edge(1, 30, 40, 1)).unwrap();
+        live.append(edge(2, 10, 20, 2)).unwrap();
+        let a = encode_block(&live, 1024).unwrap();
+        let b = encode_block_by(&live, 1024, SortOrder::ByIid).unwrap();
+        assert_eq!(a.data, b.data);
+        assert_eq!(a.meta, b.meta);
     }
 
     #[test]

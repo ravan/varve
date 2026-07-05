@@ -63,9 +63,7 @@ pub(crate) struct TableState {
     pub edges: TableCore,
     /// Persisted adjacency families (edges only; populated from Task 6). Held
     /// alongside the primary edge tries so a single write lock swaps both.
-    #[allow(dead_code)]
     pub adj_out: Vec<PersistedTrie>,
-    #[allow(dead_code)]
     pub adj_in: Vec<PersistedTrie>,
 }
 

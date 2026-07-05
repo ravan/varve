@@ -407,28 +407,42 @@ async fn recover(
     let manifest = varve_storage::latest_manifest(store.as_ref()).await?;
     let mut nodes_tries = Vec::new();
     let mut edges_tries = Vec::new();
+    let mut adj_out_tries = Vec::new();
+    let mut adj_in_tries = Vec::new();
     let (mut next_tx_id, next_block_id, mut watermark, mut max_system) = match &manifest {
         Some(m) => {
             for table in &m.tables {
-                // v1 tables: default/nodes and default/edges (spec §5.1).
-                let dest = match (table.graph.as_str(), table.table.as_str()) {
-                    (DEFAULT_GRAPH, NODES_TABLE) => &mut nodes_tries,
-                    (DEFAULT_GRAPH, EDGES_TABLE) => &mut edges_tries,
+                // v1 (table, family): default/nodes and default/edges primary
+                // (family ""), plus the two edge adjacency families (spec §5.1,
+                // slice 6). An empty family means the primary key namespace.
+                let dest = match (
+                    table.graph.as_str(),
+                    table.table.as_str(),
+                    table.family.as_str(),
+                ) {
+                    (DEFAULT_GRAPH, NODES_TABLE, "") => &mut nodes_tries,
+                    (DEFAULT_GRAPH, EDGES_TABLE, "") => &mut edges_tries,
+                    (DEFAULT_GRAPH, EDGES_TABLE, varve_storage::ADJ_OUT) => &mut adj_out_tries,
+                    (DEFAULT_GRAPH, EDGES_TABLE, varve_storage::ADJ_IN) => &mut adj_in_tries,
                     _ => {
                         return Err(EngineError::UnknownTable(format!(
-                            "{}/{}",
-                            table.graph, table.table
+                            "{}/{}/{}",
+                            table.graph, table.table, table.family
                         )))
                     }
                 };
                 for entry in &table.tries {
-                    let meta = store
-                        .get(&varve_storage::keys::meta_key(
+                    let meta_key = if table.family.is_empty() {
+                        varve_storage::keys::meta_key(&table.graph, &table.table, &entry.trie_key)
+                    } else {
+                        varve_storage::keys::adj_meta_key(
                             &table.graph,
                             &table.table,
+                            &table.family,
                             &entry.trie_key,
-                        ))
-                        .await?;
+                        )
+                    };
+                    let meta = store.get(&meta_key).await?;
                     dest.push(PersistedTrie {
                         entry: entry.clone(),
                         pages: Arc::new(varve_index::block::decode_meta(&meta)?),
@@ -478,8 +492,8 @@ async fn recover(
                 live: edges_live,
                 tries: edges_tries,
             },
-            adj_out: Vec::new(),
-            adj_in: Vec::new(),
+            adj_out: adj_out_tries,
+            adj_in: adj_in_tries,
         },
         next_tx_id,
         next_block_id,
@@ -490,8 +504,9 @@ async fn recover(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::{edge_adjacency, AdjDirection};
     use varve_log::{LogRecord, TableEffects};
-    use varve_types::{Iid, Value};
+    use varve_types::{Iid, TemporalBounds, TemporalDimension, Value};
 
     #[tokio::test]
     async fn insert_edge_with_inline_nodes_populates_edges_live() {
@@ -877,6 +892,7 @@ mod tests {
             tables: vec![TableTries {
                 graph: DEFAULT_GRAPH.to_string(),
                 table: NODES_TABLE.to_string(),
+                family: String::new(),
                 tries: vec![TrieEntry {
                     trie_key,
                     row_count: 2,
@@ -902,6 +918,78 @@ mod tests {
         assert_eq!(recovered.watermark.as_u64(), 3);
     }
 
+    /// Anchor-pruned adjacency must return exactly the full-scan result
+    /// filtered to that anchor — across a LIVE tail, a FLUSHED adjacency
+    /// family, and a fresh recovery from the manifest. Uses the T5 flush-
+    /// forcing route: `blocks_config` with a threshold of 6 so the three
+    /// setup statements (live_rows 3 → 4 → 5) accumulate WITHOUT flushing,
+    /// then `force_flush`'s one `_Flush` node pushes live_rows to 6 and
+    /// commits block 0 (2 edges → adj families) — after which one more
+    /// matched edge stays live, so `edge_adjacency` genuinely merges the
+    /// live tail with the persisted family.
+    #[tokio::test]
+    async fn adjacency_matches_across_live_and_flushed_and_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let ada = Iid::derive("default", "nodes", &Value::Int(1).id_bytes().unwrap());
+        {
+            let db = Db::open(blocks_config(dir.path(), 6)).await.unwrap();
+            db.execute("INSERT (:P {_id: 1})-[:KNOWS]->(:P {_id: 2})")
+                .await
+                .unwrap();
+            db.execute("INSERT (:P {_id: 3})").await.unwrap();
+            db.execute("MATCH (a:P {_id: 1}), (b:P {_id: 3}) INSERT (a)-[:KNOWS]->(b)")
+                .await
+                .unwrap();
+            // Flush the two edges into the adj families, then add one more
+            // LIVE edge so BOTH sources contribute to the merge below.
+            force_flush(&db).await;
+            db.execute("MATCH (a:P {_id: 3}), (b:P {_id: 2}) INSERT (a)-[:KNOWS]->(b)")
+                .await
+                .unwrap();
+            let now = db.clock.watermark();
+            let bounds = TemporalBounds {
+                valid: TemporalDimension::at(now),
+                system: TemporalDimension::at(now),
+            };
+            let out = edge_adjacency(
+                &db.state,
+                &db.store,
+                "KNOWS",
+                AdjDirection::Out,
+                Some(ada),
+                &bounds,
+            )
+            .await
+            .unwrap();
+            assert!(!out.is_empty());
+            // Ground truth: same answer from a full scan filtered to the anchor.
+            let all = edge_adjacency(
+                &db.state,
+                &db.store,
+                "KNOWS",
+                AdjDirection::Out,
+                None,
+                &bounds,
+            )
+            .await
+            .unwrap();
+            let expected: Vec<_> = all.into_iter().filter(|e| e.node == ada).collect();
+            assert_eq!(out, expected);
+        }
+        {
+            // Restart: the persisted adj families recover from the manifest,
+            // in lockstep with the edges primary inventory.
+            let db = Db::local(dir.path()).await.unwrap();
+            let s = db.state.read().unwrap();
+            assert_eq!(s.adj_out.len(), s.edges.tries.len());
+            assert_eq!(s.adj_in.len(), s.edges.tries.len());
+            assert!(
+                !s.edges.tries.is_empty(),
+                "at least one edges block flushed"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn recover_rejects_unknown_manifest_tables() {
         use bytes::Bytes;
@@ -917,6 +1005,7 @@ mod tests {
                 graph: "default".to_string(),
                 // `edges` recovers now (slice 6); an invented table must fail.
                 table: "widgets".to_string(),
+                family: String::new(),
                 tries: vec![],
             }],
         };
