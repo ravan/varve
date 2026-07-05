@@ -183,7 +183,13 @@ mod tests {
     #[test]
     fn log_keys_round_trip_and_reject_foreign_keys() {
         use varve_types::LogPosition;
-        for (e, o) in [(0u16, 0u64), (0, 1), (0, 0xff), (3, 0x34), (u16::MAX, 1 << 40)] {
+        for (e, o) in [
+            (0u16, 0u64),
+            (0, 1),
+            (0, 0xff),
+            (3, 0x34),
+            (u16::MAX, 1 << 40),
+        ] {
             let pos = LogPosition::new(e, o).unwrap();
             assert_eq!(parse_log_key(&log_key(pos)), Some(pos), "{e}/{o}");
         }

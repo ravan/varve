@@ -16,7 +16,11 @@ impl ComponentFactory<dyn ObjectStore> for MemoryStoreFactory {
         "memory"
     }
 
-    fn build(&self, _cfg: &ConfigSection, _ctx: &BuildContext) -> Result<Arc<dyn ObjectStore>, RegistryError> {
+    fn build(
+        &self,
+        _cfg: &ConfigSection,
+        _ctx: &BuildContext,
+    ) -> Result<Arc<dyn ObjectStore>, RegistryError> {
         Ok(memory_store())
     }
 }

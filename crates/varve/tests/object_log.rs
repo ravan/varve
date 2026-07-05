@@ -39,13 +39,17 @@ async fn object_store_log_replays_after_reopen() {
         toml_escaped(&dir.path().join("store"))
     );
     {
-        let db = Db::open(Config::from_toml_str(&toml).unwrap()).await.unwrap();
+        let db = Db::open(Config::from_toml_str(&toml).unwrap())
+            .await
+            .unwrap();
         // execute() acks only after the durable PUT, so both records are in
         // v1/log/ the moment these return — dropping the Db is safe.
         db.execute("INSERT (:P {_id: 1, name: 'a'})").await.unwrap();
         db.execute("INSERT (:P {_id: 2, name: 'b'})").await.unwrap();
     }
-    let db = Db::open(Config::from_toml_str(&toml).unwrap()).await.unwrap();
+    let db = Db::open(Config::from_toml_str(&toml).unwrap())
+        .await
+        .unwrap();
     let batches = db.query("MATCH (p:P) RETURN p.name").await.unwrap();
     assert_eq!(rows(&batches), 2, "slice-3 replay through the object log");
 }

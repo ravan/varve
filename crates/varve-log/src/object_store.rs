@@ -188,9 +188,14 @@ impl ComponentFactory<dyn Log> for ObjectStoreLogFactory {
         "object-store"
     }
 
-    fn build(&self, _cfg: &ConfigSection, ctx: &BuildContext) -> Result<Arc<dyn Log>, RegistryError> {
-        let store = ctx.get::<Arc<dyn ObjectStore>>().ok_or_else(|| {
-            RegistryError::Build {
+    fn build(
+        &self,
+        _cfg: &ConfigSection,
+        ctx: &BuildContext,
+    ) -> Result<Arc<dyn Log>, RegistryError> {
+        let store = ctx
+            .get::<Arc<dyn ObjectStore>>()
+            .ok_or_else(|| RegistryError::Build {
                 kind: "log",
                 name: "object-store".into(),
                 source: "no storage component in the build context; the \
@@ -198,8 +203,7 @@ impl ComponentFactory<dyn Log> for ObjectStoreLogFactory {
                          through Db::open, which builds storage first"
                     .to_string()
                     .into(),
-            }
-        })?;
+            })?;
         Ok(Arc::new(ObjectStoreLog::new(store)))
     }
 }

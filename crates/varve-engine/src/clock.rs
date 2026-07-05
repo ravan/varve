@@ -75,7 +75,11 @@ impl ComponentFactory<dyn Clock> for SystemClockFactory {
         "system"
     }
 
-    fn build(&self, _cfg: &ConfigSection, _ctx: &BuildContext) -> Result<Arc<dyn Clock>, RegistryError> {
+    fn build(
+        &self,
+        _cfg: &ConfigSection,
+        _ctx: &BuildContext,
+    ) -> Result<Arc<dyn Clock>, RegistryError> {
         Ok(Arc::new(MonotonicClock::new()))
     }
 }
@@ -128,7 +132,9 @@ mod tests {
     #[test]
     fn system_factory_builds_a_clock() {
         use varve_config::{BuildContext, ComponentFactory, ConfigSection};
-        let clock = SystemClockFactory.build(&ConfigSection::empty(), &BuildContext::empty()).unwrap();
+        let clock = SystemClockFactory
+            .build(&ConfigSection::empty(), &BuildContext::empty())
+            .unwrap();
         assert!(clock.next() > Instant::from_micros(0));
     }
 }

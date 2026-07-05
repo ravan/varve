@@ -83,7 +83,11 @@ impl ComponentFactory<dyn Log> for MemoryLogFactory {
         "memory"
     }
 
-    fn build(&self, _cfg: &ConfigSection, _ctx: &BuildContext) -> Result<Arc<dyn Log>, RegistryError> {
+    fn build(
+        &self,
+        _cfg: &ConfigSection,
+        _ctx: &BuildContext,
+    ) -> Result<Arc<dyn Log>, RegistryError> {
         Ok(Arc::new(MemoryLog::new()))
     }
 }
