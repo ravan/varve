@@ -200,3 +200,82 @@ async fn split_matching_equals_one_shot() {
     assert_eq!(split.len(), 2); // Ada and Cyd are 36
     assert_eq!(split, one_shot);
 }
+
+mod pushdown {
+    use varve_gql::ast::{Expr, Literal, Statement};
+    use varve_plan::{effective_bounds, iid_point};
+    use varve_types::{Iid, Instant, TemporalDimension, Value};
+
+    fn query(gql: &str) -> varve_gql::ast::QueryStmt {
+        let Statement::Query(q) = varve_gql::parse(gql).unwrap() else {
+            panic!("not a query");
+        };
+        *q
+    }
+
+    #[test]
+    fn effective_bounds_default_to_now_on_both_axes() {
+        let q = query("MATCH (p:P) RETURN p.x");
+        let now = Instant::from_micros(1000);
+        let b = effective_bounds(&q, now);
+        assert_eq!(b.valid, TemporalDimension::at(now));
+        assert_eq!(b.system, TemporalDimension::at(now));
+    }
+
+    #[test]
+    fn effective_bounds_honor_query_level_clauses() {
+        let q =
+            query("FOR VALID_TIME AS OF TIMESTAMP '2020-01-01T00:00:00Z' MATCH (p:P) RETURN p.x");
+        let now = Instant::from_micros(2_000_000_000_000_000);
+        let b = effective_bounds(&q, now);
+        let t2020 = Instant::parse_rfc3339("2020-01-01T00:00:00Z").unwrap();
+        assert_eq!(b.valid, TemporalDimension::at(t2020));
+        assert_eq!(b.system, TemporalDimension::at(now)); // unstated axis defaults
+    }
+
+    fn id_eq(prop: &str, value: Literal) -> Option<Expr> {
+        Some(Expr::PropEq {
+            var: "p".into(),
+            prop: prop.into(),
+            value,
+        })
+    }
+
+    #[test]
+    fn iid_point_from_id_equality() {
+        let expected = Iid::derive("default", "nodes", &Value::Int(42).id_bytes().unwrap());
+        assert_eq!(
+            iid_point(&id_eq("_id", Literal::Int(42)), "default", "nodes"),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn iid_point_distinguishes_literal_types() {
+        // Int(49) and Str("1") collide as raw bytes; id_bytes type tags differ.
+        let a = iid_point(&id_eq("_id", Literal::Int(0x31)), "default", "nodes");
+        let b = iid_point(&id_eq("_id", Literal::Str("1".into())), "default", "nodes");
+        assert!(a.is_some() && b.is_some());
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn iid_point_falls_back_to_none() {
+        // non-_id property
+        assert_eq!(
+            iid_point(&id_eq("name", Literal::Int(1)), "default", "nodes"),
+            None
+        );
+        // literals that cannot be ids (Value::id_bytes errors)
+        assert_eq!(
+            iid_point(&id_eq("_id", Literal::Float(2.5)), "default", "nodes"),
+            None
+        );
+        assert_eq!(
+            iid_point(&id_eq("_id", Literal::Null), "default", "nodes"),
+            None
+        );
+        // no WHERE at all
+        assert_eq!(iid_point(&None, "default", "nodes"), None);
+    }
+}
