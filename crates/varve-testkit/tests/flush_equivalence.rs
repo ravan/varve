@@ -1,16 +1,17 @@
 //! Roadmap slice 4: same op history, randomized flush points (and page
 //! sizes) must yield IDENTICAL query results to the never-flushed table —
-//! across random bounds, including erase/delete histories. The merge loop
-//! below mirrors `varve-engine::scan::merged_snapshot` exactly (block order,
-//! page pruning, per-entity reversal), minus the object store.
+//! across random bounds, including erase/delete histories. This test
+//! decodes persisted blocks the same way `varve-engine::scan::merged_snapshot`
+//! does (page pruning, per-block decode), minus the object store, then calls
+//! the SHIPPED `varve_index::merge_sources` to merge them with the live
+//! tail — so the property exercises the real merge core, not a copy of it.
 #![allow(clippy::unwrap_used)]
 
 use proptest::prelude::*;
-use std::collections::BTreeMap;
 use varve_index::block::{encode_block, EncodedBlock};
 use varve_index::{decode_events, snapshot_entities, Event, LiveTable};
 use varve_testkit::strategy::{arb_bounds, arb_history};
-use varve_types::{Iid, TemporalBounds};
+use varve_types::Iid;
 
 fn cases() -> u32 {
     // 10k in CI; the nightly job raises this via PROPTEST_CASES (slice 2).
@@ -36,39 +37,6 @@ fn split_points(idxs: &[prop::sample::Index], len: usize) -> Vec<usize> {
     pts
 }
 
-/// The engine's merge (scan.rs), minus the object store: blocks in ascending
-/// (time) order, pages pruned by `selected(bounds, None)`, per-entity
-/// reversal to arrival order, live events last.
-fn merged(
-    blocks: &[EncodedBlock],
-    live: &LiveTable,
-    bounds: &TemporalBounds,
-) -> BTreeMap<Iid, Vec<Event>> {
-    let mut merged: BTreeMap<Iid, Vec<Event>> = BTreeMap::new();
-    for block in blocks {
-        let mut per_block: BTreeMap<Iid, Vec<Event>> = BTreeMap::new();
-        for page in block.pages.iter().filter(|p| p.selected(bounds, None)) {
-            let bytes = &block.data[page.offset as usize..(page.offset + page.len) as usize];
-            for event in decode_events(bytes).unwrap() {
-                per_block.entry(event.iid).or_default().push(event);
-            }
-        }
-        for (iid, desc) in per_block {
-            merged
-                .entry(iid)
-                .or_default()
-                .extend(desc.into_iter().rev());
-        }
-    }
-    for (iid, events) in live.entities() {
-        merged
-            .entry(*iid)
-            .or_default()
-            .extend(events.iter().cloned());
-    }
-    merged
-}
-
 proptest! {
     #![proptest_config(ProptestConfig { cases: cases(), ..ProptestConfig::default() })]
 
@@ -85,18 +53,41 @@ proptest! {
 
         // Flushed variant: every segment before the last cut becomes a block.
         let pts = split_points(&cut_idxs, history.len());
-        let mut blocks = Vec::new();
+        let mut encoded_blocks: Vec<EncodedBlock> = Vec::new();
         let mut start = 0usize;
         for p in pts {
             let segment = &history[start..p];
             if !segment.is_empty() {
-                blocks.push(encode_block(&table(segment), page_rows).unwrap());
+                encoded_blocks.push(encode_block(&table(segment), page_rows).unwrap());
             }
             start = p;
         }
         let live = table(&history[start..]);
 
-        let sources = merged(&blocks, &live, &bounds);
+        // Decode each block's selected pages in file order (mirrors the
+        // engine's page pruning + ranged decode, minus the object store),
+        // then merge via the shipped `varve_index::merge_sources` core.
+        let blocks: Vec<Vec<Event>> = encoded_blocks
+            .iter()
+            .map(|block: &EncodedBlock| {
+                block
+                    .pages
+                    .iter()
+                    .filter(|p| p.selected(&bounds, None))
+                    .flat_map(|page| {
+                        let bytes = &block.data
+                            [page.offset as usize..(page.offset + page.len) as usize];
+                        decode_events(bytes).unwrap()
+                    })
+                    .collect::<Vec<Event>>()
+            })
+            .collect();
+        let live_events: Vec<(Iid, Vec<Event>)> = live
+            .entities()
+            .map(|(iid, events)| (*iid, events.to_vec()))
+            .collect();
+
+        let sources = varve_index::merge_sources(blocks, live_events);
         let got = snapshot_entities(
             sources.iter().map(|(iid, events)| (*iid, events.as_slice())),
             "P",

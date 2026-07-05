@@ -193,6 +193,45 @@ where
     )?))
 }
 
+/// Merge decoded events from persisted blocks and a live tail into
+/// per-entity arrival order — the source-agnostic core of the bitemporal
+/// scan (spec §10, decision 9). `blocks` must arrive in ascending (time)
+/// order; each block's events are in FILE order per entity (system_from
+/// DESC, decision 9). `live` holds each entity's events already in arrival
+/// (log) order.
+///
+/// Per block, events are grouped by entity (preserving file order), then
+/// each entity's group is reversed to restore arrival order; blocks are
+/// concatenated in block order; live events are appended last since they
+/// are always newest. This is pure and infallible — the async-free core
+/// the flush-equivalence property test exercises directly.
+pub fn merge_sources<B, L>(blocks: B, live: L) -> BTreeMap<Iid, Vec<Event>>
+where
+    B: IntoIterator<Item = Vec<Event>>,
+    L: IntoIterator<Item = (Iid, Vec<Event>)>,
+{
+    let mut merged: BTreeMap<Iid, Vec<Event>> = BTreeMap::new();
+    for block_events in blocks {
+        // Group the block's events by entity (preserving file order =
+        // system_from DESC per entity), then reverse per entity to restore
+        // arrival order.
+        let mut per_block: BTreeMap<Iid, Vec<Event>> = BTreeMap::new();
+        for event in block_events {
+            per_block.entry(event.iid).or_default().push(event);
+        }
+        for (iid, desc) in per_block {
+            merged
+                .entry(iid)
+                .or_default()
+                .extend(desc.into_iter().rev());
+        }
+    }
+    for (iid, events) in live {
+        merged.entry(iid).or_default().extend(events);
+    }
+    merged
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,5 +326,51 @@ mod tests {
         assert_eq!(ones[0].system_from, us(2)); // arrival order preserved
         assert_eq!(ones[1].system_from, us(3));
         assert!(live.events_for(&iid(9)).is_none());
+    }
+
+    /// One entity's run spans two persisted blocks plus a live tail. Each
+    /// block stores its slice of the run in file order (system_from DESC,
+    /// decision 9); `merge_sources` must reverse per block to arrival order,
+    /// concatenate blocks in block (time) order, then append live last.
+    #[test]
+    fn merge_sources_merges_blocks_then_live_with_per_block_reversal() {
+        let entity = iid(1);
+        let block_a = vec![put(1, 3, "c"), put(1, 2, "b")]; // file order DESC
+        let block_b = vec![put(1, 5, "e"), put(1, 4, "d")]; // file order DESC
+        let live: Vec<(Iid, Vec<Event>)> = vec![(entity, vec![put(1, 6, "f"), put(1, 7, "g")])];
+
+        let merged = merge_sources([block_a, block_b], live);
+
+        let got: Vec<i64> = merged[&entity]
+            .iter()
+            .map(|e| e.system_from.as_micros())
+            .collect();
+        assert_eq!(got, vec![2, 3, 4, 5, 6, 7]);
+    }
+
+    /// Two events in one block share the same `system_from` (a legitimate
+    /// intra-block tie). `merge_sources` must restore arrival order by
+    /// reversing file order, NOT by sorting on a key that can't
+    /// discriminate ties.
+    #[test]
+    fn merge_sources_reverses_same_system_from_ties_by_position_not_sort() {
+        let entity = iid(1);
+        let x = put(1, 5, "x");
+        let y = put(1, 5, "y");
+        let block = vec![x, y]; // file order: x arrived after y (DESC)
+
+        let merged = merge_sources([block], std::iter::empty::<(Iid, Vec<Event>)>());
+
+        let names: Vec<&str> = merged[&entity]
+            .iter()
+            .map(|e| match &e.op {
+                Op::Put { doc, .. } => match doc.get("name") {
+                    Some(Value::Str(s)) => s.as_str(),
+                    _ => "?",
+                },
+                _ => "?",
+            })
+            .collect();
+        assert_eq!(names, vec!["y", "x"]); // reversed file order, not re-sorted
     }
 }
