@@ -3576,7 +3576,9 @@ name = "varve-plan"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "async-trait",
  "datafusion",
+ "futures",
  "thiserror",
  "tokio",
  "varve-gql",

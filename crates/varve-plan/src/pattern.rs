@@ -8,14 +8,18 @@
 //! through here unchanged.
 //!
 //! Task 9 plugs `PathExpand` into the `Expand`/`Adjacency` slots this module
-//! already emits; until then a quantified hop lowers to `SpecKind::Expand` and
-//! is rejected with `Unsupported` at execution time.
+//! emits: a quantified hop lowers to a [`crate::expand::PathExpandNode`]
+//! (`LogicalPlan::Extension`) whose produced `expand_iid` is joined to the end
+//! node's `_iid`, and all execution runs through the planner-installed
+//! [`crate::expand::session_context`].
 
 use crate::exec::{iid_of, temporal_fn_columns, to_df_literal};
+use crate::expand::{session_context, EdgeAdjacency, PathExpandNode};
 use crate::PlanError;
 use datafusion::arrow::datatypes::{Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::MemTable;
+use datafusion::logical_expr::{Extension, LogicalPlan};
 use datafusion::prelude::*;
 use std::sync::Arc;
 use varve_gql::ast::{
@@ -72,16 +76,11 @@ pub enum SpecKind {
     },
 }
 
-/// Placeholder for Task 9's adjacency handle. Task 8 emits it only for a
-/// quantified hop, whose `execute_pattern` arm rejects the query with
-/// `Unsupported` until Task 9 moves the real type into `expand.rs`.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct EdgeAdjacency;
-
 /// The engine's answer to one [`ScanSpec`], in the same order as `specs`.
 pub enum ScanInput {
     Batch(Option<RecordBatch>),
-    /// Task 9's adjacency input for an `Expand` element.
+    /// Task 9's adjacency input for an `Expand` element: the resolved
+    /// (bounds-applied) adjacency the engine built for this quantified hop.
     Adjacency(Arc<EdgeAdjacency>),
 }
 
@@ -227,13 +226,17 @@ pub async fn execute_pattern(
         }
     }
 
-    let ctx = SessionContext::new();
+    // The planner-installed context: `PathExpand` extension nodes lower to
+    // `PathExpandExec` through it, and non-expand queries fall through to the
+    // default planner unchanged.
+    let ctx = session_context();
 
     // 1. One mangled DataFrame per element, with its own predicates applied.
     //    A `None` batch ⇒ that element matched nothing ⇒ the whole join is
-    //    empty. `Adjacency` inputs (Task 9) push a `None` frame consumed
-    //    positionally by the expansion arm.
+    //    empty. `Adjacency` inputs (Task 9) push a `None` frame and keep the
+    //    resolved adjacency for the expansion arm, consumed positionally.
     let mut frames: Vec<Option<DataFrame>> = Vec::with_capacity(specs.len());
+    let mut adjacencies: Vec<Option<Arc<EdgeAdjacency>>> = Vec::with_capacity(specs.len());
     let mut row_counts: Vec<usize> = Vec::with_capacity(specs.len());
     for (i, (spec, input)) in specs.iter().zip(inputs).enumerate() {
         match input {
@@ -251,10 +254,12 @@ pub async fn execute_pattern(
                     &stmt.where_clause,
                 )?;
                 frames.push(Some(df));
+                adjacencies.push(None);
             }
-            ScanInput::Adjacency(_) => {
+            ScanInput::Adjacency(adj) => {
                 row_counts.push(0);
                 frames.push(None);
+                adjacencies.push(Some(adj));
             }
         }
     }
@@ -267,7 +272,7 @@ pub async fn execute_pattern(
         .any(|s| matches!(s.kind, SpecKind::Expand { .. }));
     let forward = has_expand
         || row_counts.first().copied().unwrap_or(0) <= row_counts.last().copied().unwrap_or(0);
-    let df = join_chain(frames, specs, path, forward)?;
+    let df = join_chain(frames, adjacencies, specs, path, forward)?;
 
     // 3. RETURN projection over the mangled columns.
     project_return(df, stmt, specs).await
@@ -384,8 +389,49 @@ fn join_hop(
     )?)
 }
 
+/// A quantified hop: builds a [`PathExpandNode`] over `acc` (which ends at the
+/// hop's start node `prev_var`), then joins its produced `expand_iid` to the
+/// end node's `_iid`. Direction is already baked into `adjacency`'s orientation
+/// by the engine, so no edge-direction handling is needed here.
+#[allow(clippy::too_many_arguments)]
+fn expand_hop(
+    acc: DataFrame,
+    end_frame: DataFrame,
+    adjacency: Arc<EdgeAdjacency>,
+    prev_var: &str,
+    end_var: &str,
+    path_var: Option<String>,
+    min: u32,
+    max: u32,
+) -> Result<DataFrame, PlanError> {
+    let (state, plan) = acc.into_parts();
+    let node = PathExpandNode::try_new(
+        plan,
+        adjacency,
+        mangled(prev_var, "_iid"),
+        mangled(end_var, "expand_iid"),
+        path_var.as_ref().map(|p| mangled(p, "path")),
+        min,
+        max,
+    )?;
+    let plan = LogicalPlan::Extension(Extension {
+        node: Arc::new(node),
+    });
+    let acc = DataFrame::new(state, plan);
+    let expand_key = mangled(end_var, "expand_iid");
+    let end_iid = mangled(end_var, "_iid");
+    Ok(acc.join(
+        end_frame,
+        JoinType::Inner,
+        &[expand_key.as_str()],
+        &[end_iid.as_str()],
+        None,
+    )?)
+}
+
 fn join_chain(
     mut frames: Vec<Option<DataFrame>>,
+    mut adjacencies: Vec<Option<Arc<EdgeAdjacency>>>,
     specs: &[ScanSpec],
     path: &PathPattern,
     forward: bool,
@@ -395,24 +441,53 @@ fn join_chain(
     let hops = path.hops.len();
     fn take(frames: &mut [Option<DataFrame>], idx: usize) -> Result<DataFrame, PlanError> {
         frames.get_mut(idx).and_then(Option::take).ok_or_else(|| {
-            PlanError::Unsupported("quantified paths land in task 9 of slice 6".into())
+            PlanError::Unsupported("internal: missing element frame in join chain".into())
         })
     }
     if forward {
+        // A quantified hop anchors on the start side, so any Expand forces the
+        // forward walk (see the `forward` computation in `execute_pattern`).
         let mut acc = take(&mut frames, 0)?;
         for i in 0..hops {
-            let edge_frame = take(&mut frames, 1 + 2 * i)?;
-            let node_frame = take(&mut frames, 2 + 2 * i)?;
-            acc = join_hop(
-                acc,
-                edge_frame,
-                node_frame,
-                &path.hops[i].0,
-                &specs[2 * i].var,
-                &specs[2 + 2 * i].var,
-                &specs[1 + 2 * i].var,
-                true,
-            )?;
+            let edge_idx = 1 + 2 * i;
+            let node_idx = 2 + 2 * i;
+            if let SpecKind::Expand {
+                min, max, path_var, ..
+            } = &specs[edge_idx].kind
+            {
+                let adjacency = adjacencies
+                    .get_mut(edge_idx)
+                    .and_then(Option::take)
+                    .ok_or_else(|| {
+                        PlanError::Unsupported(
+                            "internal: missing adjacency for quantified hop".into(),
+                        )
+                    })?;
+                let end_frame = take(&mut frames, node_idx)?;
+                acc = expand_hop(
+                    acc,
+                    end_frame,
+                    adjacency,
+                    &specs[2 * i].var,
+                    &specs[node_idx].var,
+                    path_var.clone(),
+                    *min,
+                    *max,
+                )?;
+            } else {
+                let edge_frame = take(&mut frames, edge_idx)?;
+                let node_frame = take(&mut frames, node_idx)?;
+                acc = join_hop(
+                    acc,
+                    edge_frame,
+                    node_frame,
+                    &path.hops[i].0,
+                    &specs[2 * i].var,
+                    &specs[node_idx].var,
+                    &specs[edge_idx].var,
+                    true,
+                )?;
+            }
         }
         Ok(acc)
     } else {
@@ -474,10 +549,15 @@ async fn project_return(
                     alias.clone().unwrap_or_else(|| default_name.to_string()),
                 )
             }
-            ReturnItem::Var { .. } => {
-                return Err(PlanError::Unsupported(
-                    "path variables land in task 9 of slice 6".into(),
-                ));
+            ReturnItem::Var { var, alias } => {
+                // A path variable projects the `List<FixedSizeBinary(16)>`
+                // column the `PathExpand` node bound as `{var}__path`. It is
+                // not a scan-spec var, so it is located by that column alone.
+                let col_name = mangled(var, "path");
+                if !has_col(&col_name) {
+                    return Err(PlanError::UnknownVariable(var.clone()));
+                }
+                (col_name, alias.clone().unwrap_or_else(|| var.clone()))
             }
         };
         projection.push(col(col_name).alias(out_name));

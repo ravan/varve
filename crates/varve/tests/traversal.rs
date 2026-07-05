@@ -303,3 +303,110 @@ async fn two_hop_traversal_survives_flush_and_restart() {
         .unwrap();
     assert_eq!(names(&rows, "name"), vec!["Cy".to_string()]);
 }
+
+// ---- quantified paths (task 9) ------------------------------------------
+
+#[tokio::test]
+async fn quantified_hop_one_to_three() {
+    let db = Db::memory();
+    // chain: n1 -> n2 -> n3 -> n4 -> n5
+    db.execute("INSERT (:P {_id: 1, name: 'n1'}), (:P {_id: 2, name: 'n2'}), (:P {_id: 3, name: 'n3'}), (:P {_id: 4, name: 'n4'}), (:P {_id: 5, name: 'n5'})").await.unwrap();
+    for (a, b) in [(1, 2), (2, 3), (3, 4), (4, 5)] {
+        db.execute(&format!(
+            "MATCH (a:P {{_id: {a}}}), (b:P {{_id: {b}}}) INSERT (a)-[:K]->(b)"
+        ))
+        .await
+        .unwrap();
+    }
+    let rows = db
+        .query("MATCH (a:P)-[:K]->{1,3}(b:P) WHERE a.name = 'n1' RETURN b.name")
+        .await
+        .unwrap();
+    assert_eq!(
+        names(&rows, "name"),
+        vec!["n2".to_string(), "n3".to_string(), "n4".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn star_is_zero_to_cap_and_zero_length_binds_start() {
+    let db = Db::memory();
+    db.execute("INSERT (:P {_id: 1, name: 'solo'})")
+        .await
+        .unwrap();
+    let rows = db
+        .query("MATCH (a:P)-[:K]->*(b:P) WHERE a.name = 'solo' RETURN b.name")
+        .await
+        .unwrap();
+    assert_eq!(names(&rows, "name"), vec!["solo".to_string()]); // zero hops: b = a
+}
+
+#[tokio::test]
+async fn quantifier_beyond_max_path_depth_errors() {
+    let db = Db::memory();
+    db.execute("INSERT (:P {_id: 1})").await.unwrap();
+    let err = db
+        .query("MATCH (a:P)-[:K]->{1,99}(b:P) RETURN b._id")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("max_path_depth"));
+}
+
+#[tokio::test]
+async fn cycles_terminate_at_depth_cap() {
+    let db = Db::memory();
+    db.execute("INSERT (a:P {_id: 1, name: 'x'}), (a)-[:K]->(a)")
+        .await
+        .unwrap();
+    let rows = db
+        .query("MATCH (a:P)-[:K]->{1,3}(b:P) RETURN b.name")
+        .await
+        .unwrap();
+    assert_eq!(rows.iter().map(|b| b.num_rows()).sum::<usize>(), 3); // one WALK per depth
+}
+
+#[tokio::test]
+async fn path_variable_binds_element_list() {
+    use datafusion::arrow::array::{FixedSizeBinaryArray, ListArray};
+    let db = Db::memory();
+    db.execute("INSERT (:P {_id: 1, name: 'a'})").await.unwrap();
+    db.execute("INSERT (:P {_id: 2, name: 'b'})").await.unwrap();
+    db.execute("MATCH (a:P {_id: 1}), (b:P {_id: 2}) INSERT (a)-[:K]->(b)")
+        .await
+        .unwrap();
+    let rows = db
+        .query("MATCH p = (a:P)-[:K]->{1,2}(b:P) WHERE a._id = 1 RETURN p")
+        .await
+        .unwrap();
+    let batch = &rows[0];
+    let list = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    let first = list.value(0);
+    let elems = first
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .unwrap();
+    assert_eq!(elems.len(), 3); // n, e, n
+}
+
+#[tokio::test]
+async fn quantified_traversal_respects_as_of_time() {
+    let db = Db::memory();
+    db.execute("INSERT (:P {_id: 1, name: 'a'}), (:P {_id: 2, name: 'b'})")
+        .await
+        .unwrap();
+    db.execute("MATCH (a:P {_id: 1}), (b:P {_id: 2}) INSERT (a)-[:K]->(b) VALID FROM TIMESTAMP '2030-01-01T00:00:00Z'").await.unwrap();
+    let rows = db
+        .query("MATCH (a:P)-[:K]->{1,2}(b:P) WHERE a._id = 1 RETURN b.name")
+        .await
+        .unwrap();
+    assert_eq!(rows.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
+    let rows = db
+        .query("FOR VALID_TIME AS OF TIMESTAMP '2031-01-01T00:00:00Z' MATCH (a:P)-[:K]->{1,2}(b:P) WHERE a._id = 1 RETURN b.name")
+        .await
+        .unwrap();
+    assert_eq!(names(&rows, "name"), vec!["b".to_string()]);
+}

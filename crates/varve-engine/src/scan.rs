@@ -7,9 +7,23 @@ use crate::db::EngineError;
 use crate::state::{TableKind, TableState, DEFAULT_GRAPH, EDGES_TABLE};
 use datafusion::arrow::record_batch::RecordBatch;
 use std::sync::{Arc, RwLock};
+use varve_gql::ast::Literal;
 use varve_index::{decode_events, snapshot_entities, Event, Op};
 use varve_storage::{keys, ObjectStore};
-use varve_types::{Iid, TemporalBounds};
+use varve_types::{Iid, TemporalBounds, Value};
+
+/// `Literal` → `Value` (crate-private duplicate of the writer's helper — tiny,
+/// and keeps the scan layer independent of the writer). Used to match a
+/// quantified hop's inline edge props against each visible edge version's doc.
+fn literal_to_value(l: &Literal) -> Value {
+    match l {
+        Literal::Int(i) => Value::Int(*i),
+        Literal::Float(f) => Value::Float(*f),
+        Literal::Str(s) => Value::Str(s.clone()),
+        Literal::Bool(b) => Value::Bool(*b),
+        Literal::Null => Value::Null,
+    }
+}
 
 pub(crate) async fn merged_snapshot(
     state: &Arc<RwLock<TableState>>,
@@ -116,6 +130,7 @@ async fn edge_adjacency_impl(
     state: &Arc<RwLock<TableState>>,
     store: &Arc<dyn ObjectStore>,
     label: Option<&str>,
+    props: &[(String, Literal)],
     direction: AdjDirection,
     anchor: Option<Iid>,
     bounds: &TemporalBounds,
@@ -186,11 +201,20 @@ async fn edge_adjacency_impl(
     let mut entries = Vec::new();
     for (edge, events) in &merged {
         let visible = varve_index::resolve(events, bounds);
-        let labeled = visible.iter().any(|v| match &v.event.op {
-            Op::Put { labels, .. } => label.is_none_or(|l| labels.iter().any(|x| x == l)),
+        // A hop matches when some visible version is a `Put` carrying `label`
+        // (or any label when `None`) AND every requested inline prop equals a
+        // present key in that version's doc (decision 13: a missing key is a
+        // non-match, never a wildcard).
+        let matched = visible.iter().any(|v| match &v.event.op {
+            Op::Put { labels, doc } => {
+                label.is_none_or(|l| labels.iter().any(|x| x == l))
+                    && props.iter().all(|(k, want)| {
+                        doc.get(k).is_some_and(|got| *got == literal_to_value(want))
+                    })
+            }
             _ => false,
         });
-        if !labeled {
+        if !matched {
             continue;
         }
         let (Some(src), Some(dst)) = (events[0].src, events[0].dst) else {
@@ -215,16 +239,16 @@ async fn edge_adjacency_impl(
 /// Label-filtered adjacency lookup: kept alongside `incident_edges` so T8/T9
 /// call sites read clearly. `PathExpand` (task 8) is its first production
 /// consumer; slice 6 ships and tests the lookup itself.
-#[allow(dead_code)]
 pub(crate) async fn edge_adjacency(
     state: &Arc<RwLock<TableState>>,
     store: &Arc<dyn ObjectStore>,
     label: &str,
+    props: &[(String, Literal)],
     direction: AdjDirection,
     anchor: Option<Iid>,
     bounds: &TemporalBounds,
 ) -> Result<Vec<AdjacencyEntry>, EngineError> {
-    edge_adjacency_impl(state, store, Some(label), direction, anchor, bounds).await
+    edge_adjacency_impl(state, store, Some(label), props, direction, anchor, bounds).await
 }
 
 /// Label-blind variant of `edge_adjacency`: every visible `Put` edge
@@ -239,7 +263,7 @@ pub(crate) async fn incident_edges(
     node: Iid,
     bounds: &TemporalBounds,
 ) -> Result<Vec<AdjacencyEntry>, EngineError> {
-    edge_adjacency_impl(state, store, None, direction, Some(node), bounds).await
+    edge_adjacency_impl(state, store, None, &[], direction, Some(node), bounds).await
 }
 
 #[cfg(test)]
