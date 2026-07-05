@@ -19,7 +19,7 @@ fn ordered_pair() -> impl Strategy<Value = (Instant, Instant)> {
     })
 }
 
-fn arb_valid_range() -> impl Strategy<Value = (Instant, Instant)> {
+pub(crate) fn arb_valid_range() -> impl Strategy<Value = (Instant, Instant)> {
     prop_oneof![
         3 => ordered_pair(),
         2 => (0..T_POOL).prop_map(|a| (Instant::from_micros(a), Instant::END_OF_TIME)),
