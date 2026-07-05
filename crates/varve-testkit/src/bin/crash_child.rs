@@ -54,22 +54,41 @@ fn blocks_config(work: &Path, k: u64) -> varve::Config {
     .expect("child config")
 }
 
-/// The flush runs asynchronously after the K-th ack; "none" runs must not
-/// exit before the manifest lands (else the parent sees a clean run with no
-/// flush at all).
-fn wait_for_manifest_file(work: &Path) {
+/// Number of `.vseg` segment files currently on disk under `dir`. A
+/// transient read error (e.g. a segment mid-unlink by a concurrent trim)
+/// just means "not settled yet", so it maps to `None` rather than panicking.
+fn segment_count(dir: &Path) -> Option<usize> {
+    let mut count = 0usize;
+    for entry in dir.read_dir().ok()? {
+        let path = entry.ok()?.path();
+        if path.extension().is_some_and(|ext| ext == "vseg") {
+            count += 1;
+        }
+    }
+    Some(count)
+}
+
+/// The flush runs asynchronously after the K-th ack, and trim runs strictly
+/// after the manifest PUT lands; "none" runs must not exit until BOTH have
+/// happened (else the parent could observe a clean run with no flush at
+/// all, or catch the log mid-trim between the manifest PUT and trim
+/// completing — either way its "log trimmed to one record" assertion would
+/// flake). `segment_max_bytes = 1` (see `blocks_config`) means a completed
+/// trim always leaves exactly one `.vseg` file on disk.
+fn wait_for_flush_to_settle(work: &Path) {
     let blocks = work.join("store").join("v1").join("blocks");
+    let log_dir = work.join("log");
     for _ in 0..200 {
-        if blocks
+        let manifest_present = blocks
             .read_dir()
             .map(|mut d| d.next().is_some())
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        if manifest_present && segment_count(&log_dir) == Some(1) {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    panic!("child: flush produced no manifest within 5s");
+    panic!("child: flush did not settle (manifest + trim) within 5s");
 }
 
 #[tokio::main]
@@ -108,7 +127,7 @@ async fn main() {
 
     match point.as_str() {
         "none" => {
-            wait_for_manifest_file(&work); // let the flush commit + trim
+            wait_for_flush_to_settle(&work); // let the flush commit + trim
         }
         "post-ack" => park_for_kill("post-ack"),
         // The writer task's crash_point announces and parks inside
