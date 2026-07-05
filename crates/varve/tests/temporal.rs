@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)] // tests may use unwrap; crate-level allow covers helper fns
 use arrow::array::{Array, Int64Array, StringArray, TimestampMicrosecondArray};
-use varve::{Db, Instant, RecordBatch};
+use varve::{Db, EngineError, Instant, RecordBatch};
 
 fn rows(batches: &[RecordBatch]) -> usize {
     batches.iter().map(|b| b.num_rows()).sum()
@@ -137,6 +137,34 @@ async fn delete_then_as_of_before_the_delete() {
         .await
         .unwrap();
     assert_eq!(strings(&back, "name"), vec!["Zoe"]);
+}
+
+// Guard: inline props on a DELETE-matched node aren't filtered yet (task 7
+// of slice 6 wires them into iids_from_snapshot). Until then the engine must
+// refuse rather than silently deleting every node of the label — proving no
+// data loss when the guard fires.
+#[tokio::test]
+async fn delete_with_inline_props_is_rejected_and_deletes_nothing() {
+    let db = Db::memory();
+    db.execute("INSERT (:P {_id: 1, name: 'keep'})")
+        .await
+        .unwrap();
+    db.execute("INSERT (:P {_id: 2, name: 'drop'})")
+        .await
+        .unwrap();
+
+    let err = db
+        .execute("MATCH (p:P {name: 'drop'}) DELETE p")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::Unsupported(_)),
+        "expected Unsupported, got {err:?}"
+    );
+
+    let batches = db.query("MATCH (p:P) RETURN p.name").await.unwrap();
+    assert_eq!(rows(&batches), 2, "guard must not delete either node");
+    assert_eq!(strings(&batches, "name"), vec!["drop", "keep"]);
 }
 
 #[tokio::test]
