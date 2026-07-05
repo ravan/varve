@@ -384,10 +384,42 @@ impl Db {
                     )
                     .await?,
                 ),
-                // Quantified hops (task 9): the placeholder adjacency input is
-                // rejected by `execute_pattern` with `Unsupported` until then.
-                varve_plan::SpecKind::Expand { .. } => {
-                    varve_plan::ScanInput::Adjacency(Arc::new(varve_plan::EdgeAdjacency))
+                // Quantified hops (task 9): resolve the label-filtered edge
+                // adjacency AT THE QUERY'S TEMPORAL BOUNDS (so AS-OF-time
+                // quantified traversal is correct — an edge invisible at the
+                // bounds never appears), oriented per the hop's direction, and
+                // hand the walk-semantics core the ready-made adjacency.
+                varve_plan::SpecKind::Expand {
+                    label,
+                    direction,
+                    props,
+                    ..
+                } => {
+                    let adj_direction = match direction {
+                        varve_gql::ast::Direction::Out => crate::scan::AdjDirection::Out,
+                        varve_gql::ast::Direction::In => crate::scan::AdjDirection::In,
+                    };
+                    let entries = crate::scan::edge_adjacency(
+                        &self.state,
+                        &self.store,
+                        label,
+                        props,
+                        adj_direction,
+                        None,
+                        &bounds,
+                    )
+                    .await?;
+                    let adjacency =
+                        varve_plan::EdgeAdjacency::from_entries(entries.into_iter().map(|e| {
+                            (
+                                e.node,
+                                varve_plan::AdjEdge {
+                                    neighbor: e.neighbor,
+                                    edge: e.edge,
+                                },
+                            )
+                        }));
+                    varve_plan::ScanInput::Adjacency(Arc::new(adjacency))
                 }
             };
             inputs.push(input);
@@ -1039,6 +1071,7 @@ mod tests {
                 &db.state,
                 &db.store,
                 "KNOWS",
+                &[],
                 AdjDirection::Out,
                 Some(ada),
                 &bounds,
@@ -1051,6 +1084,7 @@ mod tests {
                 &db.state,
                 &db.store,
                 "KNOWS",
+                &[],
                 AdjDirection::Out,
                 None,
                 &bounds,
@@ -1067,6 +1101,7 @@ mod tests {
                 &db.state,
                 &db.store,
                 "KNOWS",
+                &[],
                 AdjDirection::Out,
                 Some(cyd),
                 &bounds,
@@ -1088,6 +1123,7 @@ mod tests {
                 &db.state,
                 &db.store,
                 "KNOWS",
+                &[],
                 AdjDirection::In,
                 Some(bob),
                 &bounds,
@@ -1099,6 +1135,7 @@ mod tests {
                 &db.state,
                 &db.store,
                 "KNOWS",
+                &[],
                 AdjDirection::In,
                 None,
                 &bounds,
@@ -1135,6 +1172,7 @@ mod tests {
                 &db.state,
                 &db.store,
                 "KNOWS",
+                &[],
                 AdjDirection::Out,
                 Some(ada),
                 &bounds,
@@ -1149,6 +1187,7 @@ mod tests {
                 &db.state,
                 &db.store,
                 "KNOWS",
+                &[],
                 AdjDirection::Out,
                 None,
                 &bounds,

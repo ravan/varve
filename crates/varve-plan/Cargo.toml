@@ -10,6 +10,8 @@ varve-index = { path = "../varve-index" }
 varve-types = { path = "../varve-types" }
 datafusion = { workspace = true }
 thiserror = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
