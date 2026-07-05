@@ -205,35 +205,48 @@ impl Db {
     /// Like [`Db::open`], but with caller-supplied registries — the spec §4
     /// extension point: register custom `Log`/`Clock` factories, then open.
     pub async fn open_with(config: &Config, registries: &Registries) -> Result<Db, EngineError> {
-        let log_section = config.section("log").unwrap_or_else(ConfigSection::empty);
-        let log_backend = log_section.backend().unwrap_or("memory").to_string();
-        let log = registries.log.build(&log_backend, &log_section, &BuildContext::empty())?;
-
+        // Storage FIRST: later factories may consume the raw store through
+        // the BuildContext (spec §4 ctx) — the object-store log shares the
+        // block store's bucket and keyspace (spec §9).
         let storage_section = config
             .section("storage")
             .unwrap_or_else(ConfigSection::empty);
         let storage_backend = storage_section.backend().unwrap_or("memory").to_string();
-        // Decision 11: flushing trims the durable log; blocks must be at
-        // least as durable as the log they replace.
+        let raw_store =
+            registries
+                .storage
+                .build(&storage_backend, &storage_section, &BuildContext::empty())?;
+
+        // The RAW store goes into the context: log traffic must not flow
+        // through (or fill) the query-path cache wired below.
+        let mut ctx = BuildContext::empty();
+        ctx.insert(Arc::clone(&raw_store));
+
+        let log_section = config.section("log").unwrap_or_else(ConfigSection::empty);
+        let log_backend = log_section.backend().unwrap_or("memory").to_string();
+        // Decision 11 (slice 4): a DURABLE log over a volatile block store
+        // would trim durable data while blocks evaporate on restart.
         if log_backend == "local" && storage_backend == "memory" {
             return Err(EngineError::VolatileBlockStore);
         }
-        let backend = registries
-            .storage
-            .build(&storage_backend, &storage_section, &BuildContext::empty())?;
+        let log = registries.log.build(&log_backend, &log_section, &ctx)?;
+
+        // Slice-4 cache wiring, now over raw_store (replaced in Task 6).
         let cache_tuning: CacheTuning = config
             .section("cache")
             .unwrap_or_else(ConfigSection::empty)
             .get()?;
         let store: Arc<dyn ObjectStore> = Arc::new(CachedStore::new(
-            backend,
+            Arc::clone(&raw_store),
             Arc::new(MemoryCache::new(cache_tuning.memory_max_bytes)),
         ));
 
         let clock_section = config.section("clock").unwrap_or_else(ConfigSection::empty);
-        let clock = registries
-            .clock
-            .build(clock_section.backend().unwrap_or("system"), &clock_section, &BuildContext::empty())?;
+        let clock = registries.clock.build(
+            clock_section.backend().unwrap_or("system"),
+            &clock_section,
+            &ctx,
+        )?;
 
         let log_tuning: LogTuning = log_section.get()?;
         let storage_tuning: StorageTuning = storage_section.get()?;
@@ -243,7 +256,6 @@ impl Db {
             max_block_rows: storage_tuning.max_block_rows,
             flush_interval: Duration::from_millis(storage_tuning.flush_interval_ms),
         };
-
         let recovered = recover(log.as_ref(), clock.as_ref(), &store).await?;
         Ok(Self::assemble(
             recovered.state,
