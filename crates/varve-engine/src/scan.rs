@@ -80,12 +80,9 @@ pub(crate) async fn merged_snapshot(
 
 /// Which adjacency family a lookup traverses: `Out` follows `src → dst` (the
 /// src-sorted `adj-out` family), `In` follows `dst → src` (the dst-sorted
-/// `adj-in` family).
-///
-/// `dead_code`: the adjacency-lookup surface is exercised by tests here in
-/// slice 6; its production consumer is the traversal path (`PathExpand`, task
-/// 7), which is where `AdjDirection::In` is first driven.
-#[allow(dead_code)]
+/// `adj-in` family). `resolve_delete`'s still-connected check (task 7) drives
+/// both variants via `incident_edges`; `PathExpand` (task 8) is
+/// `edge_adjacency`'s first production consumer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum AdjDirection {
     Out,
@@ -95,7 +92,6 @@ pub(crate) enum AdjDirection {
 /// One traversable edge at the query bounds: `node` is the anchor-side
 /// endpoint (src for `Out`, dst for `In`), `neighbor` the other endpoint,
 /// `edge` the edge's own iid.
-#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct AdjacencyEntry {
     pub node: Iid,
@@ -108,20 +104,18 @@ pub(crate) struct AdjacencyEntry {
 /// with the persisted adjacency family, whose pages are pruned by the anchor
 /// via `PageMeta::selected` (the anchor is the family's sort-key point) and
 /// then filtered exactly. Each surviving edge is resolved at `bounds`; edges
-/// whose visible version is a `Put` carrying `label` become one entry. Output
-/// is sorted by `(node, neighbor, edge)` and — because `merge_sources` keys by
-/// edge iid — carries exactly one entry per edge. Deterministic.
+/// whose visible version is a `Put` become one entry when `label` is `None`
+/// (any label matches — the label-blind variant used by `incident_edges`) or
+/// when `label` is `Some` and one of the edge's labels matches it exactly.
+/// Output is sorted by `(node, neighbor, edge)` and — because `merge_sources`
+/// keys by edge iid — carries exactly one entry per edge. Deterministic.
 ///
 /// Correctness contract: for any anchor, the anchored result equals the full
 /// (`anchor == None`) result filtered to that node.
-///
-/// `dead_code`: consumed by the traversal path (task 7); slice 6 ships and
-/// tests the lookup itself.
-#[allow(dead_code)]
-pub(crate) async fn edge_adjacency(
+async fn edge_adjacency_impl(
     state: &Arc<RwLock<TableState>>,
     store: &Arc<dyn ObjectStore>,
-    label: &str,
+    label: Option<&str>,
     direction: AdjDirection,
     anchor: Option<Iid>,
     bounds: &TemporalBounds,
@@ -193,7 +187,7 @@ pub(crate) async fn edge_adjacency(
     for (edge, events) in &merged {
         let visible = varve_index::resolve(events, bounds);
         let labeled = visible.iter().any(|v| match &v.event.op {
-            Op::Put { labels, .. } => labels.iter().any(|l| l == label),
+            Op::Put { labels, .. } => label.is_none_or(|l| labels.iter().any(|x| x == l)),
             _ => false,
         });
         if !labeled {
@@ -216,6 +210,36 @@ pub(crate) async fn edge_adjacency(
     }
     entries.sort_by_key(|e| (e.node, e.neighbor, e.edge));
     Ok(entries)
+}
+
+/// Label-filtered adjacency lookup: kept alongside `incident_edges` so T8/T9
+/// call sites read clearly. `PathExpand` (task 8) is its first production
+/// consumer; slice 6 ships and tests the lookup itself.
+#[allow(dead_code)]
+pub(crate) async fn edge_adjacency(
+    state: &Arc<RwLock<TableState>>,
+    store: &Arc<dyn ObjectStore>,
+    label: &str,
+    direction: AdjDirection,
+    anchor: Option<Iid>,
+    bounds: &TemporalBounds,
+) -> Result<Vec<AdjacencyEntry>, EngineError> {
+    edge_adjacency_impl(state, store, Some(label), direction, anchor, bounds).await
+}
+
+/// Label-blind variant of `edge_adjacency`: every visible `Put` edge
+/// incident to `node` counts, regardless of its label. `resolve_delete`'s
+/// still-connected check and DETACH DELETE's cascade (task 7) must catch
+/// edges of ANY label, so they scan through this instead of
+/// `edge_adjacency`'s label filter.
+pub(crate) async fn incident_edges(
+    state: &Arc<RwLock<TableState>>,
+    store: &Arc<dyn ObjectStore>,
+    direction: AdjDirection,
+    node: Iid,
+    bounds: &TemporalBounds,
+) -> Result<Vec<AdjacencyEntry>, EngineError> {
+    edge_adjacency_impl(state, store, None, direction, Some(node), bounds).await
 }
 
 #[cfg(test)]
