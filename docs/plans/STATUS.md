@@ -364,6 +364,26 @@
     Unreachable in v1 (statements come from parsed GQL). Harden both together when it can matter.
   - **T9 `flush` clones every `LogRecord`** (incl. `arrow_ipc`) to build the append arg — doubles peak IPC
     memory for large batches. Move the record out of `Staged` (apply needs only events/receipt/ack). Efficiency.
+- **Slice-5 fast-follows (non-blocking; whole-branch review verdict = READY TO MERGE WITH FIXES — the two
+  ship-bar fixes were applied in commit `c4beea6`; the rest are tracked here):**
+  - **Disk-cache store-identity namespacing (Important, do before multi-store cache sharing):** `CacheKey` is
+    `(path, range)` with no store identity, and every DB uses the same `v1/blocks/…`/`v1/log/…` keyspace. Sharing one
+    persistent `[cache.disk] dir` across two backends would silently serve wrong bytes. SHIPPED FIX: loud doc note on
+    `DiskCache`/`DiskCacheFactory` ("one dir per store"). DURABLE FIX (fast-follow): a store-identity marker file written
+    on `DiskCache::open` (bucket+endpoint or a minted UUID) that refuses/clears the dir on mismatch, and/or prefix the
+    encoded key with a store token.
+  - **`object_store_log.rs` no-default-features compile (Minor) — RESOLVED** commit `c4beea6`: added
+    `#![cfg(feature = "object-store")]` so `cargo test -p varve-log --no-default-features` compiles (the file becomes empty).
+  - **Disk-cache `open` TOCTOU (Minor, slice 8/10 hardening):** `disk.rs` `open`'s per-file `fs::metadata?` aborts the
+    whole open (and thus `Db::open`) on a race, unlike the best-effort sweep around it. Use `.ok()`/`unwrap_or(UNIX_EPOCH)`.
+  - **Probe-key entropy (Minor, before slice-10 cas-failover trusts the verdict):** `Db::probe_capabilities` keys on
+    `clock.next().as_micros()` and probe objects are never deleted; a wall-clock regression to a previously-probed µs would
+    yield a false `Inconsistent`. Add a per-open nonce, and have slice-8 GC sweep `v1/probe/`.
+  - **`backend-matrix` CI unproven (Minor):** the job runs 3 live containers per push/PR with 2-min init polls — validated
+    LOCALLY via `just s3-matrix` but not yet green in GitHub Actions. Confirm on first push (or gate behind a label/manual
+    dispatch) before treating it as a required check.
+  - **`list_objects` re-sort / `#[derive(Default)]` on BuildContext / `docker()` stdout-drop:** reviewer-triaged as
+    non-defects or trivial; leave as-is.
 - **Slice-4 fast-follows (non-blocking; whole-branch review verdict = READY TO MERGE):**
   - **~~Flush-equivalence property tests the SHIPPED merge, not a copy~~ RESOLVED** 2026-07-05 (post-slice, commit
     `refactor: extract pure merge_sources core`): the decision-9 merge/reversal/concat logic was extracted from
