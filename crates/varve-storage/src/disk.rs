@@ -7,6 +7,15 @@
 //! page-sized reads as ref-counted borrows (avoiding the copy on `get`) is a
 //! post-v1 refinement. Follows `MemoryCache`'s discipline: a poisoned lock
 //! degrades to cache-miss behavior, never an error.
+//!
+//! **One `dir` per store.** Cache keys are `(object-path, byte-range)` only —
+//! they carry no store identity, and every Varve database uses the identical
+//! `v1/blocks/…`/`v1/log/…` keyspace. Because this tier *persists*, pointing
+//! two different backends (different bucket/endpoint/local dir) at the SAME
+//! `[cache.disk] dir` would let one store's cached bytes satisfy the other's
+//! read for the same key — silent wrong results. Each store MUST own its cache
+//! directory. (Store-identity namespacing is a tracked fast-follow; until then
+//! this is a documented operator constraint.)
 
 use crate::cache::{CacheKey, CacheTier};
 use crate::store::StorageError;
@@ -271,7 +280,8 @@ fn default_disk_max_bytes() -> u64 {
 }
 
 /// Registry factory: listed as `"disk"` in `[cache] tiers`; `[cache.disk]`
-/// requires `dir` (`max_bytes` default 50 GiB).
+/// requires `dir` (`max_bytes` default 50 GiB). `dir` MUST be dedicated to a
+/// single store — see the module-level "One `dir` per store" note.
 pub struct DiskCacheFactory;
 
 impl ComponentFactory<dyn CacheTier> for DiskCacheFactory {

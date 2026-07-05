@@ -1,3 +1,8 @@
+// The object-store log lives behind the (default-on) `object-store` feature;
+// gate the whole integration test so `cargo test -p varve-log
+// --no-default-features` compiles (this file becomes an empty crate) rather
+// than failing on the feature-gated imports below.
+#![cfg(feature = "object-store")]
 #![allow(clippy::unwrap_used)]
 use bytes::Bytes;
 use std::ops::Range;
