@@ -12,6 +12,7 @@ futures = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
+prost = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -10,6 +10,8 @@ pub enum StorageError {
     Backend(#[source] object_store::Error),
     #[error("storage I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("manifest decode failed: {0}")]
+    Decode(#[from] prost::DecodeError),
 }
 
 /// Maps a backend error, preserving the key when it was not found.
