@@ -3059,8 +3059,10 @@ dependencies = [
  "tempfile",
  "tokio",
  "varve",
+ "varve-engine",
  "varve-index",
  "varve-log",
+ "varve-storage",
  "varve-types",
 ]
 
