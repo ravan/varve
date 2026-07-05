@@ -97,15 +97,17 @@ fn default_flush_interval_ms() -> u64 {
     300_000
 }
 
-/// `[cache]` tuning (decision 14: integer bytes, like group_commit_max_bytes).
+/// `[cache]` (spec §4/§9): named tiers composed OUTERMOST-FIRST —
+/// `tiers = ["memory", "disk"]` checks memory, then disk, then the backend.
+/// An empty list runs uncached. Per-tier tuning lives in `[cache.<name>]`.
 #[derive(serde::Deserialize)]
-struct CacheTuning {
-    #[serde(default = "default_cache_memory_max_bytes")]
-    memory_max_bytes: usize,
+struct CacheConfig {
+    #[serde(default = "default_cache_tiers")]
+    tiers: Vec<String>,
 }
 
-fn default_cache_memory_max_bytes() -> usize {
-    512 * 1024 * 1024
+fn default_cache_tiers() -> Vec<String> {
+    vec!["memory".to_string()]
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -231,15 +233,16 @@ impl Db {
         }
         let log = registries.log.build(&log_backend, &log_section, &ctx)?;
 
-        // Slice-4 cache wiring, now over raw_store (replaced in Task 6).
-        let cache_tuning: CacheTuning = config
-            .section("cache")
-            .unwrap_or_else(ConfigSection::empty)
-            .get()?;
-        let store: Arc<dyn ObjectStore> = Arc::new(CachedStore::new(
-            Arc::clone(&raw_store),
-            Arc::new(MemoryCache::new(cache_tuning.memory_max_bytes)),
-        ));
+        // [cache] tiers, folded outermost-first over raw_store (Task 6).
+        let cache_section = config.section("cache").unwrap_or_else(ConfigSection::empty);
+        let cache_config: CacheConfig = cache_section.get()?;
+        let mut store: Arc<dyn ObjectStore> = Arc::clone(&raw_store);
+        // Innermost tier wraps first, so the FIRST listed tier is the first
+        // one checked on a read.
+        for name in cache_config.tiers.iter().rev() {
+            let tier = registries.cache.build(name, &cache_section, &ctx)?;
+            store = Arc::new(CachedStore::new(store, tier));
+        }
 
         let clock_section = config.section("clock").unwrap_or_else(ConfigSection::empty);
         let clock = registries.clock.build(

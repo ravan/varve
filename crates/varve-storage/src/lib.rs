@@ -8,8 +8,8 @@ pub mod memory;
 pub mod s3;
 pub mod store;
 
-pub use cache::{CacheKey, CacheTier, CachedStore, MemoryCache};
-pub use disk::DiskCache;
+pub use cache::{CacheKey, CacheTier, CachedStore, MemoryCache, MemoryCacheFactory};
+pub use disk::{DiskCache, DiskCacheFactory};
 pub use local::{local_store, LocalStoreFactory};
 pub use manifest::{latest_manifest, BlockManifest, TableTries, TrieEntry};
 pub use memory::{memory_store, MemoryStoreFactory};
@@ -39,5 +39,24 @@ fn register_builtin(
 ) {
     if let Err(e) = reg.register(factory) {
         unreachable!("built-in storage factory registration must not collide: {e}");
+    }
+}
+
+/// All built-in cache tiers, registered under kind "cache".
+pub fn cache_registry() -> Registry<dyn CacheTier> {
+    let mut reg = Registry::new("cache");
+    register_cache_builtin(&mut reg, Box::new(MemoryCacheFactory));
+    register_cache_builtin(&mut reg, Box::new(DiskCacheFactory));
+    reg
+}
+
+/// Same rationale as `register_builtin`: builtin names are a static,
+/// distinct set — a collision is a programming error in this crate.
+fn register_cache_builtin(
+    reg: &mut Registry<dyn CacheTier>,
+    factory: Box<dyn ComponentFactory<dyn CacheTier>>,
+) {
+    if let Err(e) = reg.register(factory) {
+        unreachable!("built-in cache factory registration must not collide: {e}");
     }
 }

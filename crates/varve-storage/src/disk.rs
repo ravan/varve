@@ -14,7 +14,8 @@ use bytes::Bytes;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
 use xxhash_rust::xxh3::xxh3_128;
 
 const MAGIC: &[u8; 4] = b"VCA1";
@@ -254,6 +255,50 @@ impl CacheTier for DiskCache {
                 inner.bytes -= e.bytes;
                 let _ = fs::remove_file(&e.file);
             }
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct DiskCacheConfig {
+    dir: String,
+    #[serde(default = "default_disk_max_bytes")]
+    max_bytes: u64,
+}
+
+fn default_disk_max_bytes() -> u64 {
+    50 * 1024 * 1024 * 1024
+}
+
+/// Registry factory: listed as `"disk"` in `[cache] tiers`; `[cache.disk]`
+/// requires `dir` (`max_bytes` default 50 GiB).
+pub struct DiskCacheFactory;
+
+impl ComponentFactory<dyn CacheTier> for DiskCacheFactory {
+    fn name(&self) -> &'static str {
+        "disk"
+    }
+
+    fn build(
+        &self,
+        cfg: &ConfigSection,
+        _ctx: &BuildContext,
+    ) -> Result<Arc<dyn CacheTier>, RegistryError> {
+        let section = cfg.child("disk").ok_or_else(|| RegistryError::Build {
+            kind: "cache",
+            name: "disk".into(),
+            source: "missing [cache.disk] section (requires `dir`)"
+                .to_string()
+                .into(),
+        })?;
+        let config: DiskCacheConfig = section.get()?;
+        match DiskCache::open(Path::new(&config.dir), config.max_bytes) {
+            Ok(cache) => Ok(Arc::new(cache)),
+            Err(e) => Err(RegistryError::Build {
+                kind: "cache",
+                name: "disk".into(),
+                source: Box::new(e),
+            }),
         }
     }
 }

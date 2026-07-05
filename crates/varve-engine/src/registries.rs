@@ -1,7 +1,7 @@
 use crate::clock::{Clock, SystemClockFactory};
 use varve_config::Registry;
 use varve_log::Log;
-use varve_storage::ObjectStore;
+use varve_storage::{CacheTier, ObjectStore};
 
 /// Per-subsystem component registries (spec §4). `with_builtins()` wires up
 /// everything compiled in; embedding applications may `register` additional
@@ -10,6 +10,7 @@ pub struct Registries {
     pub log: Registry<dyn Log>,
     pub clock: Registry<dyn Clock>,
     pub storage: Registry<dyn ObjectStore>,
+    pub cache: Registry<dyn CacheTier>,
 }
 
 impl Registries {
@@ -23,6 +24,7 @@ impl Registries {
             log: varve_log::log_registry(),
             clock,
             storage: varve_storage::storage_registry(),
+            cache: varve_storage::cache_registry(),
         }
     }
 }
@@ -41,6 +43,7 @@ mod tests {
         );
         assert_eq!(registries.clock.names(), vec!["system"]);
         assert_eq!(registries.storage.names(), vec!["local", "memory", "s3"]);
+        assert_eq!(registries.cache.names(), vec!["disk", "memory"]);
     }
 
     #[test]
