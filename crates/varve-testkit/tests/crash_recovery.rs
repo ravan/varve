@@ -77,8 +77,13 @@ fn acked_seqs(work: &Path) -> Vec<u64> {
 
 /// Full log validation: every frame, every protobuf record, every Arrow
 /// effect payload must decode ("log parses cleanly"). Returns record count.
+///
+/// `Db::local(work.join("log"))` (see `crash_child` and `surviving_seqs`)
+/// treats its argument as a parent directory holding a durable `log/` +
+/// `store/` pair (decision 11), so the actual log segments live one level
+/// deeper, at `work/log/log`.
 async fn parse_log(work: &Path) -> usize {
-    let log = LocalLog::open(&work.join("log"), DEFAULT_SEGMENT_MAX_BYTES).unwrap();
+    let log = LocalLog::open(&work.join("log").join("log"), DEFAULT_SEGMENT_MAX_BYTES).unwrap();
     let records = log.tail(LogPosition::ZERO).await.unwrap();
     for (_, record) in &records {
         for effect in &record.effects {
