@@ -109,6 +109,18 @@ fn default_flush_interval_ms() -> u64 {
     300_000
 }
 
+/// Query planning tuning read from `[query]` (spec §10). Unknown keys are
+/// ignored, as with `LogTuning`/`StorageTuning`.
+#[derive(serde::Deserialize)]
+struct QueryTuning {
+    #[serde(default = "default_max_path_depth")]
+    max_path_depth: u32,
+}
+
+fn default_max_path_depth() -> u32 {
+    10
+}
+
 /// `[cache]` (spec §4/§9): named tiers composed OUTERMOST-FIRST —
 /// `tiers = ["memory", "disk"]` checks memory, then disk, then the backend.
 /// An empty list runs uncached. Per-tier tuning lives in `[cache.<name>]`.
@@ -143,6 +155,11 @@ pub struct Db {
     store: Arc<dyn ObjectStore>,
     clock: Arc<dyn Clock>,
     submit: mpsc::Sender<Submission>,
+    /// Cap on quantified-hop expansion length (spec §10, `[query]
+    /// max_path_depth`); an unbounded `*`/`{m,}` quantifier is lowered to this
+    /// depth. Task 9 consumes it during expansion; Task 8 already validates
+    /// `scan_specs` quantifier bounds against it.
+    max_path_depth: u32,
 }
 
 fn cached(store: Arc<dyn ObjectStore>) -> Arc<dyn ObjectStore> {
@@ -177,6 +194,7 @@ impl Db {
             0,
             0,
             LogPosition::ZERO,
+            default_max_path_depth(),
         )
     }
 
@@ -190,6 +208,7 @@ impl Db {
         next_tx_id: u64,
         next_block_id: u64,
         durable_watermark: LogPosition,
+        max_path_depth: u32,
     ) -> Db {
         let state = Arc::new(RwLock::new(table_state));
         let writer_state = WriterState {
@@ -207,6 +226,7 @@ impl Db {
             store,
             clock,
             submit,
+            max_path_depth,
         }
     }
 
@@ -265,6 +285,8 @@ impl Db {
 
         let log_tuning: LogTuning = log_section.get()?;
         let storage_tuning: StorageTuning = storage_section.get()?;
+        let query_section = config.section("query").unwrap_or_else(ConfigSection::empty);
+        let query_tuning: QueryTuning = query_section.get()?;
         let cfg = WriterConfig {
             window: Duration::from_millis(log_tuning.group_commit_window_ms),
             max_bytes: log_tuning.group_commit_max_bytes,
@@ -281,6 +303,7 @@ impl Db {
             recovered.next_tx_id,
             recovered.next_block_id,
             recovered.watermark,
+            query_tuning.max_path_depth,
         ))
     }
 
@@ -304,6 +327,7 @@ impl Db {
             recovered.next_tx_id,
             recovered.next_block_id,
             recovered.watermark,
+            default_max_path_depth(),
         ))
     }
 
@@ -330,30 +354,45 @@ impl Db {
         };
         let now = self.clock.watermark();
         let bounds = varve_plan::effective_bounds(&q, now);
-        // v1: only a single-node, hop-free, unnamed MATCH is supported
-        // (multi-element MATCH lands in task 8 of slice 6); mirrors
-        // varve_plan::exec's require_single_node, which we can't call
-        // directly (private, and this crate needs the label pre-snapshot).
-        let node = q.single_node().ok_or_else(|| {
-            EngineError::Unsupported("multi-element MATCH lands in task 8 of slice 6".into())
-        })?;
-        if !node.props.is_empty() {
-            return Err(EngineError::Unsupported(
-                "multi-element MATCH lands in task 8 of slice 6".into(),
-            ));
+        // Lower the MATCH pattern to one scan spec per element (task 8): a
+        // single-node MATCH is the zero-hop, zero-join case; multi-element
+        // MATCH becomes a left-deep chain of hash joins in `execute_pattern`.
+        // The query's temporal bounds flow into every element's snapshot.
+        let specs = varve_plan::scan_specs(&q, DEFAULT_GRAPH, self.max_path_depth)?;
+        let mut inputs = Vec::with_capacity(specs.len());
+        for spec in &specs {
+            let input = match &spec.kind {
+                varve_plan::SpecKind::Node { label, iid_point } => varve_plan::ScanInput::Batch(
+                    merged_snapshot(
+                        &self.state,
+                        &self.store,
+                        TableKind::Nodes,
+                        label.as_deref().unwrap_or(""),
+                        &bounds,
+                        *iid_point,
+                    )
+                    .await?,
+                ),
+                varve_plan::SpecKind::Edge { label, .. } => varve_plan::ScanInput::Batch(
+                    merged_snapshot(
+                        &self.state,
+                        &self.store,
+                        TableKind::Edges,
+                        label,
+                        &bounds,
+                        None,
+                    )
+                    .await?,
+                ),
+                // Quantified hops (task 9): the placeholder adjacency input is
+                // rejected by `execute_pattern` with `Unsupported` until then.
+                varve_plan::SpecKind::Expand { .. } => {
+                    varve_plan::ScanInput::Adjacency(Arc::new(varve_plan::EdgeAdjacency))
+                }
+            };
+            inputs.push(input);
         }
-        let label = node.labels.first().map(String::as_str).unwrap_or("");
-        let iid = varve_plan::iid_point(&q.where_clause, DEFAULT_GRAPH, NODES_TABLE);
-        let snapshot = merged_snapshot(
-            &self.state,
-            &self.store,
-            TableKind::Nodes,
-            label,
-            &bounds,
-            iid,
-        )
-        .await?;
-        Ok(varve_plan::execute_query(&q, snapshot).await?)
+        Ok(varve_plan::execute_pattern(&q, &specs, inputs).await?)
     }
 
     /// Report-only capability probe (spec §12, D5): classifies whether the
