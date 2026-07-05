@@ -3,6 +3,61 @@ use std::sync::Arc;
 use varve_config::{BuildContext, Config, ConfigSection};
 use varve_storage::{local_store, memory_store, storage_registry, ObjectStore, StorageError};
 
+#[cfg(feature = "s3")]
+mod s3_factory {
+    use varve_config::{BuildContext, Config, ConfigSection};
+    use varve_storage::storage_registry;
+
+    #[allow(clippy::unwrap_used)]
+    fn storage_section(toml: &str) -> ConfigSection {
+        Config::from_toml_str(toml)
+            .unwrap()
+            .section("storage")
+            .unwrap()
+    }
+
+    #[test]
+    fn s3_factory_builds_with_garage_config() {
+        let cfg = storage_section(
+            "[storage]\nbackend = \"s3\"\n[storage.s3]\nendpoint = \
+             \"http://127.0.0.1:3900\"\nbucket = \"varve\"\naccess_key_id = \"GK0123456789\"\n\
+             secret_access_key = \"sk1...\"\n",
+        );
+        storage_registry().build("s3", &cfg, &BuildContext::empty()).unwrap();
+    }
+
+    #[test]
+    fn s3_factory_builds_with_aws_config() {
+        let cfg = storage_section(
+            "[storage]\nbackend = \"s3\"\n[storage.s3]\nregion = \"us-west-2\"\n\
+             endpoint = \"http://127.0.0.1:3900\"\nbucket = \"varve\"\n",
+        );
+        storage_registry().build("s3", &cfg, &BuildContext::empty()).unwrap();
+    }
+
+    #[test]
+    fn s3_factory_requires_section() {
+        let cfg = storage_section("[storage]\nbackend = \"s3\"\n");
+        let err = match storage_registry().build("s3", &cfg, &BuildContext::empty()) {
+            Ok(_) => panic!("expected build(\"s3\") with no [storage.s3] to fail"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("[storage.s3]"), "{err}");
+    }
+
+    #[test]
+    fn s3_factory_requires_a_bucket() {
+        let cfg = storage_section(
+            "[storage]\nbackend = \"s3\"\n[storage.s3]\nendpoint = \"http://x\"\n",
+        );
+        let err = match storage_registry().build("s3", &cfg, &BuildContext::empty()) {
+            Ok(_) => panic!("expected build(\"s3\") without bucket to fail"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("bucket"), "{err}");
+    }
+}
+
 /// Trait conformance, run against every backend: atomic put/replace, whole
 /// and ranged gets, NotFound, sorted prefix-scoped listing.
 #[allow(clippy::unwrap_used)]
@@ -83,7 +138,7 @@ async fn local_store_survives_reopen() {
 #[tokio::test]
 async fn registry_builds_by_name() {
     let reg = storage_registry();
-    assert_eq!(reg.names(), vec!["local", "memory"]);
+    assert_eq!(reg.names(), vec!["local", "memory", "s3"]);
     let store = reg.build("memory", &ConfigSection::empty(), &BuildContext::empty()).unwrap();
     store.put("k", Bytes::from_static(b"v")).await.unwrap();
     assert_eq!(store.get("k").await.unwrap(), Bytes::from_static(b"v"));
