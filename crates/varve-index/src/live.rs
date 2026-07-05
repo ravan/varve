@@ -1,6 +1,6 @@
 use crate::event::Event;
 use arrow::record_batch::RecordBatch;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 use varve_types::{Iid, Instant, TemporalBounds};
 
@@ -25,6 +25,10 @@ pub enum IndexError {
 #[derive(Default)]
 pub struct LiveTable {
     events: BTreeMap<Iid, Vec<Event>>,
+    /// Src-ordered adjacency view: src node iid → edge iids (decision 2).
+    out: BTreeMap<Iid, BTreeSet<Iid>>,
+    /// Dst-ordered adjacency view: dst node iid → edge iids.
+    in_: BTreeMap<Iid, BTreeSet<Iid>>,
     last_system_from: Option<Instant>,
     event_count: usize,
 }
@@ -48,6 +52,10 @@ impl LiveTable {
         }
         self.last_system_from = Some(event.system_from);
         self.event_count += 1;
+        if let (Some(src), Some(dst)) = (event.src, event.dst) {
+            self.out.entry(src).or_default().insert(event.iid);
+            self.in_.entry(dst).or_default().insert(event.iid);
+        }
         self.events.entry(event.iid).or_default().push(event);
         Ok(())
     }
@@ -95,6 +103,16 @@ impl LiveTable {
     /// One entity's events in arrival order (point-lookup fast path).
     pub fn events_for(&self, iid: &Iid) -> Option<&[Event]> {
         self.events.get(iid).map(Vec::as_slice)
+    }
+
+    /// Edge iids whose `src` is the given node, ascending. Empty for node tables.
+    pub fn out_edges(&self, src: &Iid) -> impl Iterator<Item = &Iid> + '_ {
+        self.out.get(src).into_iter().flatten()
+    }
+
+    /// Edge iids whose `dst` is the given node, ascending. Empty for node tables.
+    pub fn in_edges(&self, dst: &Iid) -> impl Iterator<Item = &Iid> + '_ {
+        self.in_.get(dst).into_iter().flatten()
     }
 }
 
@@ -325,5 +343,61 @@ mod tests {
         assert_eq!(batch.num_rows(), 2);
         // A property observed only as Null constrains no column type — no column.
         assert!(batch.column_by_name("ghost").is_none());
+    }
+
+    fn edge(n: u8, src: u8, dst: u8, at: i64) -> Event {
+        Event {
+            iid: Iid::derive("g", "edges", &[n]),
+            system_from: Instant::from_micros(at),
+            valid_from: Instant::from_micros(at),
+            valid_to: Instant::END_OF_TIME,
+            src: Some(Iid::derive("g", "nodes", &[src])),
+            dst: Some(Iid::derive("g", "nodes", &[dst])),
+            op: Op::Put {
+                labels: vec!["KNOWS".into()],
+                doc: BTreeMap::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn adjacency_views_track_endpoints() {
+        let mut live = LiveTable::new();
+        live.append(edge(1, 10, 20, 1)).unwrap();
+        live.append(edge(2, 10, 30, 2)).unwrap();
+        live.append(edge(3, 20, 10, 3)).unwrap();
+        let n10 = Iid::derive("g", "nodes", &[10]);
+        let n20 = Iid::derive("g", "nodes", &[20]);
+        let out10: Vec<_> = live.out_edges(&n10).cloned().collect();
+        assert_eq!(out10, {
+            let mut v = vec![
+                Iid::derive("g", "edges", &[1]),
+                Iid::derive("g", "edges", &[2]),
+            ];
+            v.sort();
+            v
+        });
+        let in10: Vec<_> = live.in_edges(&n10).cloned().collect();
+        assert_eq!(in10, vec![Iid::derive("g", "edges", &[3])]);
+        assert_eq!(live.out_edges(&n20).count(), 1);
+        // A delete event still indexes (visibility is resolved at read time).
+        live.append(Event {
+            op: Op::Delete,
+            ..edge(1, 10, 20, 4)
+        })
+        .unwrap();
+        assert_eq!(live.out_edges(&n10).count(), 2);
+    }
+
+    #[test]
+    fn node_appends_leave_views_empty() {
+        let mut live = LiveTable::new();
+        live.append(Event {
+            src: None,
+            dst: None,
+            ..edge(1, 0, 0, 1)
+        })
+        .unwrap();
+        assert_eq!(live.out_edges(&Iid::derive("g", "nodes", &[0])).count(), 0);
     }
 }

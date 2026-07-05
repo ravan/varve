@@ -24,6 +24,8 @@ struct VisibleRow<'a> {
     system_to: Instant,
     valid_from: Instant,
     valid_to: Instant,
+    src: Option<Iid>,
+    dst: Option<Iid>,
 }
 
 /// Maps an observed property value to its Arrow column type. `Value::Null`
@@ -78,6 +80,8 @@ where
                     system_to: version.system_to,
                     valid_from: version.valid_from,
                     valid_to: version.valid_to,
+                    src: version.event.src,
+                    dst: version.event.dst,
                 });
             }
         }
@@ -85,6 +89,18 @@ where
     if visible.is_empty() {
         return Ok(None);
     }
+
+    // Edge-ness: every visible row's event must carry both endpoints, or
+    // none of them — a mix means the caller handed us rows from more than
+    // one table (spec §5.2 endpoints are immutable per edge, all-or-nothing
+    // per table).
+    let with_endpoints = visible.iter().filter(|r| r.src.is_some()).count();
+    if with_endpoints != 0 && with_endpoints != visible.len() {
+        return Err(IndexError::Codec(
+            "mixed node and edge events in one snapshot".into(),
+        ));
+    }
+    let is_edges = with_endpoints == visible.len() && !visible.is_empty();
 
     // Column plan over VISIBLE docs: property name → type of first non-null.
     let mut col_types: BTreeMap<&str, DataType> = BTreeMap::new();
@@ -128,6 +144,29 @@ where
             b.append_value(get(row).as_micros());
         }
         columns.push(Arc::new(b.finish()));
+    }
+
+    if is_edges {
+        let mut src_b = FixedSizeBinaryBuilder::new(16);
+        let mut dst_b = FixedSizeBinaryBuilder::new(16);
+        for row in &visible {
+            let Some(src) = row.src else {
+                // Unreachable: `is_edges` established every row.src.is_some().
+                return Err(IndexError::Codec("edge event missing src endpoint".into()));
+            };
+            let Some(dst) = row.dst else {
+                // `src` presence doesn't guarantee `dst` — both are stamped
+                // together by the writer, but this guards against a
+                // malformed event slipping through.
+                return Err(IndexError::Codec("edge event missing dst endpoint".into()));
+            };
+            src_b.append_value(src.as_bytes())?;
+            dst_b.append_value(dst.as_bytes())?;
+        }
+        fields.push(Field::new("_src_iid", DataType::FixedSizeBinary(16), false));
+        columns.push(Arc::new(src_b.finish()));
+        fields.push(Field::new("_dst_iid", DataType::FixedSizeBinary(16), false));
+        columns.push(Arc::new(dst_b.finish()));
     }
 
     for (name, dt) in &col_types {
@@ -374,5 +413,42 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["y", "x"]); // reversed file order, not re-sorted
+    }
+
+    #[test]
+    fn edge_snapshot_carries_endpoint_columns() {
+        // Inline edge helper (same shape as live.rs's test helper).
+        let e = Event {
+            iid: Iid::derive("g", "edges", &[1]),
+            system_from: Instant::from_micros(1),
+            valid_from: Instant::from_micros(1),
+            valid_to: Instant::END_OF_TIME,
+            src: Some(Iid::derive("g", "nodes", &[10])),
+            dst: Some(Iid::derive("g", "nodes", &[20])),
+            op: Op::Put {
+                labels: vec!["KNOWS".into()],
+                doc: BTreeMap::new(),
+            },
+        };
+        let batch = snapshot_entities(
+            [(e.iid, std::slice::from_ref(&e))],
+            "KNOWS",
+            &TemporalBounds {
+                valid: TemporalDimension::at(Instant::from_micros(5)),
+                system: TemporalDimension::at(Instant::from_micros(5)),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let schema = batch.schema();
+        let src_idx = schema.column_with_name("_src_iid").unwrap().0;
+        let dst_idx = schema.column_with_name("_dst_iid").unwrap().0;
+        let src = batch
+            .column(src_idx)
+            .as_any()
+            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            .unwrap();
+        assert_eq!(src.value(0), e.src.unwrap().as_bytes());
+        assert!(dst_idx > src_idx);
     }
 }
