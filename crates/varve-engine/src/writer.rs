@@ -325,6 +325,11 @@ async fn resolve_delete(
             "DETACH DELETE lands in task 7 of slice 6".into(),
         ));
     }
+    if !del.pattern.props.is_empty() {
+        return Err(EngineError::Unsupported(
+            "inline props on a matched DELETE node land in task 7 of slice 6".into(),
+        ));
+    }
     let label = del.pattern.labels.first().map(String::as_str).unwrap_or("");
     let iid = varve_plan::iid_point(&del.where_clause, DEFAULT_GRAPH, NODES_TABLE);
     let snapshot = merged_snapshot(&state.state, &state.store, label, &bounds, iid).await?;

@@ -508,8 +508,8 @@ impl Parser {
                     return Err(GqlError::Parse {
                         offset,
                         msg: format!(
-                            "DELETE target '{target}' is not bound (pattern variable is {:?})",
-                            path.start.var
+                            "DELETE target '{target}' is not bound (pattern variable is '{}')",
+                            path.start.var.as_deref().unwrap_or("?")
                         ),
                     });
                 }
@@ -808,6 +808,15 @@ mod tests {
             panic!("expected delete")
         };
         assert_eq!(del.pattern, node(Some("p"), &["Person"]));
+        assert_eq!(
+            del.where_clause,
+            Some(Expr::PropEq {
+                var: "p".into(),
+                prop: "name".into(),
+                value: Literal::Str("Ada".into()),
+            })
+        );
+        assert_eq!(del.target, "p");
         assert!(!del.detach);
     }
 
