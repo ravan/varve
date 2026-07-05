@@ -8,6 +8,7 @@ use bytes::Bytes;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
+use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
 
 /// `range: None` = the whole object; `Some((start, end))` = a half-open
 /// byte range — distinct cache entries.
@@ -166,6 +167,38 @@ impl ObjectStore for CachedStore {
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
         self.inner.list(prefix).await
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct MemoryCacheConfig {
+    #[serde(default = "default_memory_max_bytes")]
+    max_bytes: usize,
+}
+
+fn default_memory_max_bytes() -> usize {
+    512 * 1024 * 1024
+}
+
+/// Registry factory: listed as `"memory"` in `[cache] tiers`, tuned by the
+/// optional `[cache.memory]` table (`max_bytes`, default 512 MiB).
+pub struct MemoryCacheFactory;
+
+impl ComponentFactory<dyn CacheTier> for MemoryCacheFactory {
+    fn name(&self) -> &'static str {
+        "memory"
+    }
+
+    fn build(
+        &self,
+        cfg: &ConfigSection,
+        _ctx: &BuildContext,
+    ) -> Result<Arc<dyn CacheTier>, RegistryError> {
+        let config: MemoryCacheConfig = cfg
+            .child("memory")
+            .unwrap_or_else(ConfigSection::empty)
+            .get()?;
+        Ok(Arc::new(MemoryCache::new(config.max_bytes)))
     }
 }
 
