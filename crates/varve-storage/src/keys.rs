@@ -11,10 +11,13 @@ pub fn lex_hex(n: u64) -> String {
 }
 
 pub fn parse_lex_hex(s: &str) -> Option<u64> {
+    if s.chars().any(|c| c.is_ascii_uppercase()) {
+        return None;
+    }
     let mut chars = s.chars();
     let len_digit = chars.next()?.to_digit(16)? as usize;
     let body = chars.as_str();
-    if body.len() != len_digit + 1 || body.chars().any(|c| c.is_ascii_uppercase()) {
+    if body.len() != len_digit + 1 {
         return None;
     }
     u64::from_str_radix(body, 16).ok()
@@ -77,11 +80,25 @@ mod tests {
         assert_eq!(parse_lex_hex("1"), None); // body missing
         assert_eq!(parse_lex_hex("134x"), None); // body length mismatch
         assert_eq!(parse_lex_hex("zz"), None);
+        assert_eq!(parse_lex_hex("A10000000000"), None); // uppercase length-prefix digit
+        assert_eq!(parse_lex_hex("1FF"), None); // uppercase body
     }
 
     #[test]
     fn lexicographic_order_is_numeric_order() {
-        let ns = [0u64, 1, 9, 0xf, 0x10, 0x99, 0xff, 0x100, 0xabc, 1 << 20];
+        let ns = [
+            0u64,
+            1,
+            9,
+            0xf,
+            0x10,
+            0x99,
+            0xff,
+            0x100,
+            0xabc,
+            1 << 20,
+            1 << 47,
+        ];
         let mut by_string: Vec<u64> = ns.to_vec();
         by_string.sort_by_key(|n| lex_hex(*n));
         let mut by_value = ns.to_vec();
