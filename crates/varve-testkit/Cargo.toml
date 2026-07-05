@@ -19,10 +19,15 @@ tokio = { workspace = true }
 # backends.rs is library code (not test-only) that shells out to docker and
 # needs scratch config directories, so tempfile lives here, not dev-deps.
 tempfile = { workspace = true }
+# oracle.rs (library code) renders grid µs into the RFC3339 timestamps the GQL
+# VALID FROM / AS OF clauses parse, so chrono is a normal dep, not dev-only.
+chrono = { workspace = true }
 
 [dev-dependencies]
 arrow = { workspace = true }
 bytes = { workspace = true }
+# varve-plan gives the pure expand_paths layer for the pure equivalence property.
+varve-plan = { path = "../varve-plan" }
 
 [lints]
 workspace = true
