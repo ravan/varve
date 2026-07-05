@@ -3787,19 +3787,15 @@ git commit -m "feat: cache_bench example — cold vs warm disk cache demo (slice
 
 ## Slice exit checklist
 
-- [ ] **All gates green:** `just check` (fmt + clippy -D warnings + full workspace tests) and `just crash` (the slice-3/4 crash matrix must be untouched by this slice).
-- [ ] **Exit criterion — Garage locally:** `just s3-matrix garage` green on this machine (all four phases: storage contract, object-store-log contract, Db e2e with restart, probe). Then `just s3-matrix` for the full local trio if docker resources allow.
-- [ ] **Exit criterion — CI matrix:** push and confirm the `backend-matrix` job (garage + seaweedfs + minio) is green in GitHub Actions. If an image tag or CLI-output parse needed fixing at execution time, the fix lives in `backends.rs` and the final pins are recorded in STATUS.md.
-- [ ] **Exit criterion — laptop profile unaffected:** `cargo run --example hello -p varve`, `cargo run --release --example write_bench -p varve`, and `cargo run --release --example block_bench -p varve` all still work with zero new requirements (no docker, no s3).
-- [ ] **Exit criterion — disk cache demonstrated:** `cargo run --release --example cache_bench -p varve` run and its cold/warm numbers recorded in STATUS.md (plus the Garage-backed numbers if measured).
-- [ ] **Probe verdict table pinned:** tighten `expected_probe` in `backend_matrix.rs` from `RecordOnly`/class assertions to the exact observed verdicts (Garage, SeaweedFS, MinIO; Ceph after its first weekly run — leave Ceph `RecordOnly` until then) and record the table in STATUS.md decisions.
-- [ ] **STATUS.md updated:**
-  - Current position → slice 5 ✅ COMPLETE (+ next action: generate the slice-6 detailed plan — edges, adjacency, traversal — noting slice 6 depends only on slice 4).
-  - Decisions: this plan's design decisions 1–8 (§Design decisions), the observed probe verdict table, the final image pins, and any deviations made during execution.
-  - Environment facts: `object_store`'s `aws` feature is now default-enabled through varve-storage (adds reqwest/quick-xml transitively — note any Cargo.lock growth); `VARVE_S3_BACKENDS` gates all container tests; docker required only for the matrix.
-  - Slice log row for slice 5 (status, sessions, demo command `just s3-matrix garage` + `cargo run --release --example cache_bench -p varve`, notes).
-- [ ] **Roadmap ticked:** all five slice-5 checkboxes in `docs/plans/varve-v1-roadmap.md` → `[x]`, with a parenthetical note on any deviation (e.g. "testcontainers" implemented as a docker-CLI harness; trim-as-no-op documented).
-- [ ] **Final commit:**
+- [x] **All gates green:** `just check` (fmt + clippy -D warnings + 293 workspace tests) and `just crash` (crash matrix 2/2, untouched by this slice) both green.
+- [x] **Exit criterion — Garage locally:** `just s3-matrix` full local trio (garage + seaweedfs + minio) green — all four phases (storage contract, object-store-log contract, Db e2e with restart, probe) pass per backend.
+- [~] **Exit criterion — CI matrix:** `backend-matrix` (garage/seaweedfs/minio) + `backend-ceph-weekly` jobs ADDED and validated LOCALLY via `just s3-matrix`; GitHub-Actions-green is pending a push (not performed this session — no push requested). One execution-time fix landed in `backends.rs` (SeaweedFS `weed shell` stdin) and pins recorded in STATUS.md.
+- [x] **Exit criterion — laptop profile unaffected:** `cargo run --example hello -p varve` runs; `write_bench`/`block_bench`/`cache_bench` all compile in release; no docker/s3 needed.
+- [x] **Exit criterion — disk cache demonstrated:** `cache_bench` run; cold/warm numbers recorded in STATUS.md (local FS 29.7→8.3 ms; S3/MinIO 167.5→111.1 ms; 9 entries survived restart both).
+- [x] **Probe verdict table pinned:** `expected_probe` tightened — SeaweedFS `RecordOnly`→`NotSupported` (observed Inconsistent); Garage `NotSupported` (observed Inconsistent); MinIO `Supported` (observed); Ceph left `RecordOnly` (weekly). Table recorded in STATUS.md decision 6.
+- [x] **STATUS.md updated:** current position → slice 5 ✅ COMPLETE + next action (slice-6 plan); decisions 1–8 + probe verdict table + image pins + deviations; environment facts (s3/object-store features, Cargo.lock growth, VARVE_S3_BACKENDS gating); slice-log row.
+- [x] **Roadmap ticked:** all five slice-5 checkboxes + exit criteria in `docs/plans/varve-v1-roadmap.md` → `[x]`, with deviation notes (docker-CLI harness vs testcontainers; trim-as-no-op; mtime-LRU; config-key names).
+- [x] **Final commit:**
 
 ```bash
 git add -A

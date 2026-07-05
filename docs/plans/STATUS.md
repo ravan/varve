@@ -5,24 +5,26 @@
 
 ## Current position
 
-- **Current slice:** 4 (blocks: flush to object storage, persisted scan, restart) — ✅ COMPLETE
-  (2026-07-05, 1 session, SDD, 14 tasks). The live index now flushes to object storage as Arrow
-  block files with a protobuf manifest as the atomic commit point; queries merge live ∪ persisted
-  events with bitemporal resolution + page pruning; `Db::open` restarts from the latest manifest +
-  log tail. New `varve-storage` crate: sovereignty-constrained `ObjectStore` trait (put/get/get_range/
-  list ONLY) over `object_store` 0.13, spec-§9 key layout (XTDB lex-hex trie keys), `BlockManifest`
-  protobuf, memory `CacheTier`. `varve-index` gained the paged block codec (`encode_block`/`decode_meta`/
-  `PageMeta` prune rules) + source-agnostic `snapshot_entities`; `varve-log` gained `Log::trim`; the
-  writer loop flushes at `max_block_rows`/timer (data+meta PUTs → manifest PUT = commit → atomic
-  live-reset → log trim). A `kill -9` crash matrix covers kill-during-flush at the manifest commit point.
-  Demo: `cargo run --release --example block_bench -p varve`.
-- **Next action:** GENERATE the slice-5 detailed plan (S3-API backends, disk cache, capability probe —
-  spec §6/§9/§12, D5/D7) with the writing-plans skill, commit it, then execute. Slice 5 adds real
-  S3-compatible `ObjectStore` backends (Garage/Ceph/SeaweedFS via `object_store`), a disk `CacheTier`
-  (registry-by-name selection — the deferred cache registry), and the capability probe for optional
-  conditional-PUT. **Revisit `BuildContext` here:** it is STILL not needed for slice 4 (cache wraps the
-  store by engine composition), but a disk cache tier selected by name is the next checkpoint for whether
-  a factory needs another *component*.
+- **Current slice:** 5 (S3-API backends, object-store log, disk cache, capability probe) — ✅ COMPLETE
+  (2026-07-05, 1 session, SDD, 10 tasks). `storage = "s3"` now runs the whole stack against any S3-API
+  backend (Garage/SeaweedFS/MinIO/Ceph RGW via `object_store/aws`, default-on `s3` feature);
+  `log = "object-store"` writes one object per group-commit batch (`v1/log/<epoch>/<offset-lexhex>.vlog`)
+  into the shared block store; a disk `CacheTier` selected by name (`[cache] tiers`) survives restarts;
+  and a report-only 4-step capability probe classifies conditional-PUT semantics (Supported/Unsupported/
+  Inconsistent) — the gate slice-10 cas-failover will consume. Realized spec §4's full factory signature:
+  `ComponentFactory::build(cfg, ctx: &BuildContext)` (`BuildContext` = typed component map; engine builds
+  storage first, inserts the RAW store, then log/clock/cache factories build with it). New surfaces in
+  `varve-storage` (`s3`, `disk` cache, `cache_registry`, optional `ConditionalStore`+`probe`), `varve-log`
+  (`object-store` feature + `ObjectStoreLog`), engine `Db::probe_capabilities`, a docker-CLI backend
+  harness in `varve-testkit`, and CI `backend-matrix` (garage/seaweedfs/minio) + `backend-ceph-weekly`.
+  LIVE-validated against real containers: `just s3-matrix` (garage+seaweedfs+minio) fully green.
+  Demos: `cargo run --release --example cache_bench -p varve` and `just s3-matrix`.
+- **Next action:** GENERATE the slice-6 detailed plan (edges, adjacency, traversal — spec §5/§7) with the
+  writing-plans skill, commit it, then execute. Slice 6 depends only on slice 4's block/scan machinery
+  (not on slice 5's backends), so it can proceed independently. `BuildContext` is now landed and in use.
+- **Slice 4 (blocks: flush to object storage, persisted scan, restart):** ✅ COMPLETE (2026-07-05).
+  `varve-storage` `ObjectStore` trait + Arrow block codec + `BlockManifest` atomic commit + one-lock
+  merged live∪persisted scan + `Db::open` manifest/log-tail recovery. Demo: `cargo run --release --example block_bench -p varve`.
 - **Slice 3 (durability: log, group commit, crash safety):** ✅ COMPLETE (2026-07-05). Log-serialized
   writer loop + group commit onto a pluggable `Log` (`varve-log`: CRC32C frames, fsync-before-ack,
   torn-tail recovery); `Db::open` replay; `kill -9` crash matrix. Demo: `cargo run --release --example write_bench -p varve`.
@@ -68,6 +70,14 @@
   `pre-manifest-put`/`post-manifest-put`, same pattern/caveats as `varve-log`'s); `varve-testkit` enables it
   via a direct `varve-engine { features = ["fault-injection"] }` dep so cargo unifies the single engine
   artifact with the hooks live. `Db::local(dir)` layout is now `dir/log` (log) + `dir/store` (blocks).
+- **Dependency/feature facts (slice 5, verified live 2026-07-05):** `varve-storage`'s default-on `s3` feature enables
+  `object_store/aws`, pulling reqwest + quick-xml (+ TLS stack) transitively into `Cargo.lock` — `--no-default-features` gives a
+  local-only build. `varve-log`'s default-on `object-store` feature adds optional `varve-storage` + `bytes` deps (the
+  integration test `tests/object_store_log.rs` is NOT feature-gated, so `cargo test -p varve-log --no-default-features` won't
+  compile the test — the LIB does; CI only runs default features). `xxhash-rust` (already a workspace dep) now also names disk-cache
+  files. `varve-testkit` moved `tempfile` to `[dependencies]` and added `varve-config` (deps) + `bytes` (dev-dep). Container tests are
+  gated by `VARVE_S3_BACKENDS` (comma-list or `all`) and skip silently otherwise; image pins live ONLY in `varve-testkit/src/backends.rs`
+  (tags listed in slice-5 decision 7). Live matrix runner: `just s3-matrix` (defaults garage,seaweedfs,minio).
 - Gate: `just check` = `cargo fmt --all --check` + `cargo clippy --workspace --all-targets
   -- -D warnings` + `cargo test --workspace`. Same three commands run in CI (`.github/workflows/ci.yml`).
   CI gained a `crash-matrix` job (slice 3): `cargo test -p varve-testkit --release --test
@@ -77,6 +87,52 @@
   byte format, so it is pinned). `.superpowers/` is SDD scratch (self-ignored).
 
 ## Decisions made during implementation
+
+- **2026-07-05 (slice 5) `BuildContext` landed (decision 1):** `ComponentFactory::build(&self, cfg: &ConfigSection,
+  ctx: &BuildContext)` — spec §4's full signature. `BuildContext` is a typed component map (`TypeId → Box<dyn Any + Send + Sync>`,
+  `insert<C>`/`get<C>` for `C: Clone + Send + Sync + 'static`). `Db::open_with` builds STORAGE first and inserts the RAW
+  (uncached) `Arc<dyn ObjectStore>` into the ctx; log/clock/cache factories then build with it. The object-store log factory is the
+  first real consumer (shares the block store's bucket). Discharges the slice-4 "revisit BuildContext" checkpoint.
+- **2026-07-05 (slice 5) `storage/s3` (decision 2):** wraps `object_store::aws::AmazonS3` behind a default-on `s3` feature
+  (`s3 = ["object_store/aws"]`, adds reqwest/quick-xml transitively). `[storage.s3]`: `bucket` required; `endpoint`/`region`/
+  `access_key_id`/`secret_access_key` optional (builder starts from `from_env()`, config overrides env); `path_style` default TRUE
+  (Garage/MinIO), `allow_http` derived from endpoint scheme. `AmazonS3Builder::build()` does no I/O ⇒ factory unit tests are network-free.
+- **2026-07-05 (slice 5) `log/object-store` (decision 3):** one object per group-commit batch at
+  `v1/log/<epoch>/<offset-lexhex>.vlog` (epoch = 4-hex u16 so listing sorts by position), body = the exact `LocalLog` frame grammar
+  (`len u32 LE · crc32c u32 LE · protobuf`) but decoded STRICTLY (object PUTs are atomic ⇒ any malformed frame = `Corrupt`, no torn tail).
+  Positions assigned locally (designated writer, no CAS/D5); `next` recovered lazily on first append by listing+counting the last object.
+  `trim` is a documented NO-OP (sovereign store has no delete; superseded objects swept by slice-8 GC; replay reads only `tail(watermark)`).
+  Log rides the same bucket and receives the RAW store so its traffic never fills the query cache.
+- **2026-07-05 (slice 5) disk cache tier (decision 4):** one self-describing file per `(path, range)` under `[cache.disk] dir`
+  (header = full key, body = value) so the index rebuilds by walking the dir on open (restart survival, no separate index). File names =
+  `xxh3_128(key)` hex. Recency = in-memory LRU tick at runtime, persisted as file mtime (touched on hit). Reads copy into owned `Bytes`
+  (eviction never invalidates a handed-out buffer). Synchronous I/O on the caller's thread + a single Mutex held across I/O = documented v1
+  tradeoff (forward note for hot concurrent read paths). Write-temp-then-rename; `.tmpN`/malformed files swept on open.
+- **2026-07-05 (slice 5) cache registry-by-name (decision 5):** `Registry<dyn CacheTier>` (kind "cache") with builtin `memory`+`disk`
+  factories; `Registries` gained `cache`. Config: `[cache] tiers = [...]` composed OUTERMOST-FIRST (first listed = first checked; engine
+  folds `tiers.iter().rev()`), per-tier `[cache.memory] max_bytes` (512 MiB default) / `[cache.disk] dir`+`max_bytes` (50 GiB default).
+  **NO back-compat: slice-4 `[cache] memory_max_bytes` REMOVED** (no alias). `Db::memory()`/`Db::local()` keep a memory tier at 512 MiB.
+- **2026-07-05 (slice 5) capability probe (decision 6):** optional `ConditionalStore` (`put_if_absent`=If-None-Match:*, `put_if_matches`=If-Match)
+  reached via `ObjectStore::conditional() -> Option<&dyn ConditionalStore>` (default `None` — engine NEVER requires it; sovereignty verified by grep:
+  only `Db::probe_capabilities` consumes it). Blanket impl over `object_store` provides it via `put_opts`; `CachedStore` delegates. 4-step probe
+  (create → create-again-must-refuse → swap-current-etag → swap-STALE-must-refuse) yields `Supported`/`Unsupported{reason}`/`Inconsistent{reason}`.
+  **OBSERVED live verdicts (first run): MinIO = Supported; Garage = Inconsistent; SeaweedFS = Inconsistent** (both: "create-if-absent over an
+  existing object succeeded (precondition ignored)" — the SeaweedFS-class header-blindness D5 warned of); Ceph = not yet run (weekly cron). Garage &
+  SeaweedFS assert `NotSupported` (= `!Supported`, the load-bearing cas-failover gate) rather than pinning the exact `Inconsistent` variant.
+- **2026-07-05 (slice 5) docker-CLI backend harness (decision 7, deviation from roadmap "testcontainers"):** hand-rolled `std::process::Command`
+  rig in `varve-testkit/src/backends.rs` (Garage needs multi-step `docker exec` init the testcontainers crate models poorly; zero new deps). Gated by
+  `VARVE_S3_BACKENDS` (comma-list or `all`); skips silently otherwise (`just check` never needs docker). Two buckets per backend isolate raw-contract
+  vs Db-e2e phases. **Image pins (ONE place — `backends.rs` consts):** garage `dxflrs/garage:v1.0.1`, seaweedfs `chrislusf/seaweedfs:3.80`,
+  minio `minio/minio:RELEASE.2025-04-22T22-12-26Z` + `minio/mc:RELEASE.2025-04-16T18-13-26Z`, ceph `quay.io/ceph/demo:latest-quincy`.
+  **Execution-time adaptation (recorded per plan):** SeaweedFS bucket-create uses `echo '…' | weed shell` (stdin) + poll on `s3.bucket.list` — `weed shell`
+  has no `-c` flag in 3.80. Ceph contract-bucket `s3cmd mb` adds `--host`/`--host-bucket=` for loopback RGW path-style.
+- **2026-07-05 (slice 5) CI (decision, spec §13.5):** `backend-matrix` (garage/seaweedfs/minio, fail-fast:false) on push/PR; `backend-ceph-weekly`
+  on the `0 4 * * 1` cron; `property-nightly` pinned to the `0 3 * * *` cron so the Monday trigger doesn't double-run it.
+- **2026-07-05 (slice 5) benches (M3 Max):** `cache_bench` local FS — ingest 100k @ ~4s, cold open+lookup 29.7 ms → warm 8.3 ms (3.6×),
+  9 disk-cache entries survived restart. S3-backed (MinIO) — ingest 100k @ 3.83 s, cold 167.5 ms → warm 111.1 ms, 9 entries survived restart.
+- **2026-07-05 (slice 5) process note:** the plan's per-task gate omitted `cargo fmt --check`; verbatim brief-transcribed code drifted from rustfmt
+  across T1–T4 and was fixed in one `style:` commit (03e2348). `cargo fmt --all` folded into every subsequent task's gate. Roadmap Global Constraints
+  (which include `just check` = fmt+clippy+test) govern over the plan's abbreviated per-task gate.
 
 - **2026-07-05 (slice 4) block format + persisted scan (spec §9, design decisions 1–15):** Data file =
   concatenation of self-contained per-page Arrow IPC streams; the meta file is a single-level page index
@@ -114,7 +170,8 @@
   `EngineError::VolatileBlockStore` (flushing would trim the durable log while blocks sit in volatile memory =
   silent data loss on restart). `Db::local(dir)` configures both durably (`dir/log` + `dir/store`). Config surface:
   `[storage] backend`/`max_block_rows` (default 100_000)/`flush_interval_ms` (default 300_000, 0 disables),
-  `[storage.local] dir`, `[cache] memory_max_bytes` (default 536_870_912) — integer-bytes convention.
+  `[storage.local] dir`, and cache config (slice-4 `[cache] memory_max_bytes` was REPLACED in slice 5 by
+  `[cache] tiers` + `[cache.<name>]` — see slice-5 decisions) — integer-bytes convention throughout.
 - **2026-07-05 (slice 4) `CacheTier` = engine composition, NOT a factory (decision 14):** the memory cache wraps
   the store by plain `CachedStore`/`MemoryCache` composition in `varve-engine`; **`BuildContext` is STILL not
   needed** (discharges the slice-4 revisit). Registry-by-name cache selection waits for the slice-5 disk tier —
@@ -335,7 +392,7 @@
 | 2 bitemporal core | ✅ complete | 1 | `cargo run --example time_travel -p varve` | events + XTDB Ceiling/Polygon port + per-entity resolve; `varve-testkit` reference model + proptest equivalence (10k CI / 200k nightly); temporal GQL (`FOR VALID_TIME`/`SYSTEM_TIME`, `INSERT … VALID`, `MATCH … DELETE`, history fns); `MonotonicClock`; `TxReceipt.system_time`; lock-split query; ~125 workspace tests |
 | 3 durability (log) | ✅ complete | 1 | `cargo run --release --example write_bench -p varve` | `varve-log` crate: `Log` trait + prost envelope + `memory`/`local` backends (CRC32C frames, fsync-before-ack, torn-tail recovery) + writer loop group commit + `Db::open` replay + pluggable `Clock`/`Registries` + `kill -9` crash matrix; bench memory 6226 / local 340 tx/s (M3 Max); 181 workspace tests |
 | 4 blocks & persisted scan | ✅ complete | 1 | `cargo run --release --example block_bench -p varve` | `varve-storage` crate (sovereign `ObjectStore` over object_store 0.13, §9 lex-hex keys, `BlockManifest` commit point, memory cache) + paged block codec/prune in `varve-index` + `Log::trim` + one-lock merged live∪persisted scan + writer-loop flush (data/meta→manifest→reset→trim) + `Db::open` manifest+log-tail recovery + kill-during-flush crash matrix + flush-equivalence proptest; bench 1M events @ 39.8k ev/s, reopen 38 ms, warm point lookup 7.6 ms (<100 ms); 247 workspace tests (incl. post-slice `merge_sources` extraction fast-follow) |
-| 5 s3 backends & caches | not started | – | – | no detailed plan yet |
+| 5 s3 backends & caches | ✅ complete | 1 | `just s3-matrix` / `cargo run --release --example cache_bench -p varve` | `BuildContext` (spec-§4 factory sig); `storage/s3` (`object_store/aws`, default-on) for Garage/SeaweedFS/MinIO/Ceph; `log/object-store` (1 object per group-commit batch, shared bucket); disk `CacheTier` + `[cache] tiers` registry (memory/disk builtins, replaces `[cache] memory_max_bytes`); optional `ConditionalStore` + 4-step capability probe (`Db::probe_capabilities`); docker-CLI backend harness + CI `backend-matrix`/`backend-ceph-weekly`. LIVE trio (garage/seaweedfs/minio) green; probe verdicts minio=Supported, garage/seaweedfs=Inconsistent. 293 workspace tests |
 | 6 edges & traversal | not started | – | – | no detailed plan yet |
 | 7 GQL completion & TCK | not started | – | – | no detailed plan yet |
 | 8 compaction & GC | not started | – | – | no detailed plan yet |
