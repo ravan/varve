@@ -1,9 +1,11 @@
+pub mod cache;
 pub mod keys;
 pub mod local;
 pub mod manifest;
 pub mod memory;
 pub mod store;
 
+pub use cache::{CacheKey, CacheTier, CachedStore, MemoryCache};
 pub use local::{local_store, LocalStoreFactory};
 pub use manifest::{latest_manifest, BlockManifest, TableTries, TrieEntry};
 pub use memory::{memory_store, MemoryStoreFactory};
