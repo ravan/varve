@@ -3,7 +3,7 @@ use crate::record::LogRecord;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use varve_config::{ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
 use varve_types::LogPosition;
 
 pub const DEFAULT_SEGMENT_MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -416,7 +416,7 @@ impl ComponentFactory<dyn Log> for LocalLogFactory {
         "local"
     }
 
-    fn build(&self, cfg: &ConfigSection) -> Result<Arc<dyn Log>, RegistryError> {
+    fn build(&self, cfg: &ConfigSection, _ctx: &BuildContext) -> Result<Arc<dyn Log>, RegistryError> {
         let local = cfg.child("local").ok_or_else(|| RegistryError::Build {
             kind: "log",
             name: "local".into(),

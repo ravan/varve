@@ -1,5 +1,5 @@
 use std::path::Path;
-use varve_config::Config;
+use varve_config::{BuildContext, Config};
 use varve_log::{log_registry, LocalLog, Log, LogError, LogRecord, DEFAULT_SEGMENT_MAX_BYTES};
 use varve_types::LogPosition;
 
@@ -122,7 +122,7 @@ async fn factory_builds_from_toml_and_requires_dir() {
     .unwrap()
     .section("log")
     .unwrap();
-    let log = reg.build("local", &cfg).unwrap();
+    let log = reg.build("local", &cfg, &BuildContext::empty()).unwrap();
     log.append(vec![rec(1)]).await.unwrap();
     assert_eq!(log.tail(LogPosition::ZERO).await.unwrap().len(), 1);
 
@@ -133,7 +133,7 @@ async fn factory_builds_from_toml_and_requires_dir() {
         .unwrap()
         .section("log")
         .unwrap();
-    let err = match reg.build("local", &bare) {
+    let err = match reg.build("local", &bare, &BuildContext::empty()) {
         Ok(_) => panic!("expected build(\"local\") with no [log.local] to fail"),
         Err(e) => e.to_string(),
     };

@@ -1,7 +1,7 @@
 use crate::store::{ObjectStore, StorageError};
 use std::path::Path;
 use std::sync::Arc;
-use varve_config::{ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
 
 /// Local-filesystem store, backed by `object_store::local::LocalFileSystem`.
 /// Creates `dir` (and any missing parents) if it does not already exist;
@@ -28,7 +28,7 @@ impl ComponentFactory<dyn ObjectStore> for LocalStoreFactory {
         "local"
     }
 
-    fn build(&self, cfg: &ConfigSection) -> Result<Arc<dyn ObjectStore>, RegistryError> {
+    fn build(&self, cfg: &ConfigSection, _ctx: &BuildContext) -> Result<Arc<dyn ObjectStore>, RegistryError> {
         let local = cfg.child("local").ok_or_else(|| RegistryError::Build {
             kind: "storage",
             name: "local".into(),

@@ -1,7 +1,7 @@
 use crate::log::{Log, LogError};
 use crate::record::LogRecord;
 use std::sync::{Arc, Mutex};
-use varve_config::{ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
 use varve_types::LogPosition;
 
 struct Inner {
@@ -83,7 +83,7 @@ impl ComponentFactory<dyn Log> for MemoryLogFactory {
         "memory"
     }
 
-    fn build(&self, _cfg: &ConfigSection) -> Result<Arc<dyn Log>, RegistryError> {
+    fn build(&self, _cfg: &ConfigSection, _ctx: &BuildContext) -> Result<Arc<dyn Log>, RegistryError> {
         Ok(Arc::new(MemoryLog::new()))
     }
 }

@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use std::sync::Arc;
-use varve_config::{Config, ConfigSection};
+use varve_config::{BuildContext, Config, ConfigSection};
 use varve_storage::{local_store, memory_store, storage_registry, ObjectStore, StorageError};
 
 /// Trait conformance, run against every backend: atomic put/replace, whole
@@ -84,7 +84,7 @@ async fn local_store_survives_reopen() {
 async fn registry_builds_by_name() {
     let reg = storage_registry();
     assert_eq!(reg.names(), vec!["local", "memory"]);
-    let store = reg.build("memory", &ConfigSection::empty()).unwrap();
+    let store = reg.build("memory", &ConfigSection::empty(), &BuildContext::empty()).unwrap();
     store.put("k", Bytes::from_static(b"v")).await.unwrap();
     assert_eq!(store.get("k").await.unwrap(), Bytes::from_static(b"v"));
 }
@@ -94,7 +94,7 @@ fn local_factory_requires_dir() {
     // `.unwrap_err()` needs `Arc<dyn ObjectStore>: Debug`, which `ObjectStore`
     // does not require, so extract the error via `match` instead (see
     // varve-log's local_log.rs test for the same pattern).
-    let err = match storage_registry().build("local", &ConfigSection::empty()) {
+    let err = match storage_registry().build("local", &ConfigSection::empty(), &BuildContext::empty()) {
         Ok(_) => panic!("expected build(\"local\") with no [storage.local] to fail"),
         Err(e) => e.to_string(),
     };
@@ -112,7 +112,7 @@ async fn local_factory_builds_from_config() {
         .unwrap()
         .section("storage")
         .unwrap();
-    let store = storage_registry().build("local", &cfg).unwrap();
+    let store = storage_registry().build("local", &cfg, &BuildContext::empty()).unwrap();
     store.put("v1/y", Bytes::from_static(b"z")).await.unwrap();
     assert_eq!(store.get("v1/y").await.unwrap(), Bytes::from_static(b"z"));
 }
