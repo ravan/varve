@@ -155,15 +155,42 @@ impl GraphOracle {
 }
 
 /// Node iid derivation — MUST mirror the engine (`DEFAULT_GRAPH`/`NODES_TABLE`
-/// over `Value::Int(_id).id_bytes()`).
-fn node_iid(id: i64) -> Iid {
+/// over `Value::Int(_id).id_bytes()`). `pub(crate)`: `fixture.rs` reuses this
+/// exact derivation for the social-graph fixture's node/oracle iids.
+pub(crate) fn node_iid(id: i64) -> Iid {
     Iid::derive("default", "nodes", &Value::Int(id).id_bytes().unwrap())
 }
 
 /// Edge iid derivation — MUST mirror the engine (`DEFAULT_GRAPH`/`EDGES_TABLE`
-/// over `Value::Int(_id).id_bytes()`).
-fn edge_iid(id: i64) -> Iid {
+/// over `Value::Int(_id).id_bytes()`). `pub(crate)`: `fixture.rs` reuses this
+/// as a unique-per-edge placeholder iid (the fixture's GQL never sets an
+/// edge `_id`, so the oracle's edge iids need not — and cannot — match the
+/// engine's auto-assigned ones; only the resulting node ids are compared).
+pub(crate) fn edge_iid(id: i64) -> Iid {
     Iid::derive("default", "edges", &Value::Int(id).id_bytes().unwrap())
+}
+
+/// Collects every value of an `Int64` column named `col` across `batches`,
+/// preserving duplicates (WALK results are multiset — one row per path).
+/// Shared by `tests/traversal_oracle.rs` and `tests/social_graph.rs` (was
+/// `collect_i64`, duplicated per test file — task 11 hoisted it here so both
+/// use one copy).
+pub fn column_i64(batches: &[varve::RecordBatch], col: &str) -> Vec<i64> {
+    use arrow::array::Int64Array;
+    let mut out = Vec::new();
+    for b in batches {
+        let Some(arr_ref) = b.column_by_name(col) else {
+            continue;
+        };
+        let arr: &Int64Array = arr_ref
+            .as_any()
+            .downcast_ref()
+            .expect("column_i64: column is not Int64");
+        for i in 0..arr.len() {
+            out.push(arr.value(i));
+        }
+    }
+    out
 }
 
 /// Renders a grid microsecond offset as an RFC3339 timestamp that the GQL

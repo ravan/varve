@@ -22,7 +22,7 @@
 
 use proptest::prelude::*;
 use varve_plan::expand::{expand_paths, AdjEdge, EdgeAdjacency};
-use varve_testkit::oracle::{micros_to_rfc3339, GraphOracle, OracleDir};
+use varve_testkit::oracle::{column_i64, micros_to_rfc3339, GraphOracle, OracleDir};
 use varve_types::{Iid, Instant};
 
 fn cases() -> u32 {
@@ -89,23 +89,6 @@ fn e2e_cases() -> u32 {
     cases().min(128)
 }
 
-/// Collects every value of an `Int64` column named `col` across `batches`,
-/// preserving duplicates (WALK results are a multiset — one row per path).
-fn collect_i64(batches: &[varve::RecordBatch], col: &str) -> Vec<i64> {
-    use arrow::array::Int64Array; // workspace arrow == DataFusion's re-export (slice-1 pin)
-    let mut out = Vec::new();
-    for b in batches {
-        let Some(arr_ref) = b.column_by_name(col) else {
-            continue;
-        };
-        let arr = arr_ref.as_any().downcast_ref::<Int64Array>().unwrap();
-        for i in 0..arr.len() {
-            out.push(arr.value(i));
-        }
-    }
-    out
-}
-
 /// The oracle probe mirroring the engine's read point. `valid` = the grid probe
 /// under AS OF (`Some`), else an instant past the grid's end (`i64::MAX - 1`) —
 /// the same verdict the engine's "AS OF now" gives for grid-ranged edges
@@ -170,7 +153,7 @@ proptest! {
                      WHERE a._id = {anchor_id} RETURN b._id"
                 );
                 let rows = db.query(&gql).await.unwrap();
-                let mut got: Vec<i64> = collect_i64(&rows, "_id");
+                let mut got: Vec<i64> = column_i64(&rows, "_id");
                 got.sort_unstable();
                 let (valid, system) = probe_at(probe_valid);
                 let mut want: Vec<i64> = graph
@@ -219,8 +202,8 @@ proptest! {
             let gql = format!(
                 "MATCH (a:P)-[:K]->{{1,2}}(b:P) WHERE a._id = {anchor_id} RETURN b._id"
             );
-            let mut a = collect_i64(&plain.query(&gql).await.unwrap(), "_id");
-            let mut b = collect_i64(&flushy.query(&gql).await.unwrap(), "_id");
+            let mut a = column_i64(&plain.query(&gql).await.unwrap(), "_id");
+            let mut b = column_i64(&flushy.query(&gql).await.unwrap(), "_id");
             a.sort_unstable();
             b.sort_unstable();
             prop_assert_eq!(a, b);
