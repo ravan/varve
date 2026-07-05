@@ -1,15 +1,8 @@
-use crate::bitemporal::resolve;
-use crate::event::{Event, Op};
-use arrow::array::{
-    ArrayRef, BinaryBuilder, BooleanBuilder, FixedSizeBinaryBuilder, Float64Builder, Int64Builder,
-    StringBuilder, TimestampMicrosecondBuilder,
-};
-use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use crate::event::Event;
 use arrow::record_batch::RecordBatch;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use thiserror::Error;
-use varve_types::{Doc, Iid, Instant, TemporalBounds, Value};
+use varve_types::{Iid, Instant, TemporalBounds};
 
 #[derive(Debug, Error)]
 pub enum IndexError {
@@ -34,33 +27,6 @@ pub struct LiveTable {
     events: BTreeMap<Iid, Vec<Event>>,
     last_system_from: Option<Instant>,
     event_count: usize,
-}
-
-struct VisibleRow<'a> {
-    iid: Iid,
-    doc: &'a Doc,
-    system_from: Instant,
-    system_to: Instant,
-    valid_from: Instant,
-    valid_to: Instant,
-}
-
-/// Maps an observed property value to its Arrow column type. `Value::Null`
-/// carries no type information (returns `None`, so it doesn't constrain the
-/// column); `Value::Bytes` maps to `Binary`, not `MixedPropertyTypes`.
-fn value_type(v: &Value) -> Option<DataType> {
-    match v {
-        Value::Int(_) => Some(DataType::Int64),
-        Value::Float(_) => Some(DataType::Float64),
-        Value::Str(_) => Some(DataType::Utf8),
-        Value::Bool(_) => Some(DataType::Boolean),
-        Value::Bytes(_) => Some(DataType::Binary),
-        Value::Null => None,
-    }
-}
-
-fn timestamp_type() -> DataType {
-    DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
 }
 
 impl LiveTable {
@@ -92,143 +58,35 @@ impl LiveTable {
 
     /// Resolve all entities against `bounds` and snapshot the visible
     /// versions carrying `label` into one RecordBatch. Returns `None` when
-    /// nothing is visible.
-    /// Schema: `_iid` FixedSizeBinary(16), then `_system_from`/`_system_to`/
-    /// `_valid_from`/`_valid_to` as Timestamp(µs, "UTC") (all non-null), then
-    /// one nullable column per property observed across visible docs (same
-    /// type rules as v0).
+    /// nothing is visible. See [`crate::scan::snapshot_entities`] (delegates
+    /// to it) for the schema and precondition details.
     pub fn snapshot_for_label(
         &self,
         label: &str,
         bounds: &TemporalBounds,
     ) -> Result<Option<RecordBatch>, IndexError> {
-        let mut visible: Vec<VisibleRow<'_>> = Vec::new();
-        for (iid, events) in &self.events {
-            for version in resolve(events, bounds) {
-                let Op::Put { labels, doc } = &version.event.op else {
-                    continue; // resolve only emits Puts; defensive
-                };
-                if labels.iter().any(|l| l == label) {
-                    visible.push(VisibleRow {
-                        iid: *iid,
-                        doc,
-                        system_from: version.event.system_from,
-                        system_to: version.system_to,
-                        valid_from: version.valid_from,
-                        valid_to: version.valid_to,
-                    });
-                }
-            }
-        }
-        if visible.is_empty() {
-            return Ok(None);
-        }
+        crate::scan::snapshot_entities(
+            self.events
+                .iter()
+                .map(|(iid, events)| (*iid, events.as_slice())),
+            label,
+            bounds,
+        )
+    }
 
-        // Column plan over VISIBLE docs: property name → type of first non-null.
-        let mut col_types: BTreeMap<&str, DataType> = BTreeMap::new();
-        for row in &visible {
-            for (k, v) in row.doc {
-                if let Some(dt) = value_type(v) {
-                    match col_types.get(k.as_str()) {
-                        None => {
-                            col_types.insert(k, dt);
-                        }
-                        Some(existing) if *existing == dt => {}
-                        Some(_) => {
-                            return Err(IndexError::MixedPropertyTypes {
-                                property: k.clone(),
-                            })
-                        }
-                    }
-                }
-            }
-        }
+    /// All entities in ascending `Iid` order, each event slice in arrival
+    /// (log) order — the shape [`crate::scan::snapshot_entities`] consumes,
+    /// and what block encoding (Task 6) and the merged scan (Task 9) will
+    /// consume too.
+    pub fn entities(&self) -> impl Iterator<Item = (&Iid, &[Event])> {
+        self.events
+            .iter()
+            .map(|(iid, events)| (iid, events.as_slice()))
+    }
 
-        let mut fields = vec![Field::new("_iid", DataType::FixedSizeBinary(16), false)];
-        let mut iid_b = FixedSizeBinaryBuilder::new(16);
-        for row in &visible {
-            iid_b.append_value(row.iid.as_bytes())?;
-        }
-        let mut columns: Vec<ArrayRef> = vec![Arc::new(iid_b.finish())];
-
-        for (name, get) in [
-            (
-                "_system_from",
-                (|r: &VisibleRow<'_>| r.system_from) as fn(&VisibleRow<'_>) -> Instant,
-            ),
-            ("_system_to", |r| r.system_to),
-            ("_valid_from", |r| r.valid_from),
-            ("_valid_to", |r| r.valid_to),
-        ] {
-            fields.push(Field::new(name, timestamp_type(), false));
-            let mut b = TimestampMicrosecondBuilder::new().with_timezone("UTC");
-            for row in &visible {
-                b.append_value(get(row).as_micros());
-            }
-            columns.push(Arc::new(b.finish()));
-        }
-
-        for (name, dt) in &col_types {
-            fields.push(Field::new(*name, dt.clone(), true));
-            let col: ArrayRef = match dt {
-                DataType::Int64 => {
-                    let mut b = Int64Builder::new();
-                    for row in &visible {
-                        match row.doc.get(*name) {
-                            Some(Value::Int(i)) => b.append_value(*i),
-                            _ => b.append_null(),
-                        }
-                    }
-                    Arc::new(b.finish())
-                }
-                DataType::Float64 => {
-                    let mut b = Float64Builder::new();
-                    for row in &visible {
-                        match row.doc.get(*name) {
-                            Some(Value::Float(f)) => b.append_value(*f),
-                            _ => b.append_null(),
-                        }
-                    }
-                    Arc::new(b.finish())
-                }
-                DataType::Utf8 => {
-                    let mut b = StringBuilder::new();
-                    for row in &visible {
-                        match row.doc.get(*name) {
-                            Some(Value::Str(s)) => b.append_value(s),
-                            _ => b.append_null(),
-                        }
-                    }
-                    Arc::new(b.finish())
-                }
-                DataType::Boolean => {
-                    let mut b = BooleanBuilder::new();
-                    for row in &visible {
-                        match row.doc.get(*name) {
-                            Some(Value::Bool(v)) => b.append_value(*v),
-                            _ => b.append_null(),
-                        }
-                    }
-                    Arc::new(b.finish())
-                }
-                _ => {
-                    let mut b = BinaryBuilder::new();
-                    for row in &visible {
-                        match row.doc.get(*name) {
-                            Some(Value::Bytes(v)) => b.append_value(v),
-                            _ => b.append_null(),
-                        }
-                    }
-                    Arc::new(b.finish())
-                }
-            };
-            columns.push(col);
-        }
-
-        Ok(Some(RecordBatch::try_new(
-            Arc::new(Schema::new(fields)),
-            columns,
-        )?))
+    /// One entity's events in arrival order (point-lookup fast path).
+    pub fn events_for(&self, iid: &Iid) -> Option<&[Event]> {
+        self.events.get(iid).map(Vec::as_slice)
     }
 }
 
