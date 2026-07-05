@@ -22,9 +22,11 @@ tempfile = { workspace = true }
 # oracle.rs (library code) renders grid µs into the RFC3339 timestamps the GQL
 # VALID FROM / AS OF clauses parse, so chrono is a normal dep, not dev-only.
 chrono = { workspace = true }
+# oracle.rs::column_i64 (library code, task 11) downcasts RecordBatch columns
+# for both test files to share, so arrow is a normal dep, not dev-only.
+arrow = { workspace = true }
 
 [dev-dependencies]
-arrow = { workspace = true }
 bytes = { workspace = true }
 # varve-plan gives the pure expand_paths layer for the pure equivalence property.
 varve-plan = { path = "../varve-plan" }
