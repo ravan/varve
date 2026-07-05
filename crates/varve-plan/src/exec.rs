@@ -34,7 +34,7 @@ fn to_df_literal(l: &Literal) -> datafusion::prelude::Expr {
 /// wins, else the query-level clause, else the spec §7 default — AS OF `now`
 /// on both axes (the writer clock is monotonic, so `at(now)` sees exactly the
 /// current versions).
-fn effective_bounds(stmt: &QueryStmt, now: Instant) -> TemporalBounds {
+pub fn effective_bounds(stmt: &QueryStmt, now: Instant) -> TemporalBounds {
     TemporalBounds {
         valid: stmt
             .match_temporal
@@ -47,6 +47,34 @@ fn effective_bounds(stmt: &QueryStmt, now: Instant) -> TemporalBounds {
             .or(stmt.temporal.system)
             .unwrap_or_else(|| TemporalDimension::at(now)),
     }
+}
+
+fn literal_value(l: &Literal) -> varve_types::Value {
+    use varve_types::Value;
+    match l {
+        Literal::Int(i) => Value::Int(*i),
+        Literal::Float(f) => Value::Float(*f),
+        Literal::Str(s) => Value::Str(s.clone()),
+        Literal::Bool(b) => Value::Bool(*b),
+        Literal::Null => Value::Null,
+    }
+}
+
+/// IID point pushdown (spec §10): `WHERE v._id = <literal>` pins the scan to
+/// exactly one entity, letting it prune persisted pages by IID range and
+/// read a single live entity. `None` when the filter isn't an `_id`
+/// equality or the literal can't be an id (Float/Null) — the scan stays
+/// unpruned and DataFusion applies the WHERE afterwards either way, so this
+/// is purely an access-path optimization, never a semantics change.
+pub fn iid_point(where_clause: &Option<Expr>, graph: &str, table: &str) -> Option<Iid> {
+    let Some(Expr::PropEq { prop, value, .. }) = where_clause else {
+        return None;
+    };
+    if prop != "_id" {
+        return None;
+    }
+    let bytes = literal_value(value).id_bytes().ok()?;
+    Some(Iid::derive(graph, table, &bytes))
 }
 
 /// (hidden column, default output name) for a `RETURN`-position temporal function.
