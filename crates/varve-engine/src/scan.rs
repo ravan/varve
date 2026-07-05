@@ -6,7 +6,6 @@
 use crate::db::EngineError;
 use crate::state::{TableState, DEFAULT_GRAPH, NODES_TABLE};
 use datafusion::arrow::record_batch::RecordBatch;
-use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use varve_index::{decode_events, snapshot_entities, Event};
 use varve_storage::{keys, ObjectStore};
@@ -40,13 +39,15 @@ pub(crate) async fn merged_snapshot(
     };
 
     // 2. Persisted events, ascending block order (== time order, decision 9).
-    let mut merged: BTreeMap<Iid, Vec<Event>> = BTreeMap::new();
+    //    An entity's run may span pages within one block, so each trie's
+    //    selected/decoded events are collected in file order as one block;
+    //    per-entity grouping/reversal/concat with the live tail is
+    //    `varve_index::merge_sources`'s job (decision 9), shared with the
+    //    flush-equivalence property test.
+    let mut blocks: Vec<Vec<Event>> = Vec::new();
     for trie in &tries {
         let data_key = keys::data_key(DEFAULT_GRAPH, NODES_TABLE, &trie.entry.trie_key);
-        // An entity's run may span pages within one block: collect the whole
-        // block in file order (system_from desc per entity), then reverse
-        // per entity to restore arrival order.
-        let mut per_block: BTreeMap<Iid, Vec<Event>> = BTreeMap::new();
+        let mut block_events: Vec<Event> = Vec::new();
         for page in trie
             .pages
             .iter()
@@ -57,22 +58,16 @@ pub(crate) async fn merged_snapshot(
                 .await?;
             for event in decode_events(&bytes)? {
                 if iid_point.as_ref().is_none_or(|iid| event.iid == *iid) {
-                    per_block.entry(event.iid).or_default().push(event);
+                    block_events.push(event);
                 }
             }
         }
-        for (iid, desc) in per_block {
-            merged
-                .entry(iid)
-                .or_default()
-                .extend(desc.into_iter().rev());
-        }
+        blocks.push(block_events);
     }
 
-    // 3. Live events are newest — appended after every persisted source.
-    for (iid, events) in live_events {
-        merged.entry(iid).or_default().extend(events);
-    }
+    // 3. Merge persisted blocks with the live tail (live is newest —
+    //    appended after every persisted source).
+    let merged = varve_index::merge_sources(blocks, live_events);
 
     Ok(snapshot_entities(
         merged.iter().map(|(iid, events)| (*iid, events.as_slice())),
