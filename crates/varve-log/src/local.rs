@@ -416,7 +416,11 @@ impl ComponentFactory<dyn Log> for LocalLogFactory {
         "local"
     }
 
-    fn build(&self, cfg: &ConfigSection, _ctx: &BuildContext) -> Result<Arc<dyn Log>, RegistryError> {
+    fn build(
+        &self,
+        cfg: &ConfigSection,
+        _ctx: &BuildContext,
+    ) -> Result<Arc<dyn Log>, RegistryError> {
         let local = cfg.child("local").ok_or_else(|| RegistryError::Build {
             kind: "log",
             name: "local".into(),

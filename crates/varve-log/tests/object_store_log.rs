@@ -83,7 +83,10 @@ async fn survives_reopen_on_a_local_fs_store() {
     }
     let store = varve_storage::local_store(dir.path()).unwrap();
     let log = ObjectStoreLog::new(store);
-    assert_eq!(tx_ids(&log.tail(LogPosition::ZERO).await.unwrap()), vec![1, 2]);
+    assert_eq!(
+        tx_ids(&log.tail(LogPosition::ZERO).await.unwrap()),
+        vec![1, 2]
+    );
     assert_eq!(log.append(vec![rec(3)]).await.unwrap().offset(), 2);
 }
 
@@ -144,7 +147,10 @@ async fn trim_is_a_noop_and_positions_never_regress() {
     log.append(vec![rec(1), rec(2)]).await.unwrap();
     log.trim(LogPosition::from_u64(u64::MAX)).await.unwrap();
     // Nothing removed (no delete in the sovereign trait; GC = slice 8)…
-    assert_eq!(tx_ids(&log.tail(LogPosition::ZERO).await.unwrap()), vec![1, 2]);
+    assert_eq!(
+        tx_ids(&log.tail(LogPosition::ZERO).await.unwrap()),
+        vec![1, 2]
+    );
     // …and the sequence continues where it left off.
     assert_eq!(log.append(vec![rec(3)]).await.unwrap().offset(), 2);
 }
@@ -182,7 +188,11 @@ async fn empty_append_is_rejected() {
 async fn factory_requires_the_storage_component() {
     let reg = log_registry();
     assert_eq!(reg.names(), vec!["local", "memory", "object-store"]);
-    let err = match reg.build("object-store", &ConfigSection::empty(), &BuildContext::empty()) {
+    let err = match reg.build(
+        "object-store",
+        &ConfigSection::empty(),
+        &BuildContext::empty(),
+    ) {
         Ok(_) => panic!("expected build without a storage component to fail"),
         Err(e) => e.to_string(),
     };

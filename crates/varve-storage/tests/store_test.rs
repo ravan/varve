@@ -57,9 +57,8 @@ mod s3_factory {
 
     #[test]
     fn s3_factory_requires_a_bucket() {
-        let cfg = storage_section(
-            "[storage]\nbackend = \"s3\"\n[storage.s3]\nendpoint = \"http://x\"\n",
-        );
+        let cfg =
+            storage_section("[storage]\nbackend = \"s3\"\n[storage.s3]\nendpoint = \"http://x\"\n");
         let err = match storage_registry().build("s3", &cfg, &BuildContext::empty()) {
             Ok(_) => panic!("expected build(\"s3\") without bucket to fail"),
             Err(e) => e.to_string(),
@@ -149,7 +148,9 @@ async fn local_store_survives_reopen() {
 async fn registry_builds_by_name() {
     let reg = storage_registry();
     assert_eq!(reg.names(), vec!["local", "memory", "s3"]);
-    let store = reg.build("memory", &ConfigSection::empty(), &BuildContext::empty()).unwrap();
+    let store = reg
+        .build("memory", &ConfigSection::empty(), &BuildContext::empty())
+        .unwrap();
     store.put("k", Bytes::from_static(b"v")).await.unwrap();
     assert_eq!(store.get("k").await.unwrap(), Bytes::from_static(b"v"));
 }
@@ -159,10 +160,11 @@ fn local_factory_requires_dir() {
     // `.unwrap_err()` needs `Arc<dyn ObjectStore>: Debug`, which `ObjectStore`
     // does not require, so extract the error via `match` instead (see
     // varve-log's local_log.rs test for the same pattern).
-    let err = match storage_registry().build("local", &ConfigSection::empty(), &BuildContext::empty()) {
-        Ok(_) => panic!("expected build(\"local\") with no [storage.local] to fail"),
-        Err(e) => e.to_string(),
-    };
+    let err =
+        match storage_registry().build("local", &ConfigSection::empty(), &BuildContext::empty()) {
+            Ok(_) => panic!("expected build(\"local\") with no [storage.local] to fail"),
+            Err(e) => e.to_string(),
+        };
     assert!(err.contains("[storage.local]"), "{err}");
 }
 
@@ -177,7 +179,9 @@ async fn local_factory_builds_from_config() {
         .unwrap()
         .section("storage")
         .unwrap();
-    let store = storage_registry().build("local", &cfg, &BuildContext::empty()).unwrap();
+    let store = storage_registry()
+        .build("local", &cfg, &BuildContext::empty())
+        .unwrap();
     store.put("v1/y", Bytes::from_static(b"z")).await.unwrap();
     assert_eq!(store.get("v1/y").await.unwrap(), Bytes::from_static(b"z"));
 }

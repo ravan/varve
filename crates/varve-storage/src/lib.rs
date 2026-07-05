@@ -4,18 +4,18 @@ pub mod keys;
 pub mod local;
 pub mod manifest;
 pub mod memory;
-pub mod store;
 #[cfg(feature = "s3")]
 pub mod s3;
+pub mod store;
 
 pub use cache::{CacheKey, CacheTier, CachedStore, MemoryCache};
 pub use disk::DiskCache;
 pub use local::{local_store, LocalStoreFactory};
 pub use manifest::{latest_manifest, BlockManifest, TableTries, TrieEntry};
 pub use memory::{memory_store, MemoryStoreFactory};
-pub use store::{ObjectStore, StorageError};
 #[cfg(feature = "s3")]
 pub use s3::S3StoreFactory;
+pub use store::{ObjectStore, StorageError};
 
 use varve_config::{ComponentFactory, Registry};
 

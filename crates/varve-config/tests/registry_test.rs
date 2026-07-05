@@ -1,7 +1,7 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use varve_config::registry::{ComponentFactory, Registry, RegistryError};
-use varve_config::{Config, ConfigSection, BuildContext};
+use varve_config::{BuildContext, Config, ConfigSection};
 
 // Toy subsystem trait standing in for Log/ObjectStore/…
 trait Greeter: Send + Sync + std::fmt::Debug {
@@ -23,7 +23,11 @@ impl ComponentFactory<dyn Greeter> for EnglishFactory {
     fn name(&self) -> &'static str {
         "english"
     }
-    fn build(&self, cfg: &ConfigSection, _ctx: &BuildContext) -> Result<Arc<dyn Greeter>, RegistryError> {
+    fn build(
+        &self,
+        cfg: &ConfigSection,
+        _ctx: &BuildContext,
+    ) -> Result<Arc<dyn Greeter>, RegistryError> {
         #[derive(serde::Deserialize)]
         struct C {
             name: String,
@@ -39,7 +43,10 @@ struct CountedGreeter {
 }
 impl Greeter for CountedGreeter {
     fn greet(&self) -> String {
-        format!("greeting #{}", self.count.fetch_add(1, Ordering::SeqCst) + 1)
+        format!(
+            "greeting #{}",
+            self.count.fetch_add(1, Ordering::SeqCst) + 1
+        )
     }
 }
 
@@ -85,7 +92,9 @@ fn unknown_name_error_lists_available() {
     let mut reg: Registry<dyn Greeter> = Registry::new("greeter");
     reg.register(Box::new(EnglishFactory)).unwrap();
     let cfg = section("[greeter]\nname = \"x\"", "greeter");
-    let err = reg.build("klingon", &cfg, &BuildContext::empty()).unwrap_err();
+    let err = reg
+        .build("klingon", &cfg, &BuildContext::empty())
+        .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("klingon"), "{msg}");
     assert!(msg.contains("english"), "{msg}");

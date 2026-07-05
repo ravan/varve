@@ -28,7 +28,11 @@ impl ComponentFactory<dyn ObjectStore> for LocalStoreFactory {
         "local"
     }
 
-    fn build(&self, cfg: &ConfigSection, _ctx: &BuildContext) -> Result<Arc<dyn ObjectStore>, RegistryError> {
+    fn build(
+        &self,
+        cfg: &ConfigSection,
+        _ctx: &BuildContext,
+    ) -> Result<Arc<dyn ObjectStore>, RegistryError> {
         let local = cfg.child("local").ok_or_else(|| RegistryError::Build {
             kind: "storage",
             name: "local".into(),
