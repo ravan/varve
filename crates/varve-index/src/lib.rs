@@ -1,10 +1,12 @@
 pub mod bitemporal;
+pub mod block;
 pub mod codec;
 pub mod event;
 pub mod live;
 pub mod scan;
 
 pub use bitemporal::{resolve, Ceiling, Polygon, ResolvedVersion};
+pub use block::{decode_meta, encode_block, EncodedBlock, PageMeta, DEFAULT_PAGE_ROWS};
 pub use codec::{decode_events, encode_events};
 pub use event::{Event, Op};
 pub use live::{IndexError, LiveTable};

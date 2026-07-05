@@ -1,0 +1,490 @@
+//! Block format v1 (spec §9, roadmap slice 4). The data file is a
+//! concatenation of self-contained per-page Arrow IPC streams (the slice-3
+//! event codec, verbatim); the meta file is a single-level page index whose
+//! per-page byte ranges make a page read one ranged GET. The full hash-trie
+//! meta arrives with slice 8's compaction.
+
+use crate::codec::{downcast, encode_events};
+use crate::event::{Event, Op};
+use crate::live::{IndexError, LiveTable};
+use arrow::array::{
+    ArrayRef, BooleanArray, BooleanBuilder, FixedSizeBinaryArray, FixedSizeBinaryBuilder,
+    TimestampMicrosecondArray, TimestampMicrosecondBuilder, UInt64Array, UInt64Builder,
+};
+use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use arrow::ipc::reader::StreamReader;
+use arrow::ipc::writer::StreamWriter;
+use arrow::record_batch::RecordBatch;
+use std::sync::Arc;
+use varve_types::{Iid, Instant, TemporalBounds};
+
+/// Rows per page (XTDB `pageLimit`). A parameter on `encode_block` so tests
+/// can force page splits; the engine passes this constant.
+pub const DEFAULT_PAGE_ROWS: usize = 1024;
+
+/// One page's entry in the meta file: byte range in the data file plus the
+/// stats the scan prunes by.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PageMeta {
+    pub offset: u64,
+    pub len: u64,
+    pub rows: u64,
+    pub min_iid: Iid,
+    pub max_iid: Iid,
+    pub min_system_from: Instant,
+    pub max_system_from: Instant,
+    pub min_valid_from: Instant,
+    pub max_valid_from: Instant,
+    pub min_valid_to: Instant,
+    pub max_valid_to: Instant,
+    pub has_erase: bool,
+}
+
+impl PageMeta {
+    /// Should the scan read this page? Prune rules (slice-4 plan, decision 4):
+    /// - IID point outside `[min_iid, max_iid]` → skip: resolution is
+    ///   per-entity, other entities' pages are irrelevant.
+    /// - Every event at/after `bounds.system.upper` → skip: `resolve()`
+    ///   ignores such events BEFORE they touch the ceiling, so dropping the
+    ///   page is exactly output-preserving — UNLESS the page holds an
+    ///   `Erase`, which hides history at every system time (slice-2 GDPR
+    ///   decision) and must always be scanned.
+    /// - The valid axis deliberately does NOT prune: an event valid-disjoint
+    ///   from the query window still clips the reported `_valid_from`/
+    ///   `_valid_to` of visible rectangles inside it (`valid_to(x)`
+    ///   introspection). Valid stats are recorded for slice 8.
+    pub fn selected(&self, bounds: &TemporalBounds, iid_point: Option<&Iid>) -> bool {
+        if let Some(iid) = iid_point {
+            if *iid < self.min_iid || *iid > self.max_iid {
+                return false;
+            }
+        }
+        if self.min_system_from >= bounds.system.upper && !self.has_erase {
+            return false;
+        }
+        true
+    }
+}
+
+pub struct EncodedBlock {
+    pub data: Vec<u8>,
+    pub meta: Vec<u8>,
+    pub pages: Vec<PageMeta>,
+}
+
+/// Serializes the live table into one L0 block: rows in `(_iid asc,
+/// _system_from desc)` file order (spec §5.2) chunked into pages of
+/// `page_rows`. Pure function of the table (determinism constraint):
+/// BTreeMap iteration + stable per-entity reversal, no clocks, no maps
+/// with random order.
+pub fn encode_block(live: &LiveTable, page_rows: usize) -> Result<EncodedBlock, IndexError> {
+    let mut rows: Vec<Event> = Vec::with_capacity(live.event_count());
+    for (_iid, events) in live.entities() {
+        // Stable reversal: arrival order → system_from desc, ties reversed
+        // exactly; the scan's reversal restores arrival order (decision 9).
+        rows.extend(events.iter().rev().cloned());
+    }
+    let mut data = Vec::new();
+    let mut pages = Vec::new();
+    for chunk in rows.chunks(page_rows.max(1)) {
+        let offset = data.len() as u64;
+        let bytes = encode_events(chunk)?;
+        data.extend_from_slice(&bytes);
+        pages.push(page_meta(chunk, offset, bytes.len() as u64));
+    }
+    let meta = encode_meta(&pages)?;
+    Ok(EncodedBlock { data, meta, pages })
+}
+
+/// Stats over one page's events. `chunks()` never yields an empty slice.
+fn page_meta(events: &[Event], offset: u64, len: u64) -> PageMeta {
+    let first = &events[0];
+    let mut meta = PageMeta {
+        offset,
+        len,
+        rows: events.len() as u64,
+        min_iid: first.iid,
+        max_iid: first.iid,
+        min_system_from: first.system_from,
+        max_system_from: first.system_from,
+        min_valid_from: first.valid_from,
+        max_valid_from: first.valid_from,
+        min_valid_to: first.valid_to,
+        max_valid_to: first.valid_to,
+        has_erase: false,
+    };
+    for e in events {
+        meta.min_iid = meta.min_iid.min(e.iid);
+        meta.max_iid = meta.max_iid.max(e.iid);
+        meta.min_system_from = meta.min_system_from.min(e.system_from);
+        meta.max_system_from = meta.max_system_from.max(e.system_from);
+        meta.min_valid_from = meta.min_valid_from.min(e.valid_from);
+        meta.max_valid_from = meta.max_valid_from.max(e.valid_from);
+        meta.min_valid_to = meta.min_valid_to.min(e.valid_to);
+        meta.max_valid_to = meta.max_valid_to.max(e.valid_to);
+        meta.has_erase |= matches!(e.op, Op::Erase);
+    }
+    meta
+}
+
+fn meta_schema() -> Arc<Schema> {
+    let ts = || DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()));
+    Arc::new(Schema::new(vec![
+        Field::new("offset", DataType::UInt64, false),
+        Field::new("len", DataType::UInt64, false),
+        Field::new("rows", DataType::UInt64, false),
+        Field::new("min_iid", DataType::FixedSizeBinary(16), false),
+        Field::new("max_iid", DataType::FixedSizeBinary(16), false),
+        Field::new("min_system_from", ts(), false),
+        Field::new("max_system_from", ts(), false),
+        Field::new("min_valid_from", ts(), false),
+        Field::new("max_valid_from", ts(), false),
+        Field::new("min_valid_to", ts(), false),
+        Field::new("max_valid_to", ts(), false),
+        Field::new("has_erase", DataType::Boolean, false),
+    ]))
+}
+
+fn encode_meta(pages: &[PageMeta]) -> Result<Vec<u8>, IndexError> {
+    let schema = meta_schema();
+    let mut buf = Vec::new();
+    let mut writer = StreamWriter::try_new(&mut buf, &schema)?;
+    if !pages.is_empty() {
+        let mut offset_b = UInt64Builder::new();
+        let mut len_b = UInt64Builder::new();
+        let mut rows_b = UInt64Builder::new();
+        let mut min_iid_b = FixedSizeBinaryBuilder::new(16);
+        let mut max_iid_b = FixedSizeBinaryBuilder::new(16);
+        let ts_builder = || TimestampMicrosecondBuilder::new().with_timezone("UTC");
+        let mut min_sf_b = ts_builder();
+        let mut max_sf_b = ts_builder();
+        let mut min_vf_b = ts_builder();
+        let mut max_vf_b = ts_builder();
+        let mut min_vt_b = ts_builder();
+        let mut max_vt_b = ts_builder();
+        let mut erase_b = BooleanBuilder::new();
+        for p in pages {
+            offset_b.append_value(p.offset);
+            len_b.append_value(p.len);
+            rows_b.append_value(p.rows);
+            min_iid_b.append_value(p.min_iid.as_bytes())?;
+            max_iid_b.append_value(p.max_iid.as_bytes())?;
+            min_sf_b.append_value(p.min_system_from.as_micros());
+            max_sf_b.append_value(p.max_system_from.as_micros());
+            min_vf_b.append_value(p.min_valid_from.as_micros());
+            max_vf_b.append_value(p.max_valid_from.as_micros());
+            min_vt_b.append_value(p.min_valid_to.as_micros());
+            max_vt_b.append_value(p.max_valid_to.as_micros());
+            erase_b.append_value(p.has_erase);
+        }
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(offset_b.finish()),
+            Arc::new(len_b.finish()),
+            Arc::new(rows_b.finish()),
+            Arc::new(min_iid_b.finish()),
+            Arc::new(max_iid_b.finish()),
+            Arc::new(min_sf_b.finish()),
+            Arc::new(max_sf_b.finish()),
+            Arc::new(min_vf_b.finish()),
+            Arc::new(max_vf_b.finish()),
+            Arc::new(min_vt_b.finish()),
+            Arc::new(max_vt_b.finish()),
+            Arc::new(erase_b.finish()),
+        ];
+        writer.write(&RecordBatch::try_new(schema.clone(), columns)?)?;
+    }
+    writer.finish()?;
+    drop(writer);
+    Ok(buf)
+}
+
+/// Deserializes a meta file written by `encode_block`.
+pub fn decode_meta(bytes: &[u8]) -> Result<Vec<PageMeta>, IndexError> {
+    let reader = StreamReader::try_new(std::io::Cursor::new(bytes), None)?;
+    if reader.schema() != meta_schema() {
+        return Err(IndexError::Codec("meta file schema mismatch".into()));
+    }
+    let mut pages = Vec::new();
+    for batch in reader {
+        let batch = batch?;
+        let offset = downcast::<UInt64Array>(&batch, 0)?;
+        let len = downcast::<UInt64Array>(&batch, 1)?;
+        let rows = downcast::<UInt64Array>(&batch, 2)?;
+        let min_iid = downcast::<FixedSizeBinaryArray>(&batch, 3)?;
+        let max_iid = downcast::<FixedSizeBinaryArray>(&batch, 4)?;
+        let min_sf = downcast::<TimestampMicrosecondArray>(&batch, 5)?;
+        let max_sf = downcast::<TimestampMicrosecondArray>(&batch, 6)?;
+        let min_vf = downcast::<TimestampMicrosecondArray>(&batch, 7)?;
+        let max_vf = downcast::<TimestampMicrosecondArray>(&batch, 8)?;
+        let min_vt = downcast::<TimestampMicrosecondArray>(&batch, 9)?;
+        let max_vt = downcast::<TimestampMicrosecondArray>(&batch, 10)?;
+        let has_erase = downcast::<BooleanArray>(&batch, 11)?;
+        for row in 0..batch.num_rows() {
+            let iid_at = |arr: &FixedSizeBinaryArray, i: usize| -> Result<Iid, IndexError> {
+                let bytes: [u8; 16] = arr
+                    .value(i)
+                    .try_into()
+                    .map_err(|_| IndexError::Codec("meta iid is not 16 bytes".into()))?;
+                Ok(Iid::from_bytes(bytes))
+            };
+            pages.push(PageMeta {
+                offset: offset.value(row),
+                len: len.value(row),
+                rows: rows.value(row),
+                min_iid: iid_at(min_iid, row)?,
+                max_iid: iid_at(max_iid, row)?,
+                min_system_from: Instant::from_micros(min_sf.value(row)),
+                max_system_from: Instant::from_micros(max_sf.value(row)),
+                min_valid_from: Instant::from_micros(min_vf.value(row)),
+                max_valid_from: Instant::from_micros(max_vf.value(row)),
+                min_valid_to: Instant::from_micros(min_vt.value(row)),
+                max_valid_to: Instant::from_micros(max_vt.value(row)),
+                has_erase: has_erase.value(row),
+            });
+        }
+    }
+    Ok(pages)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::decode_events;
+    use crate::event::{Event, Op};
+    use crate::live::LiveTable;
+    use crate::scan::snapshot_entities;
+    use std::collections::BTreeMap;
+    use varve_types::{Doc, Iid, Instant, TemporalBounds, TemporalDimension, Value};
+
+    const EOT: Instant = Instant::END_OF_TIME;
+
+    fn iid(n: u8) -> Iid {
+        Iid::derive("g", "nodes", &[n])
+    }
+
+    fn us(n: i64) -> Instant {
+        Instant::from_micros(n)
+    }
+
+    fn put(entity: u8, sf: i64, vf: i64, vt: Instant, seq: i64) -> Event {
+        let mut doc = Doc::new();
+        doc.insert("seq".into(), Value::Int(seq));
+        Event {
+            iid: iid(entity),
+            system_from: us(sf),
+            valid_from: us(vf),
+            valid_to: vt,
+            op: Op::Put {
+                labels: vec!["P".into()],
+                doc,
+            },
+        }
+    }
+
+    fn erase(entity: u8, sf: i64) -> Event {
+        Event {
+            iid: iid(entity),
+            system_from: us(sf),
+            valid_from: Instant::MIN,
+            valid_to: EOT,
+            op: Op::Erase,
+        }
+    }
+
+    fn table(events: &[Event]) -> LiveTable {
+        let mut t = LiveTable::new();
+        for e in events {
+            t.append(e.clone()).unwrap();
+        }
+        t
+    }
+
+    fn at(n: i64) -> TemporalBounds {
+        TemporalBounds {
+            valid: TemporalDimension::at(us(n)),
+            system: TemporalDimension::at(us(n)),
+        }
+    }
+
+    #[test]
+    fn encode_decode_round_trips_pages_and_meta() {
+        // 3 entities × 3 events each, page_rows = 2 → 5 pages over 9 rows.
+        // Loop nested sf-major/entity-minor so the push sequence is globally
+        // non-decreasing in system_from (LiveTable::append's log-order
+        // invariant) while each entity's own events still arrive sf-ascending
+        // — identical per-entity arrival order to an entity-major loop, just
+        // interleaved with other entities' same-sf events.
+        let mut events = Vec::new();
+        for sf in [1i64, 2, 3] {
+            for entity in [1u8, 2, 3] {
+                events.push(put(entity, sf, sf, EOT, sf));
+            }
+        }
+        let live = table(&events);
+        let block = encode_block(&live, 2).unwrap();
+
+        assert_eq!(block.pages.len(), 5);
+        assert_eq!(block.pages.iter().map(|p| p.rows).sum::<u64>(), 9);
+        // The meta file round-trips the page index exactly.
+        assert_eq!(decode_meta(&block.meta).unwrap(), block.pages);
+
+        // Every page is a self-contained IPC stream at its recorded range;
+        // file order is (_iid asc, _system_from desc per entity).
+        let mut all = Vec::new();
+        for page in &block.pages {
+            let bytes = &block.data[page.offset as usize..(page.offset + page.len) as usize];
+            let page_events = decode_events(bytes).unwrap();
+            assert_eq!(page_events.len() as u64, page.rows);
+            all.extend(page_events);
+        }
+        for pair in all.windows(2) {
+            assert!(
+                pair[0].iid < pair[1].iid
+                    || (pair[0].iid == pair[1].iid && pair[0].system_from >= pair[1].system_from),
+                "file order violated"
+            );
+        }
+
+        // Reassembling per entity and reversing restores arrival order.
+        let mut per_entity: BTreeMap<Iid, Vec<Event>> = BTreeMap::new();
+        for e in all {
+            per_entity.entry(e.iid).or_default().push(e);
+        }
+        for (iid, desc) in per_entity {
+            let asc: Vec<Event> = desc.into_iter().rev().collect();
+            assert_eq!(asc.as_slice(), live.events_for(&iid).unwrap());
+        }
+    }
+
+    #[test]
+    fn page_meta_stats_are_per_page() {
+        let events = [put(1, 5, 3, us(30), 0), put(1, 7, 4, EOT, 1)];
+        let block = encode_block(&table(&events), 16).unwrap();
+        assert_eq!(block.pages.len(), 1);
+        let p = &block.pages[0];
+        assert_eq!((p.min_iid, p.max_iid), (iid(1), iid(1)));
+        assert_eq!((p.min_system_from, p.max_system_from), (us(5), us(7)));
+        assert_eq!((p.min_valid_from, p.max_valid_from), (us(3), us(4)));
+        assert_eq!((p.min_valid_to, p.max_valid_to), (us(30), EOT));
+        assert!(!p.has_erase);
+
+        let with_erase = encode_block(&table(&[put(1, 5, 3, EOT, 0), erase(1, 6)]), 16).unwrap();
+        assert!(with_erase.pages[0].has_erase);
+    }
+
+    #[test]
+    fn empty_table_encodes_no_pages() {
+        let block = encode_block(&LiveTable::new(), 4).unwrap();
+        assert!(block.pages.is_empty());
+        assert!(block.data.is_empty());
+        assert_eq!(decode_meta(&block.meta).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn iid_point_prunes_only_foreign_pages() {
+        let block =
+            encode_block(&table(&[put(1, 1, 1, EOT, 0), put(3, 2, 2, EOT, 0)]), 16).unwrap();
+        let page = &block.pages[0];
+        assert!(page.selected(&at(10), Some(&iid(1))));
+        assert!(page.selected(&at(10), Some(&iid(3))));
+        assert!(page.selected(&at(10), None));
+        // iid(2) may sort inside or outside [min,max] — pick a definitely-outside probe.
+        let all_iids = [iid(1), iid(2), iid(3)];
+        let outside = *all_iids.iter().max().unwrap();
+        if outside != iid(1) && outside != iid(3) {
+            assert!(!page.selected(&at(10), Some(&outside)));
+        }
+        // Deterministic outside probe: anything beyond max_iid.
+        let mut beyond = *page.max_iid.as_bytes();
+        if beyond != [0xff; 16] {
+            for b in beyond.iter_mut().rev() {
+                if *b < 0xff {
+                    *b += 1;
+                    break;
+                }
+                *b = 0;
+            }
+            assert!(!page.selected(&at(10), Some(&Iid::from_bytes(beyond))));
+        }
+    }
+
+    /// The system-axis prune is EXACTLY output-preserving: resolve() ignores
+    /// events at/after the system upper bound even when present, so dropping
+    /// a page whose every event is at/after the bound changes nothing.
+    #[test]
+    fn system_upper_prune_is_output_identical() {
+        let old = put(1, 1, 0, EOT, 0);
+        let newer = put(1, 20, 0, EOT, 1); // supersedes, but only from system 20
+        let bounds = TemporalBounds {
+            valid: TemporalDimension::at(us(5)),
+            system: TemporalDimension::at(us(10)), // upper = 11 < 20
+        };
+
+        // Page containing only `newer` is prunable...
+        let newer_block = encode_block(&table(std::slice::from_ref(&newer)), 16).unwrap();
+        assert!(!newer_block.pages[0].selected(&bounds, None));
+        // ...and the page containing `old` is not.
+        let old_block = encode_block(&table(std::slice::from_ref(&old)), 16).unwrap();
+        assert!(old_block.pages[0].selected(&bounds, None));
+
+        // Output equivalence: [old] alone == [old, newer] under these bounds.
+        let pruned_events = [old.clone()];
+        let full_events = [old.clone(), newer.clone()];
+        let pruned = snapshot_entities(vec![(iid(1), &pruned_events[..])], "P", &bounds).unwrap();
+        let full = snapshot_entities(vec![(iid(1), &full_events[..])], "P", &bounds).unwrap();
+        assert_eq!(pruned, full);
+        assert!(pruned.is_some());
+    }
+
+    /// An erase at system 20 hides history even when querying AS OF system 10
+    /// (slice-2 GDPR decision) — its page must survive the system-axis prune.
+    #[test]
+    fn erase_pages_are_never_pruned_on_the_system_axis() {
+        let block = encode_block(&table(&[erase(1, 20)]), 16).unwrap();
+        let bounds = TemporalBounds {
+            valid: TemporalDimension::at(us(5)),
+            system: TemporalDimension::at(us(10)),
+        };
+        assert!(block.pages[0].min_system_from >= bounds.system.upper);
+        assert!(
+            block.pages[0].selected(&bounds, None),
+            "erase page must be scanned"
+        );
+    }
+
+    /// Regression guard for a subtle bug this plan almost shipped: an event
+    /// whose valid range is DISJOINT from the query window still clips the
+    /// reported _valid_to of visible rows, so the valid axis must not prune.
+    #[test]
+    fn valid_axis_is_deliberately_not_pruned() {
+        let base = put(1, 1, 0, EOT, 0); // valid [0, ∞) from system 1
+        let correction = put(1, 2, 20, us(30), 1); // valid [20, 30) from system 2
+
+        // The correction's page has valid range [20, 30) — disjoint from a
+        // query at valid 5 — yet selected() must keep it:
+        let block = encode_block(&table(std::slice::from_ref(&correction)), 16).unwrap();
+        let bounds = TemporalBounds {
+            valid: TemporalDimension::at(us(5)),
+            system: TemporalDimension::at(us(10)),
+        };
+        assert!(block.pages[0].selected(&bounds, None));
+
+        // ...because with it, the visible row's _valid_to is clipped to 20:
+        use arrow::array::TimestampMicrosecondArray;
+        let events = [base, correction];
+        let batch = snapshot_entities(vec![(iid(1), &events[..])], "P", &bounds)
+            .unwrap()
+            .unwrap();
+        let vt: &TimestampMicrosecondArray = batch
+            .column_by_name("_valid_to")
+            .unwrap()
+            .as_any()
+            .downcast_ref()
+            .unwrap();
+        assert_eq!(
+            vt.value(0),
+            20,
+            "correction outside the window still clips valid_to"
+        );
+    }
+}

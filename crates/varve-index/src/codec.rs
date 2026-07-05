@@ -1,7 +1,8 @@
 //! Events ↔ Arrow IPC — the wire format for the log envelope's per-table
 //! `arrow_ipc` effect bytes (spec §6). Docs and labels ride in a single
 //! Binary `payload` column via the canonical varve-types codec; columnar doc
-//! structs (dense unions) arrive with slice 4's block format.
+//! structs (dense unions) arrive with slice 8's compaction meta (slice-4 plan,
+//! decision 2: blocks reuse this payload codec).
 
 use crate::event::{Event, Op};
 use crate::live::IndexError;
@@ -175,7 +176,7 @@ pub fn decode_events(bytes: &[u8]) -> Result<Vec<Event>, IndexError> {
     Ok(events)
 }
 
-fn downcast<T: 'static>(batch: &RecordBatch, index: usize) -> Result<&T, IndexError> {
+pub(crate) fn downcast<T: 'static>(batch: &RecordBatch, index: usize) -> Result<&T, IndexError> {
     batch
         .column(index)
         .as_any()
