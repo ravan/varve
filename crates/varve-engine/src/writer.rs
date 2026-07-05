@@ -329,6 +329,9 @@ mod tests {
         ) -> Result<Vec<(LogPosition, LogRecord)>, LogError> {
             self.inner.read_range(from, to).await
         }
+        async fn trim(&self, up_to: LogPosition) -> Result<(), LogError> {
+            self.inner.trim(up_to).await
+        }
     }
 
     /// Fails the first append with an I/O error, then delegates.
@@ -353,6 +356,9 @@ mod tests {
             to: LogPosition,
         ) -> Result<Vec<(LogPosition, LogRecord)>, LogError> {
             self.inner.read_range(from, to).await
+        }
+        async fn trim(&self, up_to: LogPosition) -> Result<(), LogError> {
+            self.inner.trim(up_to).await
         }
     }
 
