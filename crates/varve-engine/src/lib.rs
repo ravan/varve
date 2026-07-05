@@ -1,5 +1,6 @@
 pub mod clock;
 pub mod db;
+mod flush;
 pub mod registries;
 mod scan;
 mod state;
