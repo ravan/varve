@@ -4,7 +4,7 @@
 //! pass across sources via `snapshot_entities`.
 
 use crate::db::EngineError;
-use crate::state::{TableState, DEFAULT_GRAPH, NODES_TABLE};
+use crate::state::{TableKind, TableState, DEFAULT_GRAPH};
 use datafusion::arrow::record_batch::RecordBatch;
 use std::sync::{Arc, RwLock};
 use varve_index::{decode_events, snapshot_entities, Event};
@@ -14,6 +14,7 @@ use varve_types::{Iid, TemporalBounds};
 pub(crate) async fn merged_snapshot(
     state: &Arc<RwLock<TableState>>,
     store: &Arc<dyn ObjectStore>,
+    kind: TableKind,
     label: &str,
     bounds: &TemporalBounds,
     iid_point: Option<Iid>,
@@ -23,19 +24,20 @@ pub(crate) async fn merged_snapshot(
     //    entity. The trie inventory is Arc-cheap.
     let (live_events, tries) = {
         let s = state.read().map_err(|_| EngineError::Poisoned)?;
+        let core = s.core(kind);
         let live_events: Vec<(Iid, Vec<Event>)> = match &iid_point {
-            Some(iid) => s
+            Some(iid) => core
                 .live
                 .events_for(iid)
                 .map(|events| vec![(*iid, events.to_vec())])
                 .unwrap_or_default(),
-            None => s
+            None => core
                 .live
                 .entities()
                 .map(|(iid, events)| (*iid, events.to_vec()))
                 .collect(),
         };
-        (live_events, s.tries.clone())
+        (live_events, core.tries.clone())
     };
 
     // 2. Persisted events, ascending block order (== time order, decision 9).
@@ -46,7 +48,7 @@ pub(crate) async fn merged_snapshot(
     //    flush-equivalence property test.
     let mut blocks: Vec<Vec<Event>> = Vec::new();
     for trie in &tries {
-        let data_key = keys::data_key(DEFAULT_GRAPH, NODES_TABLE, &trie.entry.trie_key);
+        let data_key = keys::data_key(DEFAULT_GRAPH, kind.name(), &trie.entry.trie_key);
         let mut block_events: Vec<Event> = Vec::new();
         for page in trie
             .pages
@@ -79,7 +81,7 @@ pub(crate) async fn merged_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{PersistedTrie, TableState, DEFAULT_GRAPH, NODES_TABLE};
+    use crate::state::{PersistedTrie, TableKind, TableState, DEFAULT_GRAPH, NODES_TABLE};
     use std::sync::{Arc, RwLock};
     use varve_index::block::encode_block;
     use varve_index::{Event, LiveTable, Op};
@@ -152,7 +154,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            state.tries.push(PersistedTrie {
+            state.nodes.tries.push(PersistedTrie {
                 entry: TrieEntry {
                     trie_key,
                     row_count,
@@ -162,7 +164,7 @@ mod tests {
             });
         }
         for e in live_events {
-            state.live.append(e.clone()).unwrap();
+            state.nodes.live.append(e.clone()).unwrap();
         }
         (Arc::new(RwLock::new(state)), store)
     }
@@ -186,7 +188,7 @@ mod tests {
     #[tokio::test]
     async fn persisted_only_events_are_visible() {
         let (state, store) = seeded(&[put(1, 1, "Ada"), put(2, 2, "Bob")], &[]).await;
-        let batch = merged_snapshot(&state, &store, "P", &at(10), None)
+        let batch = merged_snapshot(&state, &store, TableKind::Nodes, "P", &at(10), None)
             .await
             .unwrap();
         assert_eq!(names(&batch), vec!["Ada", "Bob"]);
@@ -196,12 +198,12 @@ mod tests {
     async fn live_put_supersedes_persisted_version() {
         // Cross-source resolution: the persisted "Ada" must get system_to = 5.
         let (state, store) = seeded(&[put(1, 1, "Ada")], &[put(1, 5, "Adele")]).await;
-        let now = merged_snapshot(&state, &store, "P", &at(10), None)
+        let now = merged_snapshot(&state, &store, TableKind::Nodes, "P", &at(10), None)
             .await
             .unwrap();
         assert_eq!(names(&now), vec!["Adele"]);
         // Time travel to before the live correction still sees the old version.
-        let before = merged_snapshot(&state, &store, "P", &at(3), None)
+        let before = merged_snapshot(&state, &store, TableKind::Nodes, "P", &at(3), None)
             .await
             .unwrap();
         assert_eq!(names(&before), vec!["Ada"]);
@@ -219,11 +221,11 @@ mod tests {
             op: Op::Delete,
         };
         let (state, store) = seeded(&[put(1, 1, "Ada")], std::slice::from_ref(&delete)).await;
-        let now = merged_snapshot(&state, &store, "P", &at(10), None)
+        let now = merged_snapshot(&state, &store, TableKind::Nodes, "P", &at(10), None)
             .await
             .unwrap();
         assert!(now.is_none());
-        let before = merged_snapshot(&state, &store, "P", &at(3), None)
+        let before = merged_snapshot(&state, &store, TableKind::Nodes, "P", &at(3), None)
             .await
             .unwrap();
         assert_eq!(names(&before), vec!["Ada"]);
@@ -242,7 +244,7 @@ mod tests {
         };
         let (state, store) = seeded(&[put(1, 1, "Ada")], std::slice::from_ref(&erase)).await;
         // Even time-traveling BEFORE the erase: gone (slice-2 GDPR semantics).
-        let before = merged_snapshot(&state, &store, "P", &at(3), None)
+        let before = merged_snapshot(&state, &store, TableKind::Nodes, "P", &at(3), None)
             .await
             .unwrap();
         assert!(before.is_none());
@@ -252,7 +254,7 @@ mod tests {
     async fn iid_point_returns_only_that_entity() {
         let (state, store) =
             seeded(&[put(1, 1, "Ada"), put(2, 2, "Bob"), put(3, 3, "Cyd")], &[]).await;
-        let batch = merged_snapshot(&state, &store, "P", &at(10), Some(iid(2)))
+        let batch = merged_snapshot(&state, &store, TableKind::Nodes, "P", &at(10), Some(iid(2)))
             .await
             .unwrap();
         assert_eq!(names(&batch), vec!["Bob"]);
@@ -272,10 +274,11 @@ mod tests {
         let (all_live, store_a) = seeded(&[], &events).await;
         let (split, store_b) = seeded(&events[..3], &events[3..]).await;
         for bounds in [at(10), at(4), at(2)] {
-            let reference = merged_snapshot(&all_live, &store_a, "P", &bounds, None)
-                .await
-                .unwrap();
-            let merged = merged_snapshot(&split, &store_b, "P", &bounds, None)
+            let reference =
+                merged_snapshot(&all_live, &store_a, TableKind::Nodes, "P", &bounds, None)
+                    .await
+                    .unwrap();
+            let merged = merged_snapshot(&split, &store_b, TableKind::Nodes, "P", &bounds, None)
                 .await
                 .unwrap();
             assert_eq!(reference, merged);

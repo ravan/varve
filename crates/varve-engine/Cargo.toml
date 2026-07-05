@@ -20,6 +20,7 @@ bytes = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+tempfile = { workspace = true }
 
 [features]
 # Test-only crash hooks for the varve-testkit kill -9 harness (mirrors
