@@ -37,6 +37,27 @@ pub fn meta_key(graph: &str, table: &str, trie_key: &str) -> String {
     format!("v1/graphs/{graph}/tables/{table}/meta/{trie_key}.arrow")
 }
 
+/// Adjacency-family names (slice 6): the src-sorted out-adjacency and the
+/// dst-sorted in-adjacency of an edges table. A `""` family denotes the
+/// primary (iid-sorted) table. Family objects live under a per-family
+/// subdirectory so they never collide with the primary data/meta keys.
+pub const ADJ_OUT: &str = "adj-out";
+pub const ADJ_IN: &str = "adj-in";
+
+/// Data key for an adjacency family (slice 6). Mirrors [`data_key`] but with
+/// the `{family}` subdirectory: `v1/graphs/{graph}/tables/{table}/{family}/
+/// data/{trie_key}.arrow`.
+pub fn adj_data_key(graph: &str, table: &str, family: &str, trie_key: &str) -> String {
+    format!("v1/graphs/{graph}/tables/{table}/{family}/data/{trie_key}.arrow")
+}
+
+/// Meta key for an adjacency family (slice 6). Mirrors [`meta_key`] but with
+/// the `{family}` subdirectory: `v1/graphs/{graph}/tables/{table}/{family}/
+/// meta/{trie_key}.arrow`.
+pub fn adj_meta_key(graph: &str, table: &str, family: &str, trie_key: &str) -> String {
+    format!("v1/graphs/{graph}/tables/{table}/{family}/meta/{trie_key}.arrow")
+}
+
 pub const MANIFEST_PREFIX: &str = "v1/blocks";
 
 pub fn manifest_key(block_id: u64) -> String {
@@ -158,6 +179,18 @@ mod tests {
         );
         assert_eq!(manifest_key(0), "v1/blocks/00.manifest");
         assert_eq!(manifest_key(0x34), "v1/blocks/134.manifest");
+    }
+
+    #[test]
+    fn adjacency_family_keys() {
+        assert_eq!(
+            adj_data_key("default", "edges", ADJ_OUT, "l00-rc-b00"),
+            "v1/graphs/default/tables/edges/adj-out/data/l00-rc-b00.arrow"
+        );
+        assert_eq!(
+            adj_meta_key("default", "edges", ADJ_IN, "l00-rc-b00"),
+            "v1/graphs/default/tables/edges/adj-in/meta/l00-rc-b00.arrow"
+        );
     }
 
     #[test]

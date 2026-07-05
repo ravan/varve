@@ -4,11 +4,11 @@
 //! (slice-4 plan, decisions 5, 6, 7, 8, 10).
 
 use crate::db::EngineError;
-use crate::state::{PersistedTrie, TableKind, DEFAULT_GRAPH};
+use crate::state::{PersistedTrie, TableKind, DEFAULT_GRAPH, EDGES_TABLE};
 use crate::writer::WriterState;
 use bytes::Bytes;
 use std::sync::Arc;
-use varve_index::block::{encode_block, EncodedBlock, PageMeta};
+use varve_index::block::{encode_block, encode_block_by, EncodedBlock, PageMeta, SortOrder};
 use varve_index::LiveTable;
 use varve_storage::{keys, BlockManifest, TableTries, TrieEntry};
 
@@ -16,12 +16,14 @@ use varve_storage::{keys, BlockManifest, TableTries, TrieEntry};
 /// default, reused verbatim for every flush.
 pub(crate) const PAGE_ROWS: usize = varve_index::block::DEFAULT_PAGE_ROWS;
 
-/// Encodes BOTH tables' live tails into ONE L0 block and commits it under a
+/// Encodes both tables' live tails into ONE L0 block and commits it under a
 /// SINGLE manifest PUT (THE atomic commit point, spec §9) — only once that
-/// succeeds does this atomically push each flushed table's new trie into its
-/// inventory and reset that table's live tail, then best-effort trim the log.
-/// One flush = one `block_id` = one manifest PUT (both tables share the
-/// `trie_key`; data/meta object keys are namespaced by table).
+/// succeeds does this atomically push each flushed family's new trie into its
+/// inventory and reset the flushed live tails, then best-effort trim the log.
+/// One flush = one `block_id` = one manifest PUT with up to FOUR `TableTries`
+/// entries: nodes primary, edges primary, and (slice 6) the edges out/in
+/// adjacency families. All families share the block's `trie_key`; object keys
+/// are namespaced by table and, for adjacency, by family.
 ///
 /// No-op when both live tails are empty: never writes an empty block/manifest.
 ///
@@ -34,20 +36,39 @@ pub(crate) async fn flush_block(state: &mut WriterState) -> Result<(), EngineErr
     // mutator of `TableState`, so it cannot change between this snapshot and
     // the write-lock swap below; concurrent queries keep reading the
     // pre-flush state meanwhile (decision 8).
-    let (nodes_enc, edges_enc, prior_nodes, prior_edges, max_system_us) = {
+    let (
+        nodes_enc,
+        edges_enc,
+        adj_out_enc,
+        adj_in_enc,
+        prior_nodes,
+        prior_edges,
+        prior_adj_out,
+        prior_adj_in,
+        max_system_us,
+    ) = {
         let s = state.state.read().map_err(|_| EngineError::Poisoned)?;
         let nodes_enc = if s.nodes.live.event_count() > 0 {
             Some(encode_block(&s.nodes.live, PAGE_ROWS)?)
         } else {
             None
         };
-        let edges_enc = if s.edges.live.event_count() > 0 {
-            Some(encode_block(&s.edges.live, PAGE_ROWS)?)
+        // The edges table drives three families off the SAME live tail: the
+        // primary (iid-sorted) block plus the src-sorted out-adjacency and
+        // dst-sorted in-adjacency. They flush and reset together.
+        let (edges_enc, adj_out_enc, adj_in_enc) = if s.edges.live.event_count() > 0 {
+            (
+                Some(encode_block(&s.edges.live, PAGE_ROWS)?),
+                Some(encode_block_by(&s.edges.live, PAGE_ROWS, SortOrder::BySrc)?),
+                Some(encode_block_by(&s.edges.live, PAGE_ROWS, SortOrder::ByDst)?),
+            )
         } else {
-            None
+            (None, None, None)
         };
         let prior_nodes: Vec<TrieEntry> = s.nodes.tries.iter().map(|t| t.entry.clone()).collect();
         let prior_edges: Vec<TrieEntry> = s.edges.tries.iter().map(|t| t.entry.clone()).collect();
+        let prior_adj_out: Vec<TrieEntry> = s.adj_out.iter().map(|t| t.entry.clone()).collect();
+        let prior_adj_in: Vec<TrieEntry> = s.adj_in.iter().map(|t| t.entry.clone()).collect();
         // The manifest's clock floor spans both tables' newest events.
         let max_system_us = [
             s.nodes.live.last_system_from(),
@@ -61,8 +82,12 @@ pub(crate) async fn flush_block(state: &mut WriterState) -> Result<(), EngineErr
         (
             nodes_enc,
             edges_enc,
+            adj_out_enc,
+            adj_in_enc,
             prior_nodes,
             prior_edges,
+            prior_adj_out,
+            prior_adj_in,
             max_system_us,
         )
     };
@@ -106,12 +131,46 @@ pub(crate) async fn flush_block(state: &mut WriterState) -> Result<(), EngineErr
         flushed.push((kind, entry, pages));
     }
 
+    // Edge adjacency families next (adj-out then adj-in), under the family
+    // key namespace (`adj_data_key`/`adj_meta_key`). Same invisible-garbage-
+    // on-failure property as the primary blocks: no manifest entry yet.
+    let mut flushed_adj: Vec<(&'static str, TrieEntry, Vec<PageMeta>)> = Vec::new();
+    for (family, enc) in [
+        (varve_storage::ADJ_OUT, adj_out_enc),
+        (varve_storage::ADJ_IN, adj_in_enc),
+    ] {
+        let Some(EncodedBlock { data, meta, pages }) = enc else {
+            continue;
+        };
+        let entry = TrieEntry {
+            trie_key: trie_key.clone(),
+            row_count: pages.iter().map(|p| p.rows).sum(),
+            data_len: data.len() as u64,
+        };
+        state
+            .store
+            .put(
+                &keys::adj_data_key(DEFAULT_GRAPH, EDGES_TABLE, family, &trie_key),
+                Bytes::from(data),
+            )
+            .await?;
+        state
+            .store
+            .put(
+                &keys::adj_meta_key(DEFAULT_GRAPH, EDGES_TABLE, family, &trie_key),
+                Bytes::from(meta),
+            )
+            .await?;
+        flushed_adj.push((family, entry, pages));
+    }
+
     crash_point("pre-manifest-put");
 
-    // manifest.tables: one `TableTries` per table that has prior OR new
-    // tries (full inventory) — INCLUDING a table with prior tries that
-    // flushed nothing this block, so recovery from this manifest never
-    // drops an earlier block. Nodes first, then edges.
+    // manifest.tables: one `TableTries` per (table, family) that has prior OR
+    // new tries (full inventory) — INCLUDING a (table, family) with prior
+    // tries that flushed nothing this block, so recovery from this manifest
+    // never drops an earlier block. Order: nodes primary, edges primary,
+    // edges adj-out, edges adj-in.
     let mut tables = Vec::new();
     for (kind, prior) in [
         (TableKind::Nodes, prior_nodes),
@@ -125,6 +184,24 @@ pub(crate) async fn flush_block(state: &mut WriterState) -> Result<(), EngineErr
             tables.push(TableTries {
                 graph: DEFAULT_GRAPH.to_string(),
                 table: kind.name().to_string(),
+                family: String::new(),
+                tries,
+            });
+        }
+    }
+    for (family, prior) in [
+        (varve_storage::ADJ_OUT, prior_adj_out),
+        (varve_storage::ADJ_IN, prior_adj_in),
+    ] {
+        let mut tries = prior;
+        if let Some((_, entry, _)) = flushed_adj.iter().find(|(f, _, _)| *f == family) {
+            tries.push(entry.clone());
+        }
+        if !tries.is_empty() {
+            tables.push(TableTries {
+                graph: DEFAULT_GRAPH.to_string(),
+                table: EDGES_TABLE.to_string(),
+                family: family.to_string(),
                 tries,
             });
         }
@@ -164,6 +241,19 @@ pub(crate) async fn flush_block(state: &mut WriterState) -> Result<(), EngineErr
                 pages: Arc::new(pages),
             });
             core.live = LiveTable::new();
+        }
+        // Adjacency families ride on the edges live tail (already reset above),
+        // so here we only extend their persisted-trie inventories.
+        for (family, entry, pages) in flushed_adj {
+            let trie = PersistedTrie {
+                entry,
+                pages: Arc::new(pages),
+            };
+            if family == varve_storage::ADJ_OUT {
+                s.adj_out.push(trie);
+            } else {
+                s.adj_in.push(trie);
+            }
         }
     }
     state.next_block_id += 1;

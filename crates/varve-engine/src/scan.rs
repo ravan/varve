@@ -4,10 +4,10 @@
 //! pass across sources via `snapshot_entities`.
 
 use crate::db::EngineError;
-use crate::state::{TableKind, TableState, DEFAULT_GRAPH};
+use crate::state::{TableKind, TableState, DEFAULT_GRAPH, EDGES_TABLE};
 use datafusion::arrow::record_batch::RecordBatch;
 use std::sync::{Arc, RwLock};
-use varve_index::{decode_events, snapshot_entities, Event};
+use varve_index::{decode_events, snapshot_entities, Event, Op};
 use varve_storage::{keys, ObjectStore};
 use varve_types::{Iid, TemporalBounds};
 
@@ -76,6 +76,146 @@ pub(crate) async fn merged_snapshot(
         label,
         bounds,
     )?)
+}
+
+/// Which adjacency family a lookup traverses: `Out` follows `src → dst` (the
+/// src-sorted `adj-out` family), `In` follows `dst → src` (the dst-sorted
+/// `adj-in` family).
+///
+/// `dead_code`: the adjacency-lookup surface is exercised by tests here in
+/// slice 6; its production consumer is the traversal path (`PathExpand`, task
+/// 7), which is where `AdjDirection::In` is first driven.
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum AdjDirection {
+    Out,
+    In,
+}
+
+/// One traversable edge at the query bounds: `node` is the anchor-side
+/// endpoint (src for `Out`, dst for `In`), `neighbor` the other endpoint,
+/// `edge` the edge's own iid.
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct AdjacencyEntry {
+    pub node: Iid,
+    pub neighbor: Iid,
+    pub edge: Iid,
+}
+
+/// Visible-edge adjacency at `bounds` (slice 6, decision 11): the live edge
+/// tail (narrowed by the live adjacency views when `anchor` is `Some`) merged
+/// with the persisted adjacency family, whose pages are pruned by the anchor
+/// via `PageMeta::selected` (the anchor is the family's sort-key point) and
+/// then filtered exactly. Each surviving edge is resolved at `bounds`; edges
+/// whose visible version is a `Put` carrying `label` become one entry. Output
+/// is sorted by `(node, neighbor, edge)` and — because `merge_sources` keys by
+/// edge iid — carries exactly one entry per edge. Deterministic.
+///
+/// Correctness contract: for any anchor, the anchored result equals the full
+/// (`anchor == None`) result filtered to that node.
+///
+/// `dead_code`: consumed by the traversal path (task 7); slice 6 ships and
+/// tests the lookup itself.
+#[allow(dead_code)]
+pub(crate) async fn edge_adjacency(
+    state: &Arc<RwLock<TableState>>,
+    store: &Arc<dyn ObjectStore>,
+    label: &str,
+    direction: AdjDirection,
+    anchor: Option<Iid>,
+    bounds: &TemporalBounds,
+) -> Result<Vec<AdjacencyEntry>, EngineError> {
+    // 1. One read lock: live edge events (narrowed by the live adjacency
+    //    views when anchored) + the persisted family's trie list.
+    let (live_events, tries) = {
+        let s = state.read().map_err(|_| EngineError::Poisoned)?;
+        let live = &s.edges.live;
+        let live_events: Vec<(Iid, Vec<Event>)> = match anchor {
+            Some(node) => {
+                let edge_iids: Vec<Iid> = match direction {
+                    AdjDirection::Out => live.out_edges(&node).cloned().collect(),
+                    AdjDirection::In => live.in_edges(&node).cloned().collect(),
+                };
+                edge_iids
+                    .into_iter()
+                    .filter_map(|e| live.events_for(&e).map(|ev| (e, ev.to_vec())))
+                    .collect()
+            }
+            None => live
+                .entities()
+                .map(|(iid, ev)| (*iid, ev.to_vec()))
+                .collect(),
+        };
+        let tries = match direction {
+            AdjDirection::Out => s.adj_out.clone(),
+            AdjDirection::In => s.adj_in.clone(),
+        };
+        (live_events, tries)
+    };
+
+    // 2. Persisted family pages, pruned by the anchor as the sort-key point
+    //    (decision 4 — min_iid/max_iid on adj pages record src/dst), then
+    //    filtered exactly to the anchor endpoint.
+    let family = match direction {
+        AdjDirection::Out => varve_storage::ADJ_OUT,
+        AdjDirection::In => varve_storage::ADJ_IN,
+    };
+    let mut blocks: Vec<Vec<Event>> = Vec::new();
+    for trie in &tries {
+        let key = keys::adj_data_key(DEFAULT_GRAPH, EDGES_TABLE, family, &trie.entry.trie_key);
+        let mut block_events = Vec::new();
+        for page in trie
+            .pages
+            .iter()
+            .filter(|p| p.selected(bounds, anchor.as_ref()))
+        {
+            let bytes = store
+                .get_range(&key, page.offset..page.offset + page.len)
+                .await?;
+            for event in decode_events(&bytes)? {
+                let key_iid = match direction {
+                    AdjDirection::Out => event.src,
+                    AdjDirection::In => event.dst,
+                };
+                if anchor.is_none() || key_iid == anchor {
+                    block_events.push(event);
+                }
+            }
+        }
+        blocks.push(block_events);
+    }
+
+    // 3. Merge (one Vec per edge iid), resolve per edge, keep edges whose
+    //    visible version is a Put carrying `label`, emit sorted entries.
+    let merged = varve_index::merge_sources(blocks, live_events);
+    let mut entries = Vec::new();
+    for (edge, events) in &merged {
+        let visible = varve_index::resolve(events, bounds);
+        let labeled = visible.iter().any(|v| match &v.event.op {
+            Op::Put { labels, .. } => labels.iter().any(|l| l == label),
+            _ => false,
+        });
+        if !labeled {
+            continue;
+        }
+        let (Some(src), Some(dst)) = (events[0].src, events[0].dst) else {
+            return Err(EngineError::Index(varve_index::IndexError::Codec(
+                "edge event missing endpoints".into(),
+            )));
+        };
+        let (node, neighbor) = match direction {
+            AdjDirection::Out => (src, dst),
+            AdjDirection::In => (dst, src),
+        };
+        entries.push(AdjacencyEntry {
+            node,
+            neighbor,
+            edge: *edge,
+        });
+    }
+    entries.sort_by_key(|e| (e.node, e.neighbor, e.edge));
+    Ok(entries)
 }
 
 #[cfg(test)]

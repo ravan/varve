@@ -26,6 +26,12 @@ pub struct TableTries {
     pub table: String,
     #[prost(message, repeated, tag = "3")]
     pub tries: Vec<TrieEntry>,
+    /// Adjacency family (slice 6): `""` = the primary iid-sorted table,
+    /// [`crate::ADJ_OUT`]/[`crate::ADJ_IN`] = the edge adjacency families.
+    /// Proto3 tag 4: an empty string encodes to zero bytes, so pre-slice-6
+    /// golden wire bytes are unchanged.
+    #[prost(string, tag = "4")]
+    pub family: String,
 }
 
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -84,6 +90,7 @@ mod tests {
             tables: vec![TableTries {
                 graph: "default".into(),
                 table: "nodes".into(),
+                family: String::new(),
                 tries: vec![TrieEntry {
                     trie_key: "l00-rc-b00".into(),
                     row_count: 2,
@@ -97,6 +104,24 @@ mod tests {
     fn wire_round_trips() {
         let m = sample();
         assert_eq!(BlockManifest::from_wire(&m.to_wire()).unwrap(), m);
+    }
+
+    #[test]
+    fn table_tries_family_round_trips() {
+        let m = BlockManifest {
+            block_id: 1,
+            watermark: 0,
+            max_tx_id: 1,
+            max_system_time_us: 1,
+            tables: vec![TableTries {
+                graph: "default".into(),
+                table: "edges".into(),
+                family: "adj-out".into(),
+                tries: vec![],
+            }],
+        };
+        let back = BlockManifest::from_wire(&m.to_wire()).unwrap();
+        assert_eq!(back.tables[0].family, "adj-out");
     }
 
     #[test]
