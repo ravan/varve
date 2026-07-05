@@ -5,6 +5,7 @@
 use datafusion::arrow::array::Array;
 use std::path::Path;
 use varve::{Config, Db};
+use varve_types::{Iid, Value};
 
 async fn seed_triangle(db: &Db) {
     // ada -KNOWS-> bob -KNOWS-> cy;  ada -KNOWS-> cy
@@ -363,6 +364,42 @@ async fn cycles_terminate_at_depth_cap() {
         .await
         .unwrap();
     assert_eq!(rows.iter().map(|b| b.num_rows()).sum::<usize>(), 3); // one WALK per depth
+                                                                     // Gap 2: every depth's WALK loops back to the same self-looped node —
+                                                                     // assert the actual end-node identity, not just the row count.
+    assert_eq!(
+        names(&rows, "name"),
+        vec!["x".to_string(), "x".to_string(), "x".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn props_on_quantified_hop_restrict_traversal() {
+    // Decision 13: props on a quantified hop's edge filter which edges are
+    // traversable. Two parallel `:K` edges 1->2, distinguished only by `w`
+    // (each INSERT gets its own auto-generated edge iid — see
+    // `resolve_insert_node`/edge-iid derivation in the writer); only the
+    // `w: 1` edge should be walkable by the filtered quantifier.
+    let db = Db::memory();
+    db.execute("INSERT (:P {_id: 1, name: 'a'}), (:P {_id: 2, name: 'b'})")
+        .await
+        .unwrap();
+    db.execute("MATCH (a:P {_id: 1}), (b:P {_id: 2}) INSERT (a)-[:K {w: 1}]->(b)")
+        .await
+        .unwrap();
+    db.execute("MATCH (a:P {_id: 1}), (b:P {_id: 2}) INSERT (a)-[:K {w: 2}]->(b)")
+        .await
+        .unwrap();
+    let rows = db
+        .query("MATCH (a:P)-[:K {w: 1}]->{1,2}(b:P) WHERE a._id = 1 RETURN b.name")
+        .await
+        .unwrap();
+    // `b` has no outgoing `:K` edge, so depth 2 yields nothing; only the
+    // single depth-1 WALK through the `w: 1` edge should survive. If the
+    // props filter did NOT restrict traversal, BOTH parallel edges would be
+    // walkable — `expand_paths`/`EdgeAdjacency` dedupe by `(neighbor, edge)`,
+    // not by neighbor alone (paths are a multiset) — producing two depth-1
+    // paths (`vec!["b", "b"]`) instead of one.
+    assert_eq!(names(&rows, "name"), vec!["b".to_string()]);
 }
 
 #[tokio::test]
@@ -390,6 +427,12 @@ async fn path_variable_binds_element_list() {
         .downcast_ref::<FixedSizeBinaryArray>()
         .unwrap();
     assert_eq!(elems.len(), 3); // n, e, n
+                                // Gap 3: assert the actual [a_iid, edge_iid, b_iid] ordering, not just
+                                // the list length — guards `expand_batch`'s interleaved list builder.
+    let a_iid = Iid::derive("default", "nodes", &Value::Int(1).id_bytes().unwrap());
+    let b_iid = Iid::derive("default", "nodes", &Value::Int(2).id_bytes().unwrap());
+    assert_eq!(elems.value(0), a_iid.as_bytes().as_slice());
+    assert_eq!(elems.value(2), b_iid.as_bytes().as_slice());
 }
 
 #[tokio::test]
