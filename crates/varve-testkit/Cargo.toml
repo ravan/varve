@@ -10,6 +10,10 @@ varve-index = { path = "../varve-index" }
 varve-types = { path = "../varve-types" }
 varve = { path = "../varve" }
 varve-log = { path = "../varve-log", features = ["fault-injection"] }
+# fault-injection features unify workspace-wide through these deps (slice-3
+# pattern); varve-engine is listed for its feature alone.
+varve-engine = { path = "../varve-engine", features = ["fault-injection"] }
+varve-storage = { path = "../varve-storage" }
 tokio = { workspace = true }
 
 [dev-dependencies]
