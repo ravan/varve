@@ -53,6 +53,38 @@ pub fn manifest_block_id(key: &str) -> Option<u64> {
     )
 }
 
+/// Log-object keys (spec §9): `v1/log/<epoch>/<offset-lexhex>.vlog`, one
+/// object per group-commit batch, named by the batch's FIRST position. The
+/// epoch directory is fixed-width hex (u16 ⇒ 4 digits) and the offset is
+/// lex-hex, so lexicographic listing order == position order.
+pub const LOG_PREFIX: &str = "v1/log";
+
+pub fn log_key(first: varve_types::LogPosition) -> String {
+    format!(
+        "{LOG_PREFIX}/{:04x}/{}.vlog",
+        first.epoch(),
+        lex_hex(first.offset())
+    )
+}
+
+/// Parses a log-object key back to its first position; `None` for anything
+/// else (foreign keys under the prefix are ignored, never an error — same
+/// policy as `manifest_block_id`).
+pub fn parse_log_key(key: &str) -> Option<varve_types::LogPosition> {
+    let rest = key.strip_prefix(LOG_PREFIX)?.strip_prefix('/')?;
+    let (epoch_hex, offset_part) = rest.split_once('/')?;
+    if epoch_hex.len() != 4
+        || epoch_hex
+            .chars()
+            .any(|c| !c.is_ascii_hexdigit() || c.is_ascii_uppercase())
+    {
+        return None;
+    }
+    let epoch = u16::from_str_radix(epoch_hex, 16).ok()?;
+    let offset = parse_lex_hex(offset_part.strip_suffix(".vlog")?)?;
+    varve_types::LogPosition::new(epoch, offset).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +167,49 @@ mod tests {
         assert_eq!(manifest_block_id("v1/blocks/00.tmp"), None);
         assert_eq!(manifest_block_id("v1/other/00.manifest"), None);
         assert_eq!(manifest_block_id("v1/blocks/zz.manifest"), None);
+    }
+
+    #[test]
+    fn log_keys_follow_the_spec_layout() {
+        use varve_types::LogPosition;
+        // Spec §9: v1/log/<epoch>/<offset-lexhex>.vlog; epoch dir is
+        // fixed-width u16 hex so listing sorts numerically.
+        let p = |e, o| LogPosition::new(e, o).unwrap();
+        assert_eq!(log_key(p(0, 0)), "v1/log/0000/00.vlog");
+        assert_eq!(log_key(p(0, 0x34)), "v1/log/0000/134.vlog");
+        assert_eq!(log_key(p(3, 2)), "v1/log/0003/02.vlog");
+    }
+
+    #[test]
+    fn log_keys_round_trip_and_reject_foreign_keys() {
+        use varve_types::LogPosition;
+        for (e, o) in [(0u16, 0u64), (0, 1), (0, 0xff), (3, 0x34), (u16::MAX, 1 << 40)] {
+            let pos = LogPosition::new(e, o).unwrap();
+            assert_eq!(parse_log_key(&log_key(pos)), Some(pos), "{e}/{o}");
+        }
+        assert_eq!(parse_log_key("v1/log/0000/00.manifest"), None); // wrong ext
+        assert_eq!(parse_log_key("v1/log/00/00.vlog"), None); // short epoch
+        assert_eq!(parse_log_key("v1/log/000A/00.vlog"), None); // uppercase
+        assert_eq!(parse_log_key("v1/log/0000/1FF.vlog"), None); // uppercase body
+        assert_eq!(parse_log_key("v1/blocks/00.vlog"), None); // wrong prefix
+        assert_eq!(parse_log_key("v1/log/0000.vlog"), None); // missing segment
+    }
+
+    #[test]
+    fn log_key_listing_order_is_position_order() {
+        use varve_types::LogPosition;
+        let positions = [
+            LogPosition::new(0, 0).unwrap(),
+            LogPosition::new(0, 9).unwrap(),
+            LogPosition::new(0, 0x10).unwrap(),
+            LogPosition::new(0, 0x100).unwrap(),
+            LogPosition::new(1, 0).unwrap(),
+            LogPosition::new(0x10, 5).unwrap(),
+        ];
+        let mut by_key: Vec<_> = positions.to_vec();
+        by_key.sort_by_key(|p| log_key(*p));
+        let mut by_pos = positions.to_vec();
+        by_pos.sort();
+        assert_eq!(by_key, by_pos);
     }
 }

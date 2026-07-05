@@ -3557,6 +3557,7 @@ name = "varve-log"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "crc32c",
  "prost",
  "serde",
@@ -3565,6 +3566,7 @@ dependencies = [
  "tokio",
  "toml",
  "varve-config",
+ "varve-storage",
  "varve-types",
 ]
 
@@ -3596,6 +3598,7 @@ dependencies = [
  "tokio",
  "toml",
  "varve-config",
+ "varve-types",
 ]
 
 [[package]]
