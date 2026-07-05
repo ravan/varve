@@ -17,8 +17,15 @@ use varve_types::LogPosition;
 /// the operationally load-bearing fact — slice-10 cas-failover must refuse —
 /// without pinning Unsupported vs Inconsistent; `RecordOnly` prints the
 /// verdict so the first CI run can pin it.
-/// AFTER THE FIRST OBSERVED RUN: tighten every RecordOnly/NotSupported to
-/// the exact verdict seen, and record the final table in STATUS.md.
+/// Observed verdicts (slice-5 first live run, 2026-07-05 — see STATUS.md):
+///   garage    => Inconsistent (create-if-absent precondition ignored)
+///   seaweedfs => Inconsistent (create-if-absent precondition ignored)
+///   minio     => Supported
+///   ceph      => not yet run locally (weekly cron) — left RecordOnly.
+/// Garage/SeaweedFS assert `NotSupported` (= `!Supported`) rather than the
+/// exact `Inconsistent` variant: the load-bearing contract for slice-10
+/// cas-failover is "must not be trusted as Supported", and a future backend
+/// version that fixes CAS to cleanly *refuse* (Unsupported) should still pass.
 enum Expectation {
     Supported,
     NotSupported,
@@ -27,14 +34,16 @@ enum Expectation {
 
 fn expected_probe(name: &str) -> Expectation {
     match name {
-        // D5: "Garage: never CAS".
+        // D5: "Garage: never CAS". Observed: Inconsistent.
         "garage" => Expectation::NotSupported,
-        // D5: "SeaweedFS: unconfirmed/buggy CAS" — pin from the first run.
-        // A Supported verdict here deserves skepticism before slice 10
-        // trusts it (that is exactly what Inconsistent-detection is for).
-        "seaweedfs" => Expectation::RecordOnly,
-        // MinIO implements the standard HTTP preconditions.
+        // D5: "SeaweedFS: unconfirmed/buggy CAS". Observed: Inconsistent
+        // (claims create-if-absent success while ignoring the precondition —
+        // exactly the SeaweedFS-class header-blindness bug the probe exists to
+        // catch). Pinned to NotSupported from the first live run.
+        "seaweedfs" => Expectation::NotSupported,
+        // MinIO implements the standard HTTP preconditions. Observed: Supported.
         "minio" => Expectation::Supported,
+        // Ceph runs only on the weekly cron; leave RecordOnly until first run.
         "ceph" => Expectation::RecordOnly,
         other => panic!("unknown backend '{other}'"),
     }

@@ -331,9 +331,23 @@ async fn start_seaweedfs() -> Backend {
     );
     let port = host_port(&container, 8333);
 
+    // `weed shell` has no `-c` flag (verified against the pinned image); it
+    // reads commands from stdin. The master/filer also needs a moment before
+    // `s3.bucket.create` takes, and `weed shell` exits 0 even on a filer error,
+    // so we poll on the bucket actually APPEARING in `s3.bucket.list` rather
+    // than on the create command's exit status.
     for bucket in [DB_BUCKET, CONTRACT_BUCKET] {
-        let cmd = format!("s3.bucket.create -name {bucket}");
-        poll(|| exec(&container, &["weed", "shell", "-c", &cmd]).ok()).await;
+        let create = format!("echo 's3.bucket.create -name {bucket}' | weed shell");
+        poll(|| {
+            let _ = exec(&container, &["sh", "-c", &create]);
+            let listed = exec(
+                &container,
+                &["sh", "-c", "echo 's3.bucket.list' | weed shell"],
+            )
+            .ok()?;
+            listed.contains(bucket).then_some(())
+        })
+        .await;
     }
 
     let params = S3Params {
