@@ -400,4 +400,24 @@ mod tests {
         .unwrap();
         assert_eq!(live.out_edges(&Iid::derive("g", "nodes", &[0])).count(), 0);
     }
+
+    /// A fresh table's FIRST event for an edge iid is a Delete (no prior
+    /// Put). `append` must still index it into both adjacency views — Delete
+    /// carries src/dst too (decision 2). `adjacency_views_track_endpoints`
+    /// re-deletes an already-inserted iid, so it can't discriminate a
+    /// `append` that skips Delete events entirely; this test can.
+    #[test]
+    fn delete_of_fresh_edge_is_indexed() {
+        let mut live = LiveTable::new();
+        live.append(Event {
+            op: Op::Delete,
+            ..edge(5, 10, 20, 1)
+        })
+        .unwrap();
+        let n10 = Iid::derive("g", "nodes", &[10]);
+        let n20 = Iid::derive("g", "nodes", &[20]);
+        let e5 = Iid::derive("g", "edges", &[5]);
+        assert_eq!(live.out_edges(&n10).cloned().collect::<Vec<_>>(), vec![e5]);
+        assert_eq!(live.in_edges(&n20).cloned().collect::<Vec<_>>(), vec![e5]);
+    }
 }
