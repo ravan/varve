@@ -67,7 +67,7 @@ impl Parser {
         match self.peek() {
             TokenKind::Kw(Keyword::Insert) => {
                 self.pos += 1;
-                self.insert_stmt().map(Statement::Insert)
+                self.insert_stmt(None).map(Statement::Insert)
             }
             TokenKind::Kw(Keyword::Match) | TokenKind::Kw(Keyword::For) => {
                 let temporal = self.for_clauses()?;
@@ -192,16 +192,34 @@ impl Parser {
         }
     }
 
-    fn insert_stmt(&mut self) -> Result<InsertStmt, GqlError> {
+    fn insert_stmt(&mut self, match_part: Option<MatchPart>) -> Result<InsertStmt, GqlError> {
         let mut paths = Vec::new();
         loop {
+            let offset = self.offset();
             let path = self.path_pattern()?;
+            if path.var.is_some() {
+                return Err(GqlError::Parse {
+                    offset,
+                    msg: "path variables (`p = …`) on INSERT patterns land in slice 7: bare \
+                          node/edge patterns only for INSERT"
+                        .into(),
+                });
+            }
+            if path.hops.iter().any(|(edge, _)| edge.quantifier.is_some()) {
+                return Err(GqlError::Parse {
+                    offset,
+                    msg: "quantifiers (`{m,n}`, `*`) are not supported in INSERT patterns".into(),
+                });
+            }
             if path.start.var.is_none()
                 && path.start.labels.is_empty()
                 && path.start.props.is_empty()
                 && path.hops.is_empty()
             {
-                return Err(self.err("INSERT node needs a label or properties"));
+                return Err(GqlError::Parse {
+                    offset,
+                    msg: "INSERT node needs a label or properties".into(),
+                });
             }
             paths.push(path);
             if *self.peek() == TokenKind::Comma {
@@ -244,7 +262,7 @@ impl Parser {
         }
         self.expect(&TokenKind::Eof, "end of statement")?;
         Ok(InsertStmt {
-            match_part: None,
+            match_part,
             paths,
             valid_from,
             valid_to,
@@ -521,9 +539,47 @@ impl Parser {
                     detach,
                 }))
             }
+            TokenKind::Kw(Keyword::Insert) => {
+                if temporal != TemporalClauses::default()
+                    || match_temporal != TemporalClauses::default()
+                {
+                    return Err(GqlError::Parse {
+                        offset,
+                        msg: "MATCH … INSERT reads current state — temporal clauses are not \
+                              supported"
+                            .into(),
+                    });
+                }
+                self.pos += 1;
+                let mut patterns = Vec::with_capacity(paths.len());
+                for path in paths {
+                    if !path.hops.is_empty() || path.var.is_some() {
+                        return Err(GqlError::Parse {
+                            offset,
+                            msg: "the MATCH part of MATCH … INSERT takes single-node patterns \
+                                  in v1; path reads land in slice 7"
+                                .into(),
+                        });
+                    }
+                    if path.start.var.is_none() {
+                        return Err(GqlError::Parse {
+                            offset,
+                            msg: "MATCH … INSERT patterns must bind a variable".into(),
+                        });
+                    }
+                    patterns.push(path.start);
+                }
+                let match_part = MatchPart {
+                    patterns,
+                    where_clause,
+                };
+                self.insert_stmt(Some(match_part)).map(Statement::Insert)
+            }
             other => Err(GqlError::Parse {
                 offset,
-                msg: format!("expected RETURN, DELETE, or DETACH DELETE, found {other:?}"),
+                msg: format!(
+                    "expected RETURN, DELETE, DETACH, or INSERT after MATCH, found {other:?}"
+                ),
             }),
         }
     }
@@ -991,5 +1047,106 @@ mod tests {
     fn delete_rejects_temporal_clauses() {
         let err = parse("FOR VALID_TIME ALL MATCH (p:Person) DELETE p").unwrap_err();
         assert!(err.to_string().contains("DELETE"), "{err}");
+    }
+
+    #[test]
+    fn parses_insert_edge_with_inline_nodes() {
+        let stmt = parse(
+            "INSERT (:Person {_id: 1, name: 'Ada'})-[:KNOWS {since: 2020}]->(:Person {_id: 2})",
+        )
+        .unwrap();
+        let Statement::Insert(ins) = stmt else {
+            panic!("expected insert")
+        };
+        assert!(ins.match_part.is_none());
+        assert_eq!(ins.paths.len(), 1);
+        let p = &ins.paths[0];
+        assert_eq!(p.start.labels, vec!["Person".to_string()]);
+        assert_eq!(p.hops.len(), 1);
+        let (e, end) = &p.hops[0];
+        assert_eq!(e.label, "KNOWS");
+        assert_eq!(e.props, vec![("since".into(), Literal::Int(2020))]);
+        assert_eq!(end.props[0], ("_id".into(), Literal::Int(2)));
+    }
+
+    #[test]
+    fn parses_insert_var_reuse_across_paths() {
+        let stmt = parse("INSERT (a:Person {_id: 1}), (a)-[:KNOWS]->(b:Person {_id: 2})").unwrap();
+        let Statement::Insert(ins) = stmt else {
+            panic!("expected insert")
+        };
+        assert_eq!(ins.paths.len(), 2);
+        assert_eq!(
+            ins.paths[1].start,
+            NodePattern {
+                var: Some("a".into()),
+                labels: vec![],
+                props: vec![]
+            }
+        );
+        assert_eq!(ins.paths[1].hops[0].1.var.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn parses_match_insert() {
+        let stmt = parse(
+            "MATCH (a:Person {name: 'Ada'}), (b:Person) WHERE b.name = 'Bob' INSERT (a)-[:KNOWS]->(b)",
+        )
+        .unwrap();
+        let Statement::Insert(ins) = stmt else {
+            panic!("expected insert")
+        };
+        let mp = ins.match_part.as_ref().unwrap();
+        assert_eq!(mp.patterns.len(), 2);
+        assert_eq!(
+            mp.patterns[0].props,
+            vec![("name".into(), Literal::Str("Ada".into()))]
+        );
+        assert!(mp.where_clause.is_some());
+        assert_eq!(ins.paths[0].hops[0].0.label, "KNOWS");
+    }
+
+    #[test]
+    fn match_insert_rejects_hops_in_match_part() {
+        let err = parse("MATCH (a)-[:KNOWS]->(b) INSERT (a)-[:LIKES]->(b)").unwrap_err();
+        assert!(err.to_string().contains("slice 7"));
+    }
+
+    #[test]
+    fn match_insert_requires_vars_and_rejects_temporal() {
+        let err = parse("MATCH (:Person) INSERT (:X {_id: 1})").unwrap_err();
+        assert!(err.to_string().contains("variable"));
+        let err = parse("FOR VALID_TIME ALL MATCH (a:Person) INSERT (a)-[:K]->(a)").unwrap_err();
+        assert!(err.to_string().contains("INSERT"));
+    }
+
+    #[test]
+    fn parses_insert_edge_valid_clause() {
+        let stmt = parse(
+            "INSERT (:P {_id: 1})-[:K]->(:P {_id: 2}) VALID FROM TIMESTAMP '2020-01-01T00:00:00Z'",
+        )
+        .unwrap();
+        let Statement::Insert(ins) = stmt else {
+            panic!("expected insert")
+        };
+        assert!(ins.valid_from.is_some());
+    }
+
+    #[test]
+    fn parses_detach_delete() {
+        let stmt = parse("MATCH (p:Person) WHERE p.name = 'Ada' DETACH DELETE p").unwrap();
+        let Statement::Delete(del) = stmt else {
+            panic!("expected delete")
+        };
+        assert!(del.detach);
+        assert_eq!(del.target, "p");
+    }
+
+    #[test]
+    fn insert_paths_reject_quantifiers_and_path_vars() {
+        let err = parse("INSERT (a:P {_id: 1})-[:K]->{1,3}(b:P {_id: 2})").unwrap_err();
+        assert!(err.to_string().contains("quantifier"));
+        let err = parse("INSERT p = (a:P {_id: 1})-[:K]->(b:P {_id: 2})").unwrap_err();
+        assert!(err.to_string().contains("path variable"));
     }
 }
