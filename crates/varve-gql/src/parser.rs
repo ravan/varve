@@ -20,6 +20,13 @@ impl Parser {
         &self.tokens[self.pos].kind
     }
 
+    fn peek_at(&self, n: usize) -> &TokenKind {
+        self.tokens
+            .get(self.pos + n)
+            .map(|t| &t.kind)
+            .unwrap_or(&TokenKind::Eof)
+    }
+
     fn offset(&self) -> usize {
         self.tokens[self.pos].offset
     }
@@ -186,10 +193,22 @@ impl Parser {
     }
 
     fn insert_stmt(&mut self) -> Result<InsertStmt, GqlError> {
-        let mut nodes = vec![self.insert_node()?];
-        while *self.peek() == TokenKind::Comma {
-            self.pos += 1;
-            nodes.push(self.insert_node()?);
+        let mut paths = Vec::new();
+        loop {
+            let path = self.path_pattern()?;
+            if path.start.var.is_none()
+                && path.start.labels.is_empty()
+                && path.start.props.is_empty()
+                && path.hops.is_empty()
+            {
+                return Err(self.err("INSERT node needs a label or properties"));
+            }
+            paths.push(path);
+            if *self.peek() == TokenKind::Comma {
+                self.pos += 1;
+                continue;
+            }
+            break;
         }
 
         let (mut valid_from, mut valid_to) = (None, None);
@@ -225,46 +244,182 @@ impl Parser {
         }
         self.expect(&TokenKind::Eof, "end of statement")?;
         Ok(InsertStmt {
-            nodes,
+            match_part: None,
+            paths,
             valid_from,
             valid_to,
         })
     }
 
-    fn insert_node(&mut self) -> Result<InsertNode, GqlError> {
+    /// '(' [var] (':' label)* [props] ')'
+    fn node_pattern(&mut self) -> Result<NodePattern, GqlError> {
         self.expect(&TokenKind::LParen, "'('")?;
+        let var = if matches!(self.peek(), TokenKind::Ident(_)) {
+            Some(self.ident("pattern variable")?)
+        } else {
+            None
+        };
         let mut labels = Vec::new();
         while *self.peek() == TokenKind::Colon {
             self.pos += 1;
             labels.push(self.ident("label name")?);
         }
-        if labels.is_empty() {
-            return Err(self.err("INSERT node requires at least one label"));
-        }
+        let props = if *self.peek() == TokenKind::LBrace {
+            self.props_block()?
+        } else {
+            Vec::new()
+        };
+        self.expect(&TokenKind::RParen, "')'")?;
+        Ok(NodePattern { var, labels, props })
+    }
+
+    /// '{' [ident ':' literal (',' ident ':' literal)*] '}'
+    fn props_block(&mut self) -> Result<Vec<(String, Literal)>, GqlError> {
+        self.expect(&TokenKind::LBrace, "'{'")?;
         let mut props = Vec::new();
-        if *self.peek() == TokenKind::LBrace {
-            self.pos += 1;
+        if *self.peek() != TokenKind::RBrace {
             loop {
                 let key = self.ident("property name")?;
                 self.expect(&TokenKind::Colon, "':'")?;
                 props.push((key, self.literal()?));
-                match self.bump() {
-                    TokenKind::Comma => continue,
-                    TokenKind::RBrace => break,
-                    other => {
-                        return Err(GqlError::Parse {
-                            offset: self.tokens[self.pos - 1].offset,
-                            msg: format!("expected ',' or '}}', found {other:?}"),
-                        })
-                    }
+                if *self.peek() == TokenKind::Comma {
+                    self.pos += 1;
+                } else {
+                    break;
                 }
             }
         }
-        self.expect(&TokenKind::RParen, "')'")?;
-        Ok(InsertNode { labels, props })
+        self.expect(&TokenKind::RBrace, "'}'")?;
+        Ok(props)
+    }
+
+    /// '-[' body ']->' | '<-[' body ']-'  with optional postfix quantifier;
+    /// body = [var] ':' label [props]. Label is REQUIRED in v1 (decision 15).
+    fn edge_pattern(&mut self) -> Result<EdgePattern, GqlError> {
+        let offset = self.offset();
+        let direction = match self.peek() {
+            TokenKind::Minus => Direction::Out,
+            TokenKind::Lt => Direction::In,
+            _ => return Err(self.err("expected '-[' or '<-[' edge pattern")),
+        };
+        if direction == Direction::In {
+            self.expect(&TokenKind::Lt, "'<'")?;
+        }
+        self.expect(&TokenKind::Minus, "'-'")?;
+        self.expect(&TokenKind::LBracket, "'['")?;
+        let var = if matches!(self.peek(), TokenKind::Ident(_)) {
+            Some(self.ident("edge variable")?)
+        } else {
+            None
+        };
+        if *self.peek() != TokenKind::Colon {
+            return Err(GqlError::Parse {
+                offset,
+                msg: "edge patterns require a label in v1: -[:LABEL]->".into(),
+            });
+        }
+        self.pos += 1;
+        let label = self.ident("edge label")?;
+        let props = if *self.peek() == TokenKind::LBrace {
+            self.props_block()?
+        } else {
+            Vec::new()
+        };
+        self.expect(&TokenKind::RBracket, "']'")?;
+        self.expect(&TokenKind::Minus, "'-'")?;
+        if direction == Direction::Out {
+            self.expect(&TokenKind::Gt, "'>'")?;
+        }
+        let quantifier = self.quantifier()?;
+        if quantifier.is_some() && var.is_some() {
+            return Err(GqlError::Parse {
+                offset,
+                msg: "edge variables on quantified edges (group variables) land in slice 7".into(),
+            });
+        }
+        Ok(EdgePattern {
+            var,
+            label,
+            props,
+            direction,
+            quantifier,
+        })
+    }
+
+    /// Postfix '{n}' | '{m,n}' | '{m,}' | '*' — or nothing.
+    fn quantifier(&mut self) -> Result<Option<Quantifier>, GqlError> {
+        match self.peek() {
+            TokenKind::Star => {
+                self.pos += 1;
+                Ok(Some(Quantifier { min: 0, max: None }))
+            }
+            TokenKind::LBrace => {
+                let offset = self.offset();
+                self.pos += 1;
+                let min = self.quantifier_bound()?;
+                let quant = if *self.peek() == TokenKind::Comma {
+                    self.pos += 1;
+                    if *self.peek() == TokenKind::RBrace {
+                        Quantifier { min, max: None }
+                    } else {
+                        let max = self.quantifier_bound()?;
+                        if max < min {
+                            return Err(GqlError::Parse {
+                                offset,
+                                msg: format!("quantifier min {min} exceeds max {max}"),
+                            });
+                        }
+                        Quantifier {
+                            min,
+                            max: Some(max),
+                        }
+                    }
+                } else {
+                    Quantifier {
+                        min,
+                        max: Some(min),
+                    }
+                };
+                self.expect(&TokenKind::RBrace, "'}'")?;
+                Ok(Some(quant))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn quantifier_bound(&mut self) -> Result<u32, GqlError> {
+        let offset = self.offset();
+        match self.bump() {
+            TokenKind::Int(n) if (0..=u32::MAX as i64).contains(&n) => Ok(n as u32),
+            other => Err(GqlError::Parse {
+                offset,
+                msg: format!("expected quantifier bound, found {other:?}"),
+            }),
+        }
+    }
+
+    /// [pvar '='] node (edge node)*
+    fn path_pattern(&mut self) -> Result<PathPattern, GqlError> {
+        let var = if matches!(self.peek(), TokenKind::Ident(_)) && *self.peek_at(1) == TokenKind::Eq
+        {
+            let v = self.ident("path variable")?;
+            self.pos += 1; // '='
+            Some(v)
+        } else {
+            None
+        };
+        let start = self.node_pattern()?;
+        let mut hops = Vec::new();
+        while matches!(self.peek(), TokenKind::Minus | TokenKind::Lt) {
+            let edge = self.edge_pattern()?;
+            let node = self.node_pattern()?;
+            hops.push((edge, node));
+        }
+        Ok(PathPattern { var, start, hops })
     }
 
     fn literal(&mut self) -> Result<Literal, GqlError> {
+        let offset = self.offset();
         match self.bump() {
             TokenKind::Int(i) => Ok(Literal::Int(i)),
             TokenKind::Float(f) => Ok(Literal::Float(f)),
@@ -272,26 +427,30 @@ impl Parser {
             TokenKind::Kw(Keyword::True) => Ok(Literal::Bool(true)),
             TokenKind::Kw(Keyword::False) => Ok(Literal::Bool(false)),
             TokenKind::Kw(Keyword::Null) => Ok(Literal::Null),
+            TokenKind::Minus => match self.bump() {
+                TokenKind::Int(i) => Ok(Literal::Int(-i)),
+                TokenKind::Float(f) => Ok(Literal::Float(-f)),
+                other => Err(GqlError::Parse {
+                    offset,
+                    msg: format!("expected number after '-', found {other:?}"),
+                }),
+            },
             other => Err(GqlError::Parse {
-                offset: self.tokens[self.pos - 1].offset,
+                offset,
                 msg: format!("expected literal, found {other:?}"),
             }),
         }
     }
 
-    /// Shared tail after `MATCH (var:label)`: per-MATCH FOR clauses, an
-    /// optional WHERE, then either `RETURN …` (a query) or `DELETE <var>`
-    /// (a mutation).
+    /// Shared tail after `MATCH <path> (',' <path>)*`: per-MATCH FOR
+    /// clauses, an optional WHERE, then either `RETURN …` (a query) or
+    /// `[DETACH] DELETE <var>` (a mutation).
     fn match_tail(&mut self, temporal: TemporalClauses) -> Result<Statement, GqlError> {
-        self.expect(&TokenKind::LParen, "'('")?;
-        let var = self.ident("pattern variable")?;
-        let label = if *self.peek() == TokenKind::Colon {
+        let mut paths = vec![self.path_pattern()?];
+        while *self.peek() == TokenKind::Comma {
             self.pos += 1;
-            Some(self.ident("label name")?)
-        } else {
-            None
-        };
-        self.expect(&TokenKind::RParen, "')'")?;
+            paths.push(self.path_pattern()?);
+        }
 
         let match_temporal = self.for_clauses()?;
 
@@ -303,8 +462,9 @@ impl Parser {
         };
 
         let offset = self.offset();
-        match self.bump() {
+        match self.peek().clone() {
             TokenKind::Kw(Keyword::Return) => {
+                self.pos += 1;
                 let mut return_items = vec![self.return_item()?];
                 while *self.peek() == TokenKind::Comma {
                     self.pos += 1;
@@ -313,13 +473,18 @@ impl Parser {
                 self.expect(&TokenKind::Eof, "end of statement")?;
                 Ok(Statement::Query(Box::new(QueryStmt {
                     temporal,
-                    pattern: NodePattern { var, label },
+                    paths,
                     match_temporal,
                     where_clause,
                     return_items,
                 })))
             }
-            TokenKind::Kw(Keyword::Delete) => {
+            TokenKind::Kw(Keyword::Delete) | TokenKind::Kw(Keyword::Detach) => {
+                let detach = *self.peek() == TokenKind::Kw(Keyword::Detach);
+                self.pos += 1;
+                if detach {
+                    self.expect(&TokenKind::Kw(Keyword::Delete), "DELETE")?;
+                }
                 if temporal != TemporalClauses::default()
                     || match_temporal != TemporalClauses::default()
                 {
@@ -329,25 +494,36 @@ impl Parser {
                             .into(),
                     });
                 }
+                if paths.len() != 1 || !paths[0].hops.is_empty() || paths[0].var.is_some() {
+                    return Err(GqlError::Parse {
+                        offset,
+                        msg: "DELETE supports a single node pattern in v1 (edge deletion lands \
+                              in slice 7)"
+                            .into(),
+                    });
+                }
+                let path = paths.remove(0);
                 let target = self.ident("variable to delete")?;
-                if target != var {
+                if path.start.var.as_deref() != Some(target.as_str()) {
                     return Err(GqlError::Parse {
                         offset,
                         msg: format!(
-                            "DELETE target '{target}' is not bound (pattern variable is '{var}')"
+                            "DELETE target '{target}' is not bound (pattern variable is {:?})",
+                            path.start.var
                         ),
                     });
                 }
                 self.expect(&TokenKind::Eof, "end of statement")?;
                 Ok(Statement::Delete(DeleteStmt {
-                    pattern: NodePattern { var, label },
+                    pattern: path.start,
                     where_clause,
                     target,
+                    detach,
                 }))
             }
             other => Err(GqlError::Parse {
                 offset,
-                msg: format!("expected RETURN or DELETE, found {other:?}"),
+                msg: format!("expected RETURN, DELETE, or DETACH DELETE, found {other:?}"),
             }),
         }
     }
@@ -364,10 +540,10 @@ impl Parser {
         })
     }
 
-    /// A `RETURN` item is either `var.prop [AS alias]` or a temporal function
+    /// A `RETURN` item is either `var.prop [AS alias]`, a temporal function
     /// call `valid_from(var) [AS alias]` / `valid_to(var) [AS alias]` /
-    /// `system_from(var) [AS alias]` — disambiguated by whether `(` follows
-    /// the leading identifier.
+    /// `system_from(var) [AS alias]`, or a bare path variable `p [AS alias]`
+    /// — disambiguated by whether `(` or `.` follows the leading identifier.
     fn return_item(&mut self) -> Result<ReturnItem, GqlError> {
         let offset = self.offset();
         let name = self.ident("variable or temporal function")?;
@@ -391,7 +567,11 @@ impl Parser {
             let alias = self.alias()?;
             return Ok(ReturnItem::TemporalFn { func, var, alias });
         }
-        self.expect(&TokenKind::Dot, "'.'")?;
+        if *self.peek() != TokenKind::Dot {
+            let alias = self.alias()?;
+            return Ok(ReturnItem::Var { var: name, alias });
+        }
+        self.pos += 1; // '.'
         let prop = self.ident("property name")?;
         let alias = self.alias()?;
         Ok(ReturnItem::Prop {
@@ -417,18 +597,32 @@ mod tests {
     use crate::parse;
     use varve_types::{Instant, TemporalDimension};
 
+    fn node(var: Option<&str>, labels: &[&str]) -> NodePattern {
+        NodePattern {
+            var: var.map(String::from),
+            labels: labels.iter().map(|s| s.to_string()).collect(),
+            props: vec![],
+        }
+    }
+
     #[test]
     fn parses_insert_node() {
         let stmt = parse("INSERT (:Person {_id: 1, name: 'Ada'})").unwrap();
         assert_eq!(
             stmt,
             Statement::Insert(InsertStmt {
-                nodes: vec![InsertNode {
-                    labels: vec!["Person".into()],
-                    props: vec![
-                        ("_id".into(), Literal::Int(1)),
-                        ("name".into(), Literal::Str("Ada".into())),
-                    ],
+                match_part: None,
+                paths: vec![PathPattern {
+                    var: None,
+                    start: NodePattern {
+                        var: None,
+                        labels: vec!["Person".into()],
+                        props: vec![
+                            ("_id".into(), Literal::Int(1)),
+                            ("name".into(), Literal::Str("Ada".into())),
+                        ],
+                    },
+                    hops: vec![],
                 }],
                 valid_from: None,
                 valid_to: None,
@@ -442,7 +636,7 @@ mod tests {
         let Statement::Insert(ins) = stmt else {
             panic!()
         };
-        assert_eq!(ins.nodes.len(), 2);
+        assert_eq!(ins.paths.len(), 2);
     }
 
     #[test]
@@ -459,10 +653,11 @@ mod tests {
             stmt,
             Statement::Query(Box::new(QueryStmt {
                 temporal: TemporalClauses::default(),
-                pattern: NodePattern {
-                    var: "p".into(),
-                    label: Some("Person".into())
-                },
+                paths: vec![PathPattern {
+                    var: None,
+                    start: node(Some("p"), &["Person"]),
+                    hops: vec![],
+                }],
                 match_temporal: TemporalClauses::default(),
                 where_clause: Some(Expr::PropEq {
                     var: "p".into(),
@@ -483,6 +678,143 @@ mod tests {
                 ],
             }))
         );
+    }
+
+    #[test]
+    fn parses_single_node_match_as_one_path() {
+        let q = query("MATCH (p:Person) WHERE p.name = 'Ada' RETURN p.name");
+        assert_eq!(q.paths.len(), 1);
+        assert_eq!(q.paths[0].start, node(Some("p"), &["Person"]));
+        assert!(q.paths[0].hops.is_empty());
+        assert_eq!(q.single_node(), Some(&q.paths[0].start));
+    }
+
+    #[test]
+    fn parses_two_hop_path() {
+        let q = query("MATCH (a:Person)-[:KNOWS]->(b)-[k:KNOWS]->(c:Person) RETURN c.name");
+        let p = &q.paths[0];
+        assert_eq!(p.start, node(Some("a"), &["Person"]));
+        assert_eq!(p.hops.len(), 2);
+        let (e0, n1) = &p.hops[0];
+        assert_eq!(
+            *e0,
+            EdgePattern {
+                var: None,
+                label: "KNOWS".into(),
+                props: vec![],
+                direction: Direction::Out,
+                quantifier: None,
+            }
+        );
+        assert_eq!(*n1, node(Some("b"), &[]));
+        let (e1, n2) = &p.hops[1];
+        assert_eq!(e1.var.as_deref(), Some("k"));
+        assert_eq!(*n2, node(Some("c"), &["Person"]));
+    }
+
+    #[test]
+    fn parses_reverse_direction_and_props() {
+        let q = query("MATCH (a)<-[:KNOWS {since: 2020}]-(b) RETURN a.name");
+        let (e, _) = &q.paths[0].hops[0];
+        assert_eq!(e.direction, Direction::In);
+        assert_eq!(e.props, vec![("since".into(), Literal::Int(2020))]);
+    }
+
+    #[test]
+    fn parses_quantifiers() {
+        let q = query("MATCH (a)-[:KNOWS]->{1,3}(b) RETURN b.name");
+        assert_eq!(
+            q.paths[0].hops[0].0.quantifier,
+            Some(Quantifier {
+                min: 1,
+                max: Some(3)
+            })
+        );
+        let q = query("MATCH (a)-[:KNOWS]->{2}(b) RETURN b.name");
+        assert_eq!(
+            q.paths[0].hops[0].0.quantifier,
+            Some(Quantifier {
+                min: 2,
+                max: Some(2)
+            })
+        );
+        let q = query("MATCH (a)-[:KNOWS]->{2,}(b) RETURN b.name");
+        assert_eq!(
+            q.paths[0].hops[0].0.quantifier,
+            Some(Quantifier { min: 2, max: None })
+        );
+        let q = query("MATCH (a)-[:KNOWS]->*(b) RETURN b.name");
+        assert_eq!(
+            q.paths[0].hops[0].0.quantifier,
+            Some(Quantifier { min: 0, max: None })
+        );
+    }
+
+    #[test]
+    fn parses_path_variable_and_bare_return() {
+        let q = query("MATCH p = (a)-[:KNOWS]->{1,3}(b) RETURN p");
+        assert_eq!(q.paths[0].var.as_deref(), Some("p"));
+        assert_eq!(
+            q.return_items,
+            vec![ReturnItem::Var {
+                var: "p".into(),
+                alias: None
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_node_props_and_multi_labels_in_match() {
+        let q = query("MATCH (a:Person:Admin {name: 'Ada', age: -1}) RETURN a.name");
+        let n = &q.paths[0].start;
+        assert_eq!(n.labels, vec!["Person".to_string(), "Admin".to_string()]);
+        assert_eq!(
+            n.props,
+            vec![
+                ("name".into(), Literal::Str("Ada".into())),
+                ("age".into(), Literal::Int(-1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_comma_separated_paths() {
+        let q = query("MATCH (a:Person), (b:Person) RETURN a.name");
+        assert_eq!(q.paths.len(), 2);
+    }
+
+    #[test]
+    fn edge_without_label_errors() {
+        let err = parse("MATCH (a)-[]->(b) RETURN a.name").unwrap_err();
+        assert!(err.to_string().contains("label"));
+    }
+
+    #[test]
+    fn edge_var_on_quantified_edge_errors() {
+        let err = parse("MATCH (a)-[k:KNOWS]->{1,3}(b) RETURN a.name").unwrap_err();
+        assert!(err.to_string().contains("quantified"));
+    }
+
+    #[test]
+    fn quantifier_min_above_max_errors() {
+        let err = parse("MATCH (a)-[:KNOWS]->{3,1}(b) RETURN a.name").unwrap_err();
+        assert!(err.to_string().contains("quantifier"));
+    }
+
+    #[test]
+    fn parses_match_delete_with_new_shapes() {
+        let stmt = parse("MATCH (p:Person) WHERE p.name = 'Ada' DELETE p").unwrap();
+        let Statement::Delete(del) = stmt else {
+            panic!("expected delete")
+        };
+        assert_eq!(del.pattern, node(Some("p"), &["Person"]));
+        assert!(!del.detach);
+    }
+
+    #[test]
+    fn delete_rejects_paths_with_hops() {
+        let err = parse("MATCH (a)-[:KNOWS]->(b) DELETE a").unwrap_err();
+        assert!(err.to_string().contains("DELETE"));
     }
 
     #[test]
@@ -638,26 +970,6 @@ mod tests {
         let err = parse("INSERT (:P {_id: 1}) VALID FROM DATE '2021-01-01' TO DATE '2020-01-01'")
             .unwrap_err();
         assert!(err.to_string().contains("earlier"), "{err}");
-    }
-
-    #[test]
-    fn parses_match_delete() {
-        let stmt = parse("MATCH (p:Person) WHERE p.name = 'Ada' DELETE p").unwrap();
-        assert_eq!(
-            stmt,
-            Statement::Delete(DeleteStmt {
-                pattern: NodePattern {
-                    var: "p".into(),
-                    label: Some("Person".into())
-                },
-                where_clause: Some(Expr::PropEq {
-                    var: "p".into(),
-                    prop: "name".into(),
-                    value: Literal::Str("Ada".into()),
-                }),
-                target: "p".into(),
-            })
-        );
     }
 
     #[test]

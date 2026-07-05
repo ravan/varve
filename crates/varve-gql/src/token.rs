@@ -31,6 +31,7 @@ pub enum Keyword {
     Delete,
     Timestamp,
     Date,
+    Detach,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -49,6 +50,12 @@ pub enum TokenKind {
     Dot,
     Eq,
     Dollar,
+    Minus,
+    Lt,
+    Gt,
+    LBracket,
+    RBracket,
+    Star,
     Eof,
 }
 
@@ -81,6 +88,7 @@ fn keyword(word: &str) -> Option<Keyword> {
         "DELETE" => Some(Keyword::Delete),
         "TIMESTAMP" => Some(Keyword::Timestamp),
         "DATE" => Some(Keyword::Date),
+        "DETACH" => Some(Keyword::Detach),
         _ => None,
     }
 }
@@ -134,6 +142,30 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, GqlError> {
             '$' => {
                 i += 1;
                 TokenKind::Dollar
+            }
+            '-' => {
+                i += 1;
+                TokenKind::Minus
+            }
+            '<' => {
+                i += 1;
+                TokenKind::Lt
+            }
+            '>' => {
+                i += 1;
+                TokenKind::Gt
+            }
+            '[' => {
+                i += 1;
+                TokenKind::LBracket
+            }
+            ']' => {
+                i += 1;
+                TokenKind::RBracket
+            }
+            '*' => {
+                i += 1;
+                TokenKind::Star
             }
             '\'' => {
                 i += 1;
@@ -276,6 +308,44 @@ mod tests {
     fn error_carries_offset() {
         let err = tokenize("MATCH ^").unwrap_err();
         assert!(err.to_string().contains("offset 6"), "{err}");
+    }
+
+    #[test]
+    fn tokenizes_edge_pattern_punctuation() {
+        assert_eq!(
+            kinds("-[ ]-> <-[ ]- * {1,3}"),
+            vec![
+                TokenKind::Minus,
+                TokenKind::LBracket,
+                TokenKind::RBracket,
+                TokenKind::Minus,
+                TokenKind::Gt,
+                TokenKind::Lt,
+                TokenKind::Minus,
+                TokenKind::LBracket,
+                TokenKind::RBracket,
+                TokenKind::Minus,
+                TokenKind::Star,
+                TokenKind::LBrace,
+                TokenKind::Int(1),
+                TokenKind::Comma,
+                TokenKind::Int(3),
+                TokenKind::RBrace,
+                TokenKind::Eof,
+            ],
+        );
+    }
+
+    #[test]
+    fn detach_is_a_keyword() {
+        assert_eq!(
+            kinds("detach DELETE"),
+            vec![
+                TokenKind::Kw(Keyword::Detach),
+                TokenKind::Kw(Keyword::Delete),
+                TokenKind::Eof
+            ]
+        );
     }
 
     #[test]

@@ -59,6 +59,8 @@ pub enum EngineError {
          memory log"
     )]
     VolatileBlockStore,
+    #[error("unsupported in v1: {0}")]
+    Unsupported(String),
 }
 
 /// Group-commit tuning read from `[log]` (spec §6): a batch flushes when its
@@ -320,7 +322,19 @@ impl Db {
         };
         let now = self.clock.watermark();
         let bounds = varve_plan::effective_bounds(&q, now);
-        let label = q.pattern.label.as_deref().unwrap_or("");
+        // v1: only a single-node, hop-free, unnamed MATCH is supported
+        // (multi-element MATCH lands in task 8 of slice 6); mirrors
+        // varve_plan::exec's require_single_node, which we can't call
+        // directly (private, and this crate needs the label pre-snapshot).
+        let node = q.single_node().ok_or_else(|| {
+            EngineError::Unsupported("multi-element MATCH lands in task 8 of slice 6".into())
+        })?;
+        if !node.props.is_empty() {
+            return Err(EngineError::Unsupported(
+                "multi-element MATCH lands in task 8 of slice 6".into(),
+            ));
+        }
+        let label = node.labels.first().map(String::as_str).unwrap_or("");
         let iid = varve_plan::iid_point(&q.where_clause, DEFAULT_GRAPH, NODES_TABLE);
         let snapshot = merged_snapshot(&self.state, &self.store, label, &bounds, iid).await?;
         Ok(varve_plan::execute_query(&q, snapshot).await?)

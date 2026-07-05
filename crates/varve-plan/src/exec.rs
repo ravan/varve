@@ -18,6 +18,8 @@ pub enum PlanError {
     UnknownColumn(String),
     #[error("internal: _iid column malformed")]
     MalformedIid,
+    #[error("unsupported in v1: {0}")]
+    Unsupported(String),
 }
 
 fn to_df_literal(l: &Literal) -> datafusion::prelude::Expr {
@@ -86,6 +88,21 @@ fn temporal_fn_columns(func: TemporalFnKind) -> (&'static str, &'static str) {
     }
 }
 
+/// v1: only a single-node, hop-free, unnamed MATCH is supported (multi-
+/// element MATCH lands in task 8 of slice 6); a node pattern with props is
+/// likewise deferred — there is no plan-level filtering on them yet.
+fn require_single_node(stmt: &QueryStmt) -> Result<&NodePattern, PlanError> {
+    let node = stmt.single_node().ok_or_else(|| {
+        PlanError::Unsupported("multi-element MATCH lands in task 8 of slice 6".into())
+    })?;
+    if !node.props.is_empty() {
+        return Err(PlanError::Unsupported(
+            "multi-element MATCH lands in task 8 of slice 6".into(),
+        ));
+    }
+    Ok(node)
+}
+
 /// Sync phase: resolve + snapshot under the caller's lock.
 pub fn snapshot_for_query(
     stmt: &QueryStmt,
@@ -93,7 +110,8 @@ pub fn snapshot_for_query(
     now: Instant,
 ) -> Result<Option<RecordBatch>, PlanError> {
     let bounds = effective_bounds(stmt, now);
-    let label = stmt.pattern.label.as_deref().unwrap_or("");
+    let node = require_single_node(stmt)?;
+    let label = node.labels.first().map(String::as_str).unwrap_or("");
     Ok(live.snapshot_for_label(label, &bounds)?)
 }
 
@@ -103,6 +121,7 @@ pub async fn execute_query(
     stmt: &QueryStmt,
     snapshot: Option<RecordBatch>,
 ) -> Result<Vec<RecordBatch>, PlanError> {
+    require_single_node(stmt)?;
     let Some(batch) = snapshot else {
         return Ok(vec![]);
     };
@@ -136,6 +155,11 @@ pub async fn execute_query(
                     alias.clone().unwrap_or_else(|| default_name.to_string()),
                 )
             }
+            ReturnItem::Var { .. } => {
+                return Err(PlanError::Unsupported(
+                    "path variables land in task 9 of slice 6".into(),
+                ));
+            }
         };
         projection.push(col(source).alias(out_name));
     }
@@ -152,7 +176,7 @@ pub fn matching_snapshot(
     live: &LiveTable,
     bounds: &TemporalBounds,
 ) -> Result<Option<RecordBatch>, PlanError> {
-    let label = pattern.label.as_deref().unwrap_or("");
+    let label = pattern.labels.first().map(String::as_str).unwrap_or("");
     Ok(live.snapshot_for_label(label, bounds)?)
 }
 
