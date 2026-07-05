@@ -646,6 +646,88 @@ mod tests {
         }
     }
 
+    /// Regression guard for `flush_block`'s "full inventory" comment
+    /// (flush.rs): manifest.tables gets one `TableTries` per table with
+    /// PRIOR OR NEW tries — including a table that flushed nothing THIS
+    /// block. Block 0 gives edges its only trie; block 1 flushes nodes
+    /// ONLY (edges' live tail is empty by then), so recovery from block 1's
+    /// manifest is the only way to see whether edges' entry survived a
+    /// block where edges had nothing new to contribute. Reuses the exact
+    /// `blocks_config`/`max_block_rows = 1` size-flush trigger as
+    /// `edges_survive_log_replay_and_block_flush_restart` above — no new
+    /// flush mechanism, no writer-loop changes.
+    #[tokio::test]
+    async fn node_only_flush_preserves_prior_edges_trie_inventory() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let db = Db::open(blocks_config(dir.path(), 1)).await.unwrap();
+
+            // Block 0: an edge insert also creates its two endpoint nodes,
+            // so BOTH tables have live rows when `max_block_rows = 1` trips
+            // the post-batch flush — nodes and edges each get their first
+            // persisted trie in this same block.
+            db.execute("INSERT (:P {_id: 1})-[:K]->(:P {_id: 2})")
+                .await
+                .unwrap();
+            for _ in 0..200 {
+                {
+                    let s = db.state.read().unwrap();
+                    if s.nodes.tries.len() == 1 && s.edges.tries.len() == 1 {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            {
+                let s = db.state.read().unwrap();
+                assert_eq!(s.nodes.tries.len(), 1, "block 0: nodes trie landed");
+                assert_eq!(s.edges.tries.len(), 1, "block 0: edges trie landed");
+                assert_eq!(
+                    s.edges.live.event_count(),
+                    0,
+                    "block 0's flush reset edges' live tail"
+                );
+            }
+
+            // Block 1: a node-only insert. edges.live is empty, so this
+            // flush has nothing new for edges — it must still carry
+            // edges' PRIOR trie into the manifest, or recovery from THIS
+            // manifest silently loses the block-0 edge trie.
+            db.execute("INSERT (:P {_id: 3})").await.unwrap();
+            for _ in 0..200 {
+                {
+                    let s = db.state.read().unwrap();
+                    if s.nodes.tries.len() == 2 {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            assert_eq!(
+                db.state.read().unwrap().nodes.tries.len(),
+                2,
+                "block 1: node-only flush landed as its own block"
+            );
+        } // drop = close
+        {
+            // Fresh handle: recovery reads ONLY the latest manifest (block
+            // 1's, nodes-only new data) to rebuild the trie inventory. If
+            // `flush_block` only emitted a `TableTries` entry for tables
+            // that flushed something THIS block, block 1's manifest would
+            // omit `edges` entirely and this would recover 0 edge tries —
+            // even though the block-0 edge data/meta objects still sit in
+            // the store, now unreachable.
+            let db = Db::local(dir.path()).await.unwrap();
+            let s = db.state.read().unwrap();
+            assert_eq!(
+                s.edges.tries.len(),
+                1,
+                "edges' block-0 trie must survive block 1's node-only manifest write"
+            );
+            assert_eq!(s.nodes.tries.len(), 2, "both node tries also recovered");
+        }
+    }
+
     /// `recover`'s log-tail loop checks `effect.table` before ever touching
     /// `arrow_ipc` (v1 targets are `nodes` and `edges`), so an unknown table
     /// must hard-fail with `UnknownTable` — even though the log record here
