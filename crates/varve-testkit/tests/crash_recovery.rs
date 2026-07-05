@@ -257,14 +257,23 @@ async fn crash_matrix() {
                     // Killed at an arbitrary flush stage: whatever committed,
                     // recovery serves exactly the acked set.
                     assert_eq!(survived, acked, "{point}");
-                    // Trim strictly follows the manifest PUT, so a fully
-                    // trimmed log (down to its one-record minimum) implies a
-                    // manifest; otherwise the flush hadn't progressed that
-                    // far and the log still holds all K records untouched.
-                    if records == 1 {
-                        assert!(manifest.is_some(), "{point}: trim without manifest");
-                    } else {
-                        assert_eq!(records, K as usize, "{point}");
+                    // `trim_sync` deletes the K-1 single-record segments one
+                    // `fs::remove_file` at a time with no fsync between
+                    // unlinks, so a SIGKILL mid-trim can leave the on-disk
+                    // log at ANY record count between the untouched K and
+                    // the fully-trimmed one-record minimum. Trim strictly
+                    // follows the manifest PUT, so any trimming at all
+                    // (records < K) implies a committed manifest, however
+                    // far the trim itself got.
+                    assert!(
+                        (1..=K as usize).contains(&records),
+                        "{point}: log record count {records} out of range 1..={K}"
+                    );
+                    if records < K as usize {
+                        assert!(
+                            manifest.is_some(),
+                            "{point}: a trimmed log implies a committed manifest"
+                        );
                     }
                 }
                 "pre-manifest-put" => {
