@@ -16,27 +16,37 @@ mod s3_factory {
             .unwrap()
     }
 
+    /// `AmazonS3Builder::build()` does no I/O — a fully specified factory
+    /// build must succeed with nothing listening on the endpoint.
     #[test]
-    fn s3_factory_builds_with_garage_config() {
+    fn s3_factory_builds_from_full_config() {
         let cfg = storage_section(
-            "[storage]\nbackend = \"s3\"\n[storage.s3]\nendpoint = \
-             \"http://127.0.0.1:3900\"\nbucket = \"varve\"\naccess_key_id = \"GK0123456789\"\n\
-             secret_access_key = \"sk1...\"\n",
+            "[storage]\nbackend = \"s3\"\n[storage.s3]\n\
+             endpoint = \"http://127.0.0.1:3900\"\nbucket = \"varve\"\n\
+             region = \"garage\"\naccess_key_id = \"GK0123456789\"\n\
+             secret_access_key = \"secret\"\n",
         );
-        storage_registry().build("s3", &cfg, &BuildContext::empty()).unwrap();
+        assert!(storage_registry()
+            .build("s3", &cfg, &BuildContext::empty())
+            .is_ok());
     }
 
+    /// Credentials may be omitted entirely: the builder starts from
+    /// `from_env()` and defers to the AWS provider chain — building still
+    /// succeeds (resolution is lazy, at first request).
     #[test]
-    fn s3_factory_builds_with_aws_config() {
+    fn s3_factory_builds_without_inline_credentials() {
         let cfg = storage_section(
-            "[storage]\nbackend = \"s3\"\n[storage.s3]\nregion = \"us-west-2\"\n\
+            "[storage]\nbackend = \"s3\"\n[storage.s3]\n\
              endpoint = \"http://127.0.0.1:3900\"\nbucket = \"varve\"\n",
         );
-        storage_registry().build("s3", &cfg, &BuildContext::empty()).unwrap();
+        assert!(storage_registry()
+            .build("s3", &cfg, &BuildContext::empty())
+            .is_ok());
     }
 
     #[test]
-    fn s3_factory_requires_section() {
+    fn s3_factory_requires_the_s3_section() {
         let cfg = storage_section("[storage]\nbackend = \"s3\"\n");
         let err = match storage_registry().build("s3", &cfg, &BuildContext::empty()) {
             Ok(_) => panic!("expected build(\"s3\") with no [storage.s3] to fail"),
