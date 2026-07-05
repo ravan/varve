@@ -117,13 +117,13 @@ fn missing_context_component_is_a_build_error() {
     let err = reg
         .build("counted", &ConfigSection::empty(), &BuildContext::empty())
         .unwrap_err();
-    assert!(err.to_string().contains("counter"), "{err}");
+    assert!(err.to_string().contains("counter component"), "{err}");
 }
 
 #[test]
-fn build_context_lookup_by_type() {
+fn context_get_is_typed() {
     let mut ctx = BuildContext::empty();
     ctx.insert(7u32);
     assert_eq!(ctx.get::<u32>(), Some(7));
-    assert_eq!(ctx.get::<u64>(), None);
+    assert_eq!(ctx.get::<u64>(), None, "different type, different slot");
 }
