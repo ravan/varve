@@ -169,23 +169,26 @@ smoke bench recorded in STATUS.md; config selects `log = "local"` vs `"memory"` 
 
 **Sessions:** 2–3. **Depends:** slice 3.
 
-- [ ] `varve-storage`: thin wrapper over `object_store` crate behind our trait; key layout
-      exactly per spec §9 (`v1/…`, lex-hex trie keys `l<level>-r<recency>-p<part>-b<block>`);
+- [x] `varve-storage`: thin wrapper over `object_store` crate behind our trait; key layout
+      exactly per spec §9 (`v1/…`, lex-hex trie keys; L0 key `l00-rc-b<lexhex>`, `-p` part
+      segment omitted when empty per XTDB `Trie.kt` — decision 15);
       registry factories `storage/memory`, `storage/local`.
-- [ ] Block manifest (protobuf): log position watermark, per-graph/table trie inventory;
+- [x] Block manifest (protobuf): log position watermark, per-graph/table trie inventory
+      (+ `max_tx_id`/`max_system_time_us` floors for post-trim recovery);
       **manifest write = commit point** (data file without manifest entry is invisible).
-- [ ] Flush: at `max_block_rows` (default 100k, configurable) or flush timeout — sort live
+- [x] Flush: at `max_block_rows` (default 100k, configurable) or flush timeout — sort live
       events (iid, system_from desc), write L0 `data/<key>.arrow` + `meta/<key>.arrow`
-      (per-page min/max for temporal cols + per-column min/max), write manifest, trim
+      (per-page min/max for temporal cols), write manifest, trim
       log-replay watermark, reset live table.
-- [ ] Meta files carry a serialized single-level page index in v1-of-this-slice (the full
-      hash-trie branch structure lands with compaction in slice 8; pages of ~1k rows,
+- [x] Meta files carry a serialized single-level page index in v1-of-this-slice (the full
+      hash-trie branch structure lands with compaction in slice 8; pages of 1024 rows,
       IID-ordered, are the pruning unit now).
-- [ ] Scan: merge live snapshot + persisted pages by (iid, system_from desc) with bitemporal
-      resolution across sources; page pruning by IID range + temporal bounds from meta.
-- [ ] Restart: `Db::open` = latest manifest + log tail replay (extends slice-3 recovery).
-- [ ] Memory cache tier v1: LRU over (path, byte-range) → Arrow buffers; footer cache.
-- [ ] Extend property tests: same op history, randomized flush points → identical query
+- [x] Scan: merge live snapshot + persisted pages by (iid, system_from desc) with bitemporal
+      resolution across sources; page pruning by IID range + temporal bounds from meta
+      (valid axis deliberately NOT pruned in v1 — decision 4).
+- [x] Restart: `Db::open` = latest manifest + log tail replay (extends slice-3 recovery).
+- [x] Memory cache tier v1: LRU over (path, byte-range) → Arrow buffers; footer cache.
+- [x] Extend property tests: same op history, randomized flush points → identical query
       results as never-flushed reference.
 
 **Exit criteria:** 1M-event ingest → restart → correct temporal queries with < 100ms warm

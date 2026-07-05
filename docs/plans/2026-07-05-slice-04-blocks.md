@@ -102,7 +102,7 @@ Cargo.toml                       # workspace pins: object_store, bytes, futures
   A blanket impl makes every `object_store::ObjectStore` implementation a Varve `ObjectStore`.
 - Produces: `varve_storage::memory_store() -> Arc<dyn ObjectStore>`; `varve_storage::local_store(dir: &Path) -> Result<Arc<dyn ObjectStore>, StorageError>` (creates `dir`); factories `MemoryStoreFactory` (`"memory"`), `LocalStoreFactory` (`"local"`, reads `[storage.local] dir`); `varve_storage::storage_registry() -> Registry<dyn ObjectStore>`.
 
-- [ ] **Step 1: Workspace + crate scaffolding**
+- [x] **Step 1: Workspace + crate scaffolding**
 
 Root `Cargo.toml`, append to `[workspace.dependencies]`:
 
@@ -140,7 +140,7 @@ tempfile = { workspace = true }
 workspace = true
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 `crates/varve-storage/tests/store_test.rs`:
 
@@ -254,12 +254,12 @@ async fn local_factory_builds_from_config() {
 }
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `cargo test -p varve-storage`
 Expected: FAIL — crate compiles empty / items missing (`memory_store` not found).
 
-- [ ] **Step 4: Minimal implementation**
+- [x] **Step 4: Minimal implementation**
 
 `crates/varve-storage/src/store.rs`:
 
@@ -458,12 +458,12 @@ fn register_builtin(
 }
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `cargo test -p varve-storage`
 Expected: 6 tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add Cargo.toml Cargo.lock crates/varve-storage/
@@ -486,7 +486,7 @@ git commit -m "feat: varve-storage crate with ObjectStore trait over object_stor
   `data_key(graph: &str, table: &str, trie_key: &str) -> String` (`"v1/graphs/<g>/tables/<t>/data/<trie>.arrow"`); `meta_key(..)` (same with `meta/`);
   `manifest_key(block_id: u64) -> String` (`"v1/blocks/<lexhex>.manifest"`); `manifest_block_id(key: &str) -> Option<u64>`; `MANIFEST_PREFIX: &str = "v1/blocks"`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/varve-storage/src/keys.rs` (tests first; module body in Step 3):
 
@@ -563,12 +563,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-storage keys`
 Expected: FAIL — module/functions not defined (add `pub mod keys;` to `lib.rs` first so the failure is about the functions).
 
-- [ ] **Step 3: Minimal implementation**
+- [x] **Step 3: Minimal implementation**
 
 Prepend to `crates/varve-storage/src/keys.rs`:
 
@@ -634,12 +634,12 @@ pub mod keys;
 
 (No uppercase in lex-hex bodies: `format!("{n:x}")` emits lowercase; `parse_lex_hex` rejects uppercase so parse(lex_hex(n)) is a bijection on canonical keys.)
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-storage keys`
 Expected: 6 tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-storage/
@@ -679,7 +679,7 @@ pub async fn latest_manifest(store: &dyn ObjectStore) -> Result<Option<BlockMani
 
 - Produces: `StorageError::Decode(#[from] prost::DecodeError)`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/varve-storage/src/manifest.rs` (tests first; module body in Step 3):
 
@@ -786,12 +786,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-storage manifest`
 Expected: FAIL — types not defined.
 
-- [ ] **Step 3: Minimal implementation**
+- [x] **Step 3: Minimal implementation**
 
 `crates/varve-storage/Cargo.toml` — add to `[dependencies]`:
 
@@ -885,12 +885,12 @@ pub mod manifest;
 pub use manifest::{latest_manifest, BlockManifest, TableTries, TrieEntry};
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-storage`
 Expected: all pass (store + keys + 6 manifest tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-storage/ Cargo.lock
@@ -931,7 +931,7 @@ impl CachedStore {
 - Consumes: `ObjectStore`, `StorageError` (Task 1).
 - Registry-by-name selection for cache tiers is deliberately deferred to slice 5 (disk tier) — decision 14.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/varve-storage/src/cache.rs` (tests first; module body in Step 3):
 
@@ -1068,12 +1068,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-storage cache`
 Expected: FAIL — types not defined (add `pub mod cache;` to `lib.rs` first).
 
-- [ ] **Step 3: Minimal implementation**
+- [x] **Step 3: Minimal implementation**
 
 Prepend to `crates/varve-storage/src/cache.rs`:
 
@@ -1257,12 +1257,12 @@ pub mod cache;
 pub use cache::{CacheKey, CacheTier, CachedStore, MemoryCache};
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-storage`
 Expected: all pass (8 new cache tests included).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-storage/
@@ -1296,7 +1296,7 @@ where
 - Produces: `LiveTable::entities(&self) -> impl Iterator<Item = (&Iid, &[Event])>` (iid ascending, events in arrival order) and `LiveTable::events_for(&self, iid: &Iid) -> Option<&[Event]>`.
 - `LiveTable::snapshot_for_label` delegates to `snapshot_entities` — signature unchanged, all existing tests must stay green untouched.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/varve-index/src/scan.rs` (tests first; module body in Step 3):
 
@@ -1399,12 +1399,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-index scan`
 Expected: FAIL — `snapshot_entities` / accessors not defined (add `pub mod scan;` to `lib.rs` first).
 
-- [ ] **Step 3: Move the snapshot machinery**
+- [x] **Step 3: Move the snapshot machinery**
 
 Prepend to `crates/varve-index/src/scan.rs` — this is the body of today's `LiveTable::snapshot_for_label` plus its two private helpers (`VisibleRow`, `value_type`, `timestamp_type`), MOVED from `live.rs` and generalized over an entity iterator:
 
@@ -1649,12 +1649,12 @@ pub use live::{IndexError, LiveTable};
 pub use scan::snapshot_entities;
 ```
 
-- [ ] **Step 4: Run tests to verify they pass — including the untouched live.rs suite**
+- [x] **Step 4: Run tests to verify they pass — including the untouched live.rs suite**
 
 Run: `cargo test -p varve-index`
 Expected: all pass (3 new scan tests + every pre-existing live/bitemporal/codec test, none modified).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-index/
@@ -1705,7 +1705,7 @@ pub fn decode_meta(bytes: &[u8]) -> Result<Vec<PageMeta>, IndexError>;
 - Consumes: `LiveTable::entities()`, `snapshot_entities` (Task 5), `encode_events`/`decode_events` (slice 3 codec).
 - File order: `_iid` ascending, `_system_from` DESCENDING per entity (spec §5.2) via stable reversal of arrival order — same-timestamp ties round-trip exactly (decision 9).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/varve-index/src/block.rs` (tests first; module body in Step 3):
 
@@ -1942,12 +1942,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-index block`
 Expected: FAIL — module/types not defined (add `pub mod block;` to `lib.rs` first).
 
-- [ ] **Step 3: Minimal implementation**
+- [x] **Step 3: Minimal implementation**
 
 `crates/varve-index/src/codec.rs` — change the private helper's visibility (decode_meta reuses it) and fix the stale header comment:
 
@@ -2222,12 +2222,12 @@ pub mod block;
 pub use block::{decode_meta, encode_block, EncodedBlock, PageMeta, DEFAULT_PAGE_ROWS};
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-index`
 Expected: all pass (8 new block tests; existing suites untouched).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-index/
@@ -2251,7 +2251,7 @@ git commit -m "feat: L0 block format with paged data, meta page index, prune rul
 - `MemoryLog` keeps an explicit next-position counter so appends after a full trim continue the sequence.
 - `LocalLog` deletes segment `i` iff segment `i+1` exists and starts at or below `up_to` (the active segment is never deleted; no mid-segment truncation).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/varve-log/tests/trim.rs`:
 
@@ -2359,12 +2359,12 @@ async fn trim_at_zero_is_a_no_op() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-log --test trim`
 Expected: FAIL — no method `trim` on the trait.
 
-- [ ] **Step 3: Minimal implementation**
+- [x] **Step 3: Minimal implementation**
 
 `crates/varve-log/src/log.rs` — add to the `Log` trait (after `read_range`, before `tail`):
 
@@ -2520,12 +2520,12 @@ fn trim_sync(inner: &Inner, up_to: LogPosition) -> Result<(), LogError> {
         }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p varve-log && cargo test -p varve-engine && cargo test --workspace`
 Expected: 6 new trim tests pass; every existing log/recovery/crash test still green (the memory-log rewrite is behavior-identical for append/read).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-log/ crates/varve-engine/
@@ -2544,7 +2544,7 @@ git commit -m "feat: Log::trim with whole-segment deletion and stable positions"
 - Produces: `varve_plan::effective_bounds(stmt: &QueryStmt, now: Instant) -> TemporalBounds` — today's private function made `pub`, body unchanged.
 - Produces: `varve_plan::iid_point(where_clause: &Option<Expr>, graph: &str, table: &str) -> Option<Iid>` — `Some(Iid)` iff the WHERE clause is `v._id = <literal>` with an id-able literal (Int/Str/Bool/Bytes-representable; Float/Null → `None`). Spec §10: "IID point/range predicates (from `_id` equality)".
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `crates/varve-plan/tests/exec_test.rs`:
 
@@ -2625,12 +2625,12 @@ mod pushdown {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-plan --test exec_test pushdown`
 Expected: FAIL — `effective_bounds`/`iid_point` not exported.
 
-- [ ] **Step 3: Minimal implementation**
+- [x] **Step 3: Minimal implementation**
 
 `crates/varve-plan/src/exec.rs`:
 - change `fn effective_bounds(` to `pub fn effective_bounds(` (rustdoc already present).
@@ -2677,12 +2677,12 @@ pub use exec::{
 };
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p varve-plan`
 Expected: all pass (6 new pushdown tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-plan/
@@ -2738,7 +2738,7 @@ pub(crate) async fn merged_snapshot(
 - Consumes: `snapshot_entities`, `encode_block`/`PageMeta` (Tasks 5–6), `keys`/`ObjectStore`/`CachedStore`/`MemoryCache`/`TrieEntry` (Tasks 1–4), `effective_bounds`/`iid_point` (Task 8).
 - Interim wiring (replaced by Task 11): `Db::open_with`/`Db::local` construct a memory store — harmless because nothing writes to storage until Task 10's flush, and Task 11 lands config selection + recovery together.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/varve-engine/src/scan.rs` (tests first; module body in Step 3):
 
@@ -2948,12 +2948,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-engine scan`
 Expected: FAIL — modules not defined (wire `mod scan; mod state;` into `lib.rs` first so failures are about the items).
 
-- [ ] **Step 3: Minimal implementation**
+- [x] **Step 3: Minimal implementation**
 
 `crates/varve-engine/Cargo.toml` — add to `[dependencies]`:
 
@@ -3276,12 +3276,12 @@ fn apply(state: &WriterState, staged: &mut [Staged]) -> Result<(), String> {
     }
 ```
 
-- [ ] **Step 4: Run the full workspace to verify nothing regressed**
+- [x] **Step 4: Run the full workspace to verify nothing regressed**
 
 Run: `cargo test --workspace`
 Expected: all pass — 7 new engine scan tests; every existing engine/varve e2e test (walking skeleton, temporal, durability, mutations, concurrency) green: with an empty trie inventory the merged scan reduces exactly to the old live-only path.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-engine/ Cargo.lock
@@ -3305,7 +3305,7 @@ git commit -m "feat: merged live+persisted bitemporal scan behind one table-stat
 - Produces: `LiveTable::last_system_from(&self) -> Option<Instant>` — the max `system_from` ever appended (already tracked privately); stamps `BlockManifest::max_system_time_us` so the clock floor survives a trimmed log even when the flushed events came from replay, not fresh resolves.
 - Changes: `WriterConfig { window, max_bytes, max_block_rows: usize, flush_interval: Duration }` (defaults 100_000 / 300 s; `Duration::ZERO` disables the timer); `WriterState` gains `next_block_id: u64` and `durable_watermark: LogPosition`; the log-flush updates `durable_watermark = first.advance(batch_len)` (decision 6); `replay` additionally returns the watermark.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/varve-engine/src/flush.rs` (tests first; module body in Step 3):
 
@@ -3534,12 +3534,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p varve-engine flush`
 Expected: FAIL — `WriterState` has no `next_block_id`/`durable_watermark`, `WriterConfig` has no `max_block_rows`/`flush_interval`, `flush_block` missing (add `mod flush;` to `lib.rs` first).
 
-- [ ] **Step 3: Minimal implementation**
+- [x] **Step 3: Minimal implementation**
 
 `crates/varve-index/src/live.rs` — add next to `event_count`:
 
@@ -3890,12 +3890,12 @@ async fn replay(
 
 `Db::memory()` passes `(…, 0, LogPosition::ZERO)`; `Db::open_with`/`Db::local` pass the replay watermark and `next_block_id: 0` (manifest recovery lands in Task 11).
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p varve-engine && cargo test --workspace`
 Expected: 6 new flush tests pass; all existing tests green (default 100k threshold + 300 s timer are unreachable in existing tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-engine/ crates/varve-index/
@@ -3918,7 +3918,7 @@ git commit -m "feat: writer-loop block flush with manifest commit point and log 
 - Produces: config surface — `[storage] backend = "memory"|"local"` (default `memory`), `[storage.local] dir`, `[storage] max_block_rows` (default `100000`), `[storage] flush_interval_ms` (default `300000`, `0` disables), `[cache] memory_max_bytes` (default `536870912`). NEW error `EngineError::VolatileBlockStore` for `log=local` + `storage=memory` (decision 11).
 - Changes: `Db::local(dir)` layout — log at `dir/log`, store at `dir/store` (decision 11; dev, no migration).
 
-- [ ] **Step 1: Write the failing e2e test**
+- [x] **Step 1: Write the failing e2e test**
 
 `crates/varve/tests/blocks.rs`:
 
@@ -4194,12 +4194,12 @@ And an in-module recovery test in `crates/varve-engine/src/db.rs` (append inside
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p varve --test blocks && cargo test -p varve-engine db`
 Expected: FAIL — `VolatileBlockStore` missing, `[storage]` ignored (flush never configured), `recover` not defined.
 
-- [ ] **Step 3: Minimal implementation**
+- [x] **Step 3: Minimal implementation**
 
 `crates/varve-engine/src/registries.rs`:
 
@@ -4478,12 +4478,12 @@ fn local_config(dir: &Path) -> Config {
 
 (Existing durability tests keep passing: the default 100k threshold + 300 s timer never fire within them.)
 
-- [ ] **Step 4: Run the full gate**
+- [x] **Step 4: Run the full gate**
 
 Run: `just check`
 Expected: fmt clean, clippy clean, all workspace tests pass (4 new e2e blocks tests + 2 new recovery unit tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/varve-engine/ crates/varve/ Cargo.lock
@@ -4501,7 +4501,7 @@ git commit -m "feat: Db::open recovery from block manifest with storage and cach
 - Consumes: `arb_history(max_events)`, `arb_bounds()` (`varve_testkit::strategy`, slice 2); `encode_block`, `decode_meta` implicitly via `EncodedBlock.pages`, `PageMeta::selected`, `snapshot_entities`, `decode_events`, `LiveTable` (Tasks 5–6).
 - Roadmap: "same op history, randomized flush points → identical query results as never-flushed reference." Pure (no storage, no engine) so 10k cases run fast in CI; the nightly job raises `PROPTEST_CASES` (slice-2 pattern). Because the merge loop applies `PageMeta::selected` with each case's bounds, this property also fuzzes the prune rules against erase/delete-laden histories.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/varve-testkit/tests/flush_equivalence.rs`:
 
@@ -4610,17 +4610,17 @@ proptest! {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it runs RED-capable**
+- [x] **Step 2: Run test to verify it runs RED-capable**
 
 Run: `cargo test -p varve-testkit --test flush_equivalence`
 Expected: compiles and PASSES if Tasks 5–6 are correct — this is an equivalence property over already-implemented code, so "failing first" means: temporarily break the merge (e.g. swap `desc.into_iter().rev()` to `desc.into_iter()` in the test's `merged`) and confirm proptest finds a counterexample within seconds, then restore. That confirms the property has teeth.
 
-- [ ] **Step 3: Run at full case count**
+- [x] **Step 3: Run at full case count**
 
 Run: `PROPTEST_CASES=10000 cargo test -p varve-testkit --test flush_equivalence --release`
 Expected: PASS within a couple of minutes.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add crates/varve-testkit/
@@ -4641,7 +4641,7 @@ git commit -m "test: flush-boundary property — randomized flush points match n
 - The child now opens via config with `max_block_rows = K` and BOTH backends local, so the K-th ack trips a real block flush during every run — all five fault points now exercise the blocks+manifest recovery path. Roadmap exit criterion: "crash matrix extended with kill-during-flush (manifest absent ⇒ clean replay, no corruption)".
 - Note on double-apply: a killed `post-manifest-put` leaves manifest + untrimmed log; replay-from-watermark not re-applying those records is pinned DETERMINISTICALLY by `recover_skips_records_below_the_manifest_watermark` (Task 11) — the matrix here pins the end-to-end contract (`survived == acked`, clean reopen).
 
-- [ ] **Step 1: Update the harness (child first)**
+- [x] **Step 1: Update the harness (child first)**
 
 `crates/varve-testkit/Cargo.toml` — `[dependencies]` additions:
 
@@ -4739,7 +4739,7 @@ async fn main() {
 }
 ```
 
-- [ ] **Step 2: Extend the matrix (parent)**
+- [x] **Step 2: Extend the matrix (parent)**
 
 `crates/varve-testkit/tests/crash_recovery.rs` — changes:
 
@@ -4861,12 +4861,12 @@ async fn crash_matrix() {
 }
 ```
 
-- [ ] **Step 3: Run the matrix**
+- [x] **Step 3: Run the matrix**
 
 Run: `cargo test -p varve-testkit --test crash_recovery` then `just crash` (10 iterations, release)
 Expected: PASS for all five points, no flake across iterations. (CI's `crash-matrix` job runs this same test at `VARVE_CRASH_ITERS=100` — no workflow change needed.)
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add crates/varve-testkit/ Cargo.lock
@@ -4884,7 +4884,7 @@ git commit -m "test: crash matrix covers kill-during-flush at the manifest commi
 - Roadmap exit criterion: "1M-event ingest → restart → correct temporal queries with < 100ms warm point lookup". Like slice 3's `write_bench`, this is a smoke example whose printed numbers go into STATUS.md — not a CI-gated benchmark (that's slice 11). Correctness IS asserted (right row, right value); the latency threshold is printed as PASS/FAIL.
 - Consumes: multi-node `INSERT` (slice 1), `Db::open` with `[storage]` (Task 11), IID point pushdown (Tasks 8–9).
 
-- [ ] **Step 1: Write the example**
+- [x] **Step 1: Write the example**
 
 `crates/varve/examples/block_bench.rs`:
 
@@ -4989,7 +4989,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Run: `cargo run --release --example block_bench -p varve`
 Expected output shape (numbers vary by machine):
@@ -5004,7 +5004,7 @@ full scan after restart: 1000000 rows OK
 
 If the warm lookup prints FAIL, treat it as a defect to fix within this slice (the IID pushdown path in Tasks 8–9 exists precisely for this) — do not weaken the criterion.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add crates/varve/examples/
@@ -5015,16 +5015,16 @@ git commit -m "feat: block_bench example — 1M-event ingest, restart, warm poin
 
 ## Slice exit checklist
 
-- [ ] `just check` green (fmt + clippy `-D warnings` + full workspace tests).
-- [ ] `just crash` green (5-point matrix × 10 iterations, release).
-- [ ] `PROPTEST_CASES=10000 cargo test -p varve-testkit --release` green (equivalence + flush-equivalence).
-- [ ] `cargo run --release --example block_bench -p varve` — record ingest rate, reopen time, cold/warm point-lookup latencies in STATUS.md; warm < 100 ms.
-- [ ] Existing demos still green: `cargo run --example hello -p varve`, `cargo run --example time_travel -p varve`, `cargo run --release --example write_bench -p varve`.
-- [ ] Update `docs/plans/STATUS.md`:
+- [x] `just check` green (fmt + clippy `-D warnings` + full workspace tests).
+- [x] `just crash` green (5-point matrix × 10 iterations, release).
+- [x] `PROPTEST_CASES=10000 cargo test -p varve-testkit --release` green (equivalence + flush-equivalence).
+- [x] `cargo run --release --example block_bench -p varve` — record ingest rate, reopen time, cold/warm point-lookup latencies in STATUS.md; warm < 100 ms.
+- [x] Existing demos still green: `cargo run --example hello -p varve`, `cargo run --example time_travel -p varve`, `cargo run --release --example write_bench -p varve`.
+- [x] Update `docs/plans/STATUS.md`:
   - Current position → slice 4 ✅ COMPLETE, demo command `cargo run --release --example block_bench -p varve`; next action = generate the slice-5 detailed plan (S3 backends, disk cache, capability probe — spec §6/§9/§12, D5/D7) with the writing-plans skill.
   - Environment facts → new dependency pins as resolved (`object_store` 0.13.x — MUST track datafusion's, re-derive with `cargo tree -p datafusion | grep object_store`; `bytes` 1.x; `futures` 0.3.x); `varve-engine` now has a `fault-injection` feature (same pattern/caveats as `varve-log`'s); `Db::local(dir)` layout is now `dir/log` + `dir/store`.
   - Decisions → transcribe this plan's "Design decisions" 1–15 (abbreviated), explicitly including: valid-axis pruning deliberately absent (decision 4 — the reported-`_valid_to` clipping subtlety), manifest floors (`max_tx_id`/`max_system_time_us`) required once the log trims, `VolatileBlockStore` config rule, `BuildContext` STILL not needed (cache is engine composition — discharges the slice-4 revisit; slice 5's disk tier is the next checkpoint), flush-failure observability deferred to slice 10 (add to open items), GC of orphaned data/meta objects deferred to slice 8 (add to open items).
   - Slice log table row for slice 4 (tests count, bench numbers).
-- [ ] Tick every slice-4 checkbox in `docs/plans/varve-v1-roadmap.md`.
-- [ ] Commit: `git add docs/ && git commit -m "docs: slice 4 complete — blocks, persisted scan, restart; STATUS and roadmap updated"`.
-- [ ] Never leave red tests at a session boundary (roadmap session protocol).
+- [x] Tick every slice-4 checkbox in `docs/plans/varve-v1-roadmap.md`.
+- [x] Commit: `git add docs/ && git commit -m "docs: slice 4 complete — blocks, persisted scan, restart; STATUS and roadmap updated"`.
+- [x] Never leave red tests at a session boundary (roadmap session protocol).

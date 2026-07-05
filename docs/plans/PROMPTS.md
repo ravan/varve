@@ -26,6 +26,8 @@ Requirements:
   commit step. TDD is non-negotiable. No placeholders.
 - Cover the slice's roadmap task list completely and end with the slice exit checklist
   (including updating STATUS.md and ticking the roadmap boxes).
+- We in development. Never any backward compatibility, always production code.
+- Write plan in chuncks to prevent Claude API errors for too large plan.
 - Verify claimed APIs against the pinned dependency versions in Cargo.toml (and note,
   as in slice 1, that test code is the contract where sketches must adapt).
 - Save as docs/plans/<today's date>-slice-<NN>-<kebab-name>.md, run the writing-plans

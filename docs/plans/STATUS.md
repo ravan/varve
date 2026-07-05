@@ -5,24 +5,27 @@
 
 ## Current position
 
-- **Current slice:** 3 (durability: log, group commit, crash safety) — ✅ COMPLETE
-  (2026-07-05, 1 session, SDD, 12 tasks). Writes now flow through a log-serialized writer loop
-  with group commit onto a pluggable `Log` (new `varve-log` crate: `Log` trait + prost record
-  envelope + `memory`/`local` backends — CRC32C frames, fsync-before-ack, torn-tail recovery).
-  The loop resolves DML serially, group-commits to the log, applies to the live index ONLY after
-  durability, then acks — so an acked tx is both durable and visible, and concurrent `execute()`
-  is now supported (slice-2 single-writer caveat + DELETE `await_holding_lock` dissolved).
-  `Db::open(Config)` selects the backend by registry name and replays the log into the live index
-  on startup. A `kill -9` crash matrix in `varve-testkit` proves the recovery contract.
-  Demo: `cargo run --release --example write_bench -p varve`.
-- **Next action:** EXECUTE the slice-4 detailed plan `docs/plans/2026-07-05-slice-04-blocks.md`
-  (✅ written + committed 2026-07-05, 14 tasks, SDD/executing-plans) — blocks & persisted scan:
-  `varve-storage` crate (ObjectStore trait over `object_store` 0.13 — datafusion already pins it),
-  spec-§9 key layout, manifest commit point, paged block format, merged live∪persisted scan,
-  `Log::trim`, restart from manifest + log tail, crash-matrix flush points, 1M-event bench.
-  Read the plan's "Design decisions" 1–15 first — notably: valid-axis page pruning is deliberately
-  ABSENT (it would corrupt reported `_valid_to`), and `BuildContext` is still NOT needed (cache
-  wraps the store by engine composition, not in a factory).
+- **Current slice:** 4 (blocks: flush to object storage, persisted scan, restart) — ✅ COMPLETE
+  (2026-07-05, 1 session, SDD, 14 tasks). The live index now flushes to object storage as Arrow
+  block files with a protobuf manifest as the atomic commit point; queries merge live ∪ persisted
+  events with bitemporal resolution + page pruning; `Db::open` restarts from the latest manifest +
+  log tail. New `varve-storage` crate: sovereignty-constrained `ObjectStore` trait (put/get/get_range/
+  list ONLY) over `object_store` 0.13, spec-§9 key layout (XTDB lex-hex trie keys), `BlockManifest`
+  protobuf, memory `CacheTier`. `varve-index` gained the paged block codec (`encode_block`/`decode_meta`/
+  `PageMeta` prune rules) + source-agnostic `snapshot_entities`; `varve-log` gained `Log::trim`; the
+  writer loop flushes at `max_block_rows`/timer (data+meta PUTs → manifest PUT = commit → atomic
+  live-reset → log trim). A `kill -9` crash matrix covers kill-during-flush at the manifest commit point.
+  Demo: `cargo run --release --example block_bench -p varve`.
+- **Next action:** GENERATE the slice-5 detailed plan (S3-API backends, disk cache, capability probe —
+  spec §6/§9/§12, D5/D7) with the writing-plans skill, commit it, then execute. Slice 5 adds real
+  S3-compatible `ObjectStore` backends (Garage/Ceph/SeaweedFS via `object_store`), a disk `CacheTier`
+  (registry-by-name selection — the deferred cache registry), and the capability probe for optional
+  conditional-PUT. **Revisit `BuildContext` here:** it is STILL not needed for slice 4 (cache wraps the
+  store by engine composition), but a disk cache tier selected by name is the next checkpoint for whether
+  a factory needs another *component*.
+- **Slice 3 (durability: log, group commit, crash safety):** ✅ COMPLETE (2026-07-05). Log-serialized
+  writer loop + group commit onto a pluggable `Log` (`varve-log`: CRC32C frames, fsync-before-ack,
+  torn-tail recovery); `Db::open` replay; `kill -9` crash matrix. Demo: `cargo run --release --example write_bench -p varve`.
 - **Slice 2 (bitemporal core):** ✅ COMPLETE (2026-07-04). Events + XTDB Ceiling/Polygon port +
   temporal GQL. Demo: `cargo run --example time_travel -p varve`.
 - **Slice 1 (walking skeleton):** ✅ COMPLETE (2026-07-04). INSERT → MATCH end-to-end in memory.
@@ -58,6 +61,13 @@
   group-commit window timer). `varve-log` declares a `fault-injection = []` feature (crash hooks);
   it is enabled workspace-wide only via `varve-testkit`'s dep (feature unification), inert unless
   `VARVE_CRASH_TRIGGER` names an armed file — downstream consumers of `varve` never enable it.
+- **Dependency pins (slice 4, verified live 2026-07-05):** `object_store = "0.13"` (resolved 0.13.2 —
+  MUST track datafusion's transitive pin, same rule as arrow; re-derive `cargo tree -p datafusion | grep
+  object_store`; `Cargo.lock` has exactly one), `bytes = "1"`, `futures = "0.3"` (both already transitive
+  via datafusion). `varve-engine` now ALSO declares a `fault-injection = []` feature (flush crash hooks
+  `pre-manifest-put`/`post-manifest-put`, same pattern/caveats as `varve-log`'s); `varve-testkit` enables it
+  via a direct `varve-engine { features = ["fault-injection"] }` dep so cargo unifies the single engine
+  artifact with the hooks live. `Db::local(dir)` layout is now `dir/log` (log) + `dir/store` (blocks).
 - Gate: `just check` = `cargo fmt --all --check` + `cargo clippy --workspace --all-targets
   -- -D warnings` + `cargo test --workspace`. Same three commands run in CI (`.github/workflows/ci.yml`).
   CI gained a `crash-matrix` job (slice 3): `cargo test -p varve-testkit --release --test
@@ -67,6 +77,52 @@
   byte format, so it is pinned). `.superpowers/` is SDD scratch (self-ignored).
 
 ## Decisions made during implementation
+
+- **2026-07-05 (slice 4) block format + persisted scan (spec §9, design decisions 1–15):** Data file =
+  concatenation of self-contained per-page Arrow IPC streams; the meta file is a single-level page index
+  (one row/page: byte range, row count, min/max `_iid`/`_system_from`/`_valid_from`/`_valid_to`, `has_erase`) —
+  the "footer surrogate" held decoded in memory (full hash-trie meta + property blooms land with slice-8
+  compaction). Pages reuse the golden slice-3 `encode_events`/`decode_events` verbatim; `PAGE_ROWS = 1024`
+  (XTDB pageLimit). `encode_block` is a pure fn of the live table (BTreeMap iid-asc + fixed chunking + stable
+  reversal → `system_from desc` per entity, ties preserved). Arrow IPC block bytes are deliberately NOT
+  golden-pinned (no cross-version guarantee) — round-trip/proptest only; the manifest protobuf wire IS golden-pinned.
+- **2026-07-05 (slice 4) page prune rules (decision 4):** (a) IID point outside `[min_iid, max_iid]` → skip;
+  (b) `min_system_from >= bounds.system.upper && !has_erase` → skip. **The valid axis is deliberately NOT pruned
+  in v1** — a valid-disjoint event still clips the reported `_valid_from`/`_valid_to` of visible rectangles inside
+  the window (slice-2 history-introspection), so dropping its page would corrupt reported ranges even though
+  visibility would survive; a regression test pins the non-pruning. Meta still records valid min/max for slice-8
+  rectangle-aware rules. IID point pushdown comes from `WHERE v._id = <literal>` (Float/Null → unpruned scan).
+- **2026-07-05 (slice 4) manifest = the atomic commit point (spec §9, decisions 5/6):** a database-wide protobuf
+  written as the FULL trie inventory each time; the manifest PUT is the commit (a data/meta object without a
+  manifest entry is invisible garbage). Carries `block_id`, `watermark` (= `append_position.advance(batch_len)`,
+  the flushed-prefix exclusive end — replay is `log.tail(watermark)`), and **`max_tx_id` + `max_system_time_us`
+  floors — REQUIRED because after a `Log::trim` the log alone can no longer provide them**. Key
+  `v1/blocks/<lexhex(block_id)>.manifest`; latest = max parsed block id.
+- **2026-07-05 (slice 4) one lock, atomic swap, keep-serving (decisions 7/8/10):** live table + persisted-trie
+  inventory live under ONE `RwLock<TableState>` — flush swaps atomically, a query snapshots both under one read
+  lock (guard dropped before async GETs, no `await_holding_lock`). Flush order: encode → data PUT → meta PUT →
+  manifest PUT (commit) → one-write-lock (push trie + reset live) → best-effort `log.trim`. On any pre-manifest
+  PUT failure the live table is UNTOUCHED and flush retries next trigger (orphans are invisible; GC = slice 8).
+  `Log::trim` = whole-segment-only (active segment never deleted; memory keeps its next-position counter so
+  positions never regress). Merge order per entity: `block0 asc ++ … ++ live asc` (stable reversal restores ties).
+- **2026-07-05 (slice 4) restart = manifest + log tail (decision, extends slice-3 replay):** `Db::open` reads the
+  latest manifest, replays `log.tail(manifest.watermark)`, restores the persisted inventory from the manifest metas,
+  and re-derives all four floors as `max(manifest, replayed)`: `next_block_id = block_id + 1`, `next_tx_id`,
+  clock floor (`advance_to`), and the writer watermark (monotonic guard). Verified: 1M-event ingest → restart →
+  correct temporal queries, warm point lookup 7.58 ms (< 100 ms exit criterion), full-scan 1M rows after restart.
+- **2026-07-05 (slice 4) `[log] local` + `[storage] memory` is a hard config error (decision 11):**
+  `EngineError::VolatileBlockStore` (flushing would trim the durable log while blocks sit in volatile memory =
+  silent data loss on restart). `Db::local(dir)` configures both durably (`dir/log` + `dir/store`). Config surface:
+  `[storage] backend`/`max_block_rows` (default 100_000)/`flush_interval_ms` (default 300_000, 0 disables),
+  `[storage.local] dir`, `[cache] memory_max_bytes` (default 536_870_912) — integer-bytes convention.
+- **2026-07-05 (slice 4) `CacheTier` = engine composition, NOT a factory (decision 14):** the memory cache wraps
+  the store by plain `CachedStore`/`MemoryCache` composition in `varve-engine`; **`BuildContext` is STILL not
+  needed** (discharges the slice-4 revisit). Registry-by-name cache selection waits for the slice-5 disk tier —
+  that is the next checkpoint for whether a factory needs another *component*.
+- **2026-07-05 (slice 4) block bench (M3 Max, `cargo run --release --example block_bench -p varve`):**
+  1,000,000 events ingested @ **39,816 events/s** (25.12 s); **39 blocks flushed**; reopen (manifest + log tail)
+  **38.18 ms**; point lookup **cold 22.39 ms / warm 7.58 ms** (< 100 ms exit criterion PASS); full scan after
+  restart = 1,000,000 rows. write_bench unaffected (memory 6275 / local-fsync 350 tx/s).
 
 - **2026-07-05 (slice 3) writer loop = the serialization point (spec §3, D3):** `Db::execute`
   parses + submits to a bounded mpsc queue (`SUBMISSION_QUEUE_LEN = 256`); a dedicated tokio task
@@ -231,9 +287,10 @@
   `e5b4519`): full rustdoc sweep on the public `varve-config` API (`Config`/`ConfigSection`/`ConfigError`/
   `Registry`/`ComponentFactory`/`RegistryError`), `cargo doc` warning-free; `Config::from_file` /
   `ConfigError::Io` now directly tested (`config_test.rs::from_file_reads_and_missing_file_is_io_error`).
-  STILL DEFERRED: `BuildContext` factory param — config-only factories still suffice (`log/local` gets
-  its dir from `[log.local]`). Revisit at slice 4/5 when a factory genuinely needs another *component*
-  (e.g. cache tiers) — it is a trait break, cheapest before more backends exist.
+  STILL DEFERRED: `BuildContext` factory param — config-only factories still suffice. **Slice 4 confirmed
+  it is NOT needed** (the memory cache wraps the store by engine composition, not a factory — decision 14).
+  Next checkpoint is slice 5's disk cache tier (registry-by-name): if selecting it needs another *component*,
+  that is the cheapest moment for the trait break, before more backends exist.
 - **Slice-3 fast-follows (non-blocking; whole-branch review triaged, verdict READY TO MERGE):**
   - **T9 apply-failure defense-in-depth (RECOMMENDED, schedule for slice 10):** `writer.rs::flush` on an
     apply-failure-after-durable-append acks `CommitFailed` and keeps serving — but that path is PROVABLY
@@ -250,6 +307,25 @@
     Unreachable in v1 (statements come from parsed GQL). Harden both together when it can matter.
   - **T9 `flush` clones every `LogRecord`** (incl. `arrow_ipc`) to build the append arg — doubles peak IPC
     memory for large batches. Move the record out of `Staged` (apply needs only events/receipt/ack). Efficiency.
+- **Slice-4 fast-follows (non-blocking; whole-branch review verdict = READY TO MERGE):**
+  - **Flush-equivalence property tests the SHIPPED merge, not a copy (RECOMMENDED, from Task 12 review + whole-branch):**
+    `varve-testkit/tests/flush_equivalence.rs` reimplements a local `merged()` line-for-line identical to
+    `varve-engine::scan::merged_snapshot` — over 10k randomized flush points it guards the decision-9 codec+prune+merge
+    algorithm, but the shipped `merged_snapshot`/`Db` path is only covered end-to-end by Task 11 `blocks.rs` + Task 13's
+    crash matrix, NOT over randomized flush points. Residual risk = the copy drifting from `merged_snapshot`. FAST-FOLLOW:
+    add a `Db`-driven flush-equivalence variant at a modest case count (~256) vs a memory store to pin the two together.
+    (Was flagged mid-slice via AskUserQuestion; user away — held to the plan's explicit "pure/fast CI" mandate and
+    escalated to the whole-branch review, which ruled it an acceptable fast-follow.)
+  - **Flush-failure observability (slice 10):** on any PUT failure the flush silently keeps serving + retries next
+    trigger (decision 10) — no log/metric surface yet. Add when observability lands (slice 10).
+  - **GC of orphaned data/meta objects (slice 8):** a crash between data/meta PUTs and the manifest PUT leaves
+    invisible orphan objects; `Log::trim` also never GCs S3 objects. Sweep with compaction/GC (slice 8).
+  - **`VolatileBlockStore` guard is name-based (later slice):** `log=local && storage=memory` is rejected by backend
+    NAME; a custom durable-log + volatile-custom-store pairing would bypass it. Base it on a durability *property* when
+    custom backends arrive.
+  - **`get_range` offset validation on recovery (defer, from T9 review):** persisted page byte ranges come from trusted
+    meta; `decode_events` errors (no panic) on a bad page. When loading externally-mutable real objects becomes a threat
+    model, validate `offset..offset+len` against the data length as defense-in-depth.
 
 ## Slice log
 
@@ -259,7 +335,7 @@
 | 1 walking skeleton | ✅ complete | 1 | `cargo run --example hello -p varve` | INSERT→MATCH e2e in memory; +`varve-gql`(lexer/parser/AST), `varve-index`(LiveTable→Arrow), `varve-plan`(DataFusion), `varve-engine`(Db), `varve` facade; datafusion 54/arrow 58 pinned; 44 workspace tests |
 | 2 bitemporal core | ✅ complete | 1 | `cargo run --example time_travel -p varve` | events + XTDB Ceiling/Polygon port + per-entity resolve; `varve-testkit` reference model + proptest equivalence (10k CI / 200k nightly); temporal GQL (`FOR VALID_TIME`/`SYSTEM_TIME`, `INSERT … VALID`, `MATCH … DELETE`, history fns); `MonotonicClock`; `TxReceipt.system_time`; lock-split query; ~125 workspace tests |
 | 3 durability (log) | ✅ complete | 1 | `cargo run --release --example write_bench -p varve` | `varve-log` crate: `Log` trait + prost envelope + `memory`/`local` backends (CRC32C frames, fsync-before-ack, torn-tail recovery) + writer loop group commit + `Db::open` replay + pluggable `Clock`/`Registries` + `kill -9` crash matrix; bench memory 6226 / local 340 tx/s (M3 Max); 181 workspace tests |
-| 4 blocks & persisted scan | plan ready | – | – | detailed plan: 2026-07-05-slice-04-blocks.md (14 tasks) |
+| 4 blocks & persisted scan | ✅ complete | 1 | `cargo run --release --example block_bench -p varve` | `varve-storage` crate (sovereign `ObjectStore` over object_store 0.13, §9 lex-hex keys, `BlockManifest` commit point, memory cache) + paged block codec/prune in `varve-index` + `Log::trim` + one-lock merged live∪persisted scan + writer-loop flush (data/meta→manifest→reset→trim) + `Db::open` manifest+log-tail recovery + kill-during-flush crash matrix + flush-equivalence proptest; bench 1M events @ 39.8k ev/s, reopen 38 ms, warm point lookup 7.6 ms (<100 ms); 245 workspace tests |
 | 5 s3 backends & caches | not started | – | – | no detailed plan yet |
 | 6 edges & traversal | not started | – | – | no detailed plan yet |
 | 7 GQL completion & TCK | not started | – | – | no detailed plan yet |

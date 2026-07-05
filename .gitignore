@@ -9,3 +9,5 @@ refs/
 .venv/
 .tokensave/
 .DS_Store
+/.agents/skills
+/skills-lock.json
