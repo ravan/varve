@@ -30,7 +30,7 @@ impl Registries {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use varve_config::ConfigSection;
+    use varve_config::{BuildContext, ConfigSection};
 
     #[test]
     fn builtins_cover_log_and_clock() {
@@ -45,11 +45,11 @@ mod tests {
         let registries = Registries::with_builtins();
         let _log = registries
             .log
-            .build("memory", &ConfigSection::empty())
+            .build("memory", &ConfigSection::empty(), &BuildContext::empty())
             .unwrap();
         let clock = registries
             .clock
-            .build("system", &ConfigSection::empty())
+            .build("system", &ConfigSection::empty(), &BuildContext::empty())
             .unwrap();
         assert!(clock.next().as_micros() > 0);
     }

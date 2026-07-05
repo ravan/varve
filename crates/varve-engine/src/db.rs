@@ -9,7 +9,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
-use varve_config::{Config, ConfigError, ConfigSection, RegistryError};
+use varve_config::{BuildContext, Config, ConfigError, ConfigSection, RegistryError};
 use varve_gql::ast::Statement;
 use varve_gql::token::GqlError;
 use varve_index::{decode_events, IndexError, LiveTable};
@@ -207,7 +207,7 @@ impl Db {
     pub async fn open_with(config: &Config, registries: &Registries) -> Result<Db, EngineError> {
         let log_section = config.section("log").unwrap_or_else(ConfigSection::empty);
         let log_backend = log_section.backend().unwrap_or("memory").to_string();
-        let log = registries.log.build(&log_backend, &log_section)?;
+        let log = registries.log.build(&log_backend, &log_section, &BuildContext::empty())?;
 
         let storage_section = config
             .section("storage")
@@ -220,7 +220,7 @@ impl Db {
         }
         let backend = registries
             .storage
-            .build(&storage_backend, &storage_section)?;
+            .build(&storage_backend, &storage_section, &BuildContext::empty())?;
         let cache_tuning: CacheTuning = config
             .section("cache")
             .unwrap_or_else(ConfigSection::empty)
@@ -233,7 +233,7 @@ impl Db {
         let clock_section = config.section("clock").unwrap_or_else(ConfigSection::empty);
         let clock = registries
             .clock
-            .build(clock_section.backend().unwrap_or("system"), &clock_section)?;
+            .build(clock_section.backend().unwrap_or("system"), &clock_section, &BuildContext::empty())?;
 
         let log_tuning: LogTuning = log_section.get()?;
         let storage_tuning: StorageTuning = storage_section.get()?;

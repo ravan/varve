@@ -1,6 +1,6 @@
 use crate::store::ObjectStore;
 use std::sync::Arc;
-use varve_config::{ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
 
 /// Volatile in-process store (tests, `Db::memory()`). Contents live only for
 /// the process lifetime — restart loses everything.
@@ -16,7 +16,7 @@ impl ComponentFactory<dyn ObjectStore> for MemoryStoreFactory {
         "memory"
     }
 
-    fn build(&self, _cfg: &ConfigSection) -> Result<Arc<dyn ObjectStore>, RegistryError> {
+    fn build(&self, _cfg: &ConfigSection, _ctx: &BuildContext) -> Result<Arc<dyn ObjectStore>, RegistryError> {
         Ok(memory_store())
     }
 }

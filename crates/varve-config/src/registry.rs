@@ -1,5 +1,6 @@
 use crate::{ConfigError, ConfigSection};
-use std::collections::BTreeMap;
+use std::any::{Any, TypeId};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -38,6 +39,42 @@ pub enum RegistryError {
     Config(#[from] ConfigError),
 }
 
+/// Already-built components later factories may depend on — spec §4's
+/// `ctx` parameter. Typed lookup: components keyed by FULL type
+/// (e.g. `Arc<dyn ObjectStore>`), and `get` clones the stored value out, so
+/// components cheap-to-clone handles (`Arc`s) by convention.
+///
+/// engine populates in dependency order (storage first), so
+/// factory only see components built before own subsystem — if a
+/// factory needs something absent it fails with actionable
+/// [`RegistryError::Build`], never panic.
+#[derive(Default)]
+pub struct BuildContext {
+    components: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
+}
+
+impl BuildContext {
+    /// No components — common case for config-only factories and tests.
+    pub fn empty() -> BuildContext {
+        BuildContext::default()
+    }
+
+    /// Stores `component` under its type; second insert of same type
+    /// replaces first.
+    pub fn insert<C: Clone + Send + Sync + 'static>(&mut self, component: C) {
+        self.components
+            .insert(TypeId::of::<C>(), Box::new(component));
+    }
+
+    /// Clones component of type `C` out, if one inserted.
+    pub fn get<C: Clone + Send + Sync + 'static>(&self) -> Option<C> {
+        self.components
+            .get(&TypeId::of::<C>())
+            .and_then(|b| b.downcast_ref::<C>())
+            .cloned()
+    }
+}
+
 /// One named, pluggable implementation of `T` (spec §4 extension point:
 /// `Log`, `Clock`, and future backends are all built this way). `name()` is
 /// the exact string a `[section] backend = "..."` key selects; `build` reads
@@ -50,7 +87,9 @@ pub trait ComponentFactory<T: ?Sized>: Send + Sync {
     /// Builds one instance of `T` from `cfg` — the section the instance was
     /// selected under, e.g. `[log]` for a log factory (not a pre-narrowed
     /// child section; a factory reaches into its own nested table itself).
-    fn build(&self, cfg: &ConfigSection) -> Result<Arc<T>, RegistryError>;
+    /// `ctx` carries already-built components the factory may consume
+    /// (spec §4) or ignores for config-only builds.
+    fn build(&self, cfg: &ConfigSection, ctx: &BuildContext) -> Result<Arc<T>, RegistryError>;
 }
 
 /// A named lookup table of [`ComponentFactory`]s for one component kind
@@ -87,12 +126,17 @@ impl<T: ?Sized> Registry<T> {
     }
 
     /// Looks up `name` and builds it from `cfg` (spec §4: this is the
-    /// config → live-component step, e.g. `log.build("local", &log_section)`
+    /// config → live-component step, e.g. `log.build("local", &log_section, &ctx)`
     /// for `[log] backend = "local"`). Errors with
     /// [`RegistryError::Unknown`] if no factory answers to `name`.
-    pub fn build(&self, name: &str, cfg: &ConfigSection) -> Result<Arc<T>, RegistryError> {
+    pub fn build(
+        &self,
+        name: &str,
+        cfg: &ConfigSection,
+        ctx: &BuildContext,
+    ) -> Result<Arc<T>, RegistryError> {
         match self.factories.get(name) {
-            Some(f) => f.build(cfg),
+            Some(f) => f.build(cfg, ctx),
             None => Err(RegistryError::Unknown {
                 kind: self.kind,
                 name: name.to_string(),
