@@ -489,6 +489,8 @@ mod tests {
                 system_from: Instant::from_micros(sf),
                 valid_from: Instant::from_micros(sf),
                 valid_to: Instant::END_OF_TIME,
+                src: None,
+                dst: None,
                 op: Op::Put {
                     labels: vec!["P".into()],
                     doc: Doc::new(),

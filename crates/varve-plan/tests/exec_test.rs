@@ -17,6 +17,8 @@ fn person(n: u8, sf: i64, name: &str, age: i64) -> Event {
         system_from: Instant::from_micros(sf),
         valid_from: Instant::from_micros(sf),
         valid_to: Instant::END_OF_TIME,
+        src: None,
+        dst: None,
         op: Op::Put {
             labels: vec!["Person".into()],
             doc,
@@ -84,6 +86,8 @@ async fn current_query_sees_only_the_latest_version() {
         system_from: Instant::from_micros(10),
         valid_from: Instant::from_micros(10),
         valid_to: Instant::END_OF_TIME,
+        src: None,
+        dst: None,
         op: Op::Put {
             labels: vec!["Person".into()],
             doc,
@@ -122,6 +126,8 @@ async fn for_system_time_as_of_travels_back() {
         system_from: Instant::from_micros(10),
         valid_from: Instant::from_micros(10),
         valid_to: Instant::END_OF_TIME,
+        src: None,
+        dst: None,
         op: Op::Put {
             labels: vec!["Person".into()],
             doc,

@@ -32,6 +32,8 @@ fn event_schema() -> Arc<Schema> {
         Field::new("_system_from", ts(), false),
         Field::new("_valid_from", ts(), false),
         Field::new("_valid_to", ts(), false),
+        Field::new("_src_iid", DataType::FixedSizeBinary(16), true),
+        Field::new("_dst_iid", DataType::FixedSizeBinary(16), true),
         Field::new("op", DataType::UInt8, false),
         Field::new("payload", DataType::Binary, true),
     ]))
@@ -95,6 +97,8 @@ pub fn encode_events(events: &[Event]) -> Result<Vec<u8>, IndexError> {
         let mut system_from_b = TimestampMicrosecondBuilder::new().with_timezone("UTC");
         let mut valid_from_b = TimestampMicrosecondBuilder::new().with_timezone("UTC");
         let mut valid_to_b = TimestampMicrosecondBuilder::new().with_timezone("UTC");
+        let mut src_b = FixedSizeBinaryBuilder::new(16);
+        let mut dst_b = FixedSizeBinaryBuilder::new(16);
         let mut op_b = UInt8Builder::new();
         let mut payload_b = BinaryBuilder::new();
         for event in events {
@@ -102,6 +106,18 @@ pub fn encode_events(events: &[Event]) -> Result<Vec<u8>, IndexError> {
             system_from_b.append_value(event.system_from.as_micros());
             valid_from_b.append_value(event.valid_from.as_micros());
             valid_to_b.append_value(event.valid_to.as_micros());
+            match &event.src {
+                Some(iid) => src_b
+                    .append_value(iid.as_bytes())
+                    .map_err(|e| IndexError::Codec(e.to_string()))?,
+                None => src_b.append_null(),
+            }
+            match &event.dst {
+                Some(iid) => dst_b
+                    .append_value(iid.as_bytes())
+                    .map_err(|e| IndexError::Codec(e.to_string()))?,
+                None => dst_b.append_null(),
+            }
             match &event.op {
                 Op::Put { labels, doc } => {
                     op_b.append_value(OP_PUT);
@@ -122,6 +138,8 @@ pub fn encode_events(events: &[Event]) -> Result<Vec<u8>, IndexError> {
             Arc::new(system_from_b.finish()),
             Arc::new(valid_from_b.finish()),
             Arc::new(valid_to_b.finish()),
+            Arc::new(src_b.finish()),
+            Arc::new(dst_b.finish()),
             Arc::new(op_b.finish()),
             Arc::new(payload_b.finish()),
         ];
@@ -145,13 +163,29 @@ pub fn decode_events(bytes: &[u8]) -> Result<Vec<Event>, IndexError> {
         let system_from = downcast::<TimestampMicrosecondArray>(&batch, 1)?;
         let valid_from = downcast::<TimestampMicrosecondArray>(&batch, 2)?;
         let valid_to = downcast::<TimestampMicrosecondArray>(&batch, 3)?;
-        let ops = downcast::<UInt8Array>(&batch, 4)?;
-        let payloads = downcast::<BinaryArray>(&batch, 5)?;
+        let src_col = downcast::<FixedSizeBinaryArray>(&batch, 4)?;
+        let dst_col = downcast::<FixedSizeBinaryArray>(&batch, 5)?;
+        let ops = downcast::<UInt8Array>(&batch, 6)?;
+        let payloads = downcast::<BinaryArray>(&batch, 7)?;
         for row in 0..batch.num_rows() {
             let iid_bytes: [u8; 16] = iids
                 .value(row)
                 .try_into()
                 .map_err(|_| codec_err("_iid column value is not 16 bytes"))?;
+            let src = if src_col.is_null(row) {
+                None
+            } else {
+                let mut b = [0u8; 16];
+                b.copy_from_slice(src_col.value(row));
+                Some(Iid::from_bytes(b))
+            };
+            let dst = if dst_col.is_null(row) {
+                None
+            } else {
+                let mut b = [0u8; 16];
+                b.copy_from_slice(dst_col.value(row));
+                Some(Iid::from_bytes(b))
+            };
             let op = match ops.value(row) {
                 OP_PUT => {
                     if payloads.is_null(row) {
@@ -169,6 +203,8 @@ pub fn decode_events(bytes: &[u8]) -> Result<Vec<Event>, IndexError> {
                 system_from: Instant::from_micros(system_from.value(row)),
                 valid_from: Instant::from_micros(valid_from.value(row)),
                 valid_to: Instant::from_micros(valid_to.value(row)),
+                src,
+                dst,
                 op,
             });
         }
@@ -189,6 +225,7 @@ mod tests {
     use super::*;
     use crate::event::{Event, Op};
     use proptest::prelude::*;
+    use std::collections::BTreeMap;
     use varve_types::{Doc, Iid, Instant, Value};
 
     fn iid(n: u8) -> Iid {
@@ -212,6 +249,8 @@ mod tests {
                 system_from: us(10),
                 valid_from: us(5),
                 valid_to: Instant::END_OF_TIME,
+                src: None,
+                dst: None,
                 op: Op::Put {
                     labels: vec!["Person".into(), "Admin".into()],
                     doc,
@@ -222,6 +261,8 @@ mod tests {
                 system_from: us(10),
                 valid_from: us(10),
                 valid_to: Instant::END_OF_TIME,
+                src: None,
+                dst: None,
                 op: Op::Delete,
             },
             Event {
@@ -229,6 +270,8 @@ mod tests {
                 system_from: us(10),
                 valid_from: Instant::MIN,
                 valid_to: Instant::END_OF_TIME,
+                src: None,
+                dst: None,
                 op: Op::Erase,
             },
         ];
@@ -243,6 +286,8 @@ mod tests {
             system_from: us(1),
             valid_from: us(1),
             valid_to: us(2),
+            src: None,
+            dst: None,
             op: Op::Put {
                 labels: vec![],
                 doc: Doc::new(),
@@ -277,6 +322,11 @@ mod tests {
             b.append_value(1);
             Arc::new(b.finish()) as ArrayRef
         };
+        let null_fsb = || {
+            let mut b = FixedSizeBinaryBuilder::new(16);
+            b.append_null();
+            Arc::new(b.finish()) as ArrayRef
+        };
         let mut op_b = UInt8Builder::new();
         op_b.append_value(7);
         let mut payload_b = BinaryBuilder::new();
@@ -288,6 +338,8 @@ mod tests {
                 ts(),
                 ts(),
                 ts(),
+                null_fsb(),
+                null_fsb(),
                 Arc::new(op_b.finish()),
                 Arc::new(payload_b.finish()),
             ],
@@ -324,6 +376,11 @@ mod tests {
             b.append_value(1);
             Arc::new(b.finish()) as ArrayRef
         };
+        let null_fsb = || {
+            let mut b = FixedSizeBinaryBuilder::new(16);
+            b.append_null();
+            Arc::new(b.finish()) as ArrayRef
+        };
         let mut op_b = UInt8Builder::new();
         op_b.append_value(0);
         let mut payload_b = BinaryBuilder::new();
@@ -335,6 +392,8 @@ mod tests {
                 ts(),
                 ts(),
                 ts(),
+                null_fsb(),
+                null_fsb(),
                 Arc::new(op_b.finish()),
                 Arc::new(payload_b.finish()),
             ],
@@ -384,6 +443,8 @@ mod tests {
                 system_from: Instant::from_micros(sf),
                 valid_from: Instant::from_micros(vf),
                 valid_to: Instant::from_micros(vt),
+                src: None,
+                dst: None,
                 op,
             },
         )
@@ -395,5 +456,46 @@ mod tests {
             let bytes = encode_events(&events).unwrap();
             prop_assert_eq!(decode_events(&bytes).unwrap(), events);
         }
+    }
+
+    fn edge_event(n: u8) -> Event {
+        Event {
+            iid: Iid::derive("g", "edges", &[n]),
+            system_from: Instant::from_micros(10),
+            valid_from: Instant::from_micros(10),
+            valid_to: Instant::END_OF_TIME,
+            src: Some(Iid::derive("g", "nodes", &[1])),
+            dst: Some(Iid::derive("g", "nodes", &[2])),
+            op: Op::Put {
+                labels: vec!["KNOWS".into()],
+                doc: BTreeMap::from([("_id".into(), Value::Int(n as i64))]),
+            },
+        }
+    }
+
+    #[test]
+    fn edge_events_round_trip_with_endpoints() {
+        let events = vec![
+            edge_event(1),
+            Event {
+                op: Op::Delete,
+                ..edge_event(1)
+            },
+        ];
+        let bytes = encode_events(&events).unwrap();
+        assert_eq!(decode_events(&bytes).unwrap(), events);
+    }
+
+    #[test]
+    fn node_events_round_trip_with_null_endpoints() {
+        let events = vec![Event {
+            src: None,
+            dst: None,
+            ..edge_event(3)
+        }];
+        let bytes = encode_events(&events).unwrap();
+        let decoded = decode_events(&bytes).unwrap();
+        assert_eq!(decoded[0].src, None);
+        assert_eq!(decoded[0].dst, None);
     }
 }
