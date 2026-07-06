@@ -178,6 +178,19 @@ impl std::fmt::Debug for Db {
     }
 }
 
+/// Task 12 anchor-reachable fast-path artifact, built once by
+/// [`Db::plan_fast_path`] when the query's shape is provably coverable. It is a
+/// pruned-but-complete drop-in for the full-scan input, never a replacement:
+/// when `plan_fast_path` returns `None`, `query` uses the full scan verbatim.
+enum FastPath {
+    /// Fixed homogeneous path (all hops `Edge`, one label + direction, no
+    /// inline edge props, no edge var referenced): the shared reachable-edge
+    /// batch (or `None` when nothing is reachable) fed to EVERY `Edge` spec.
+    FixedEdges(Option<RecordBatch>),
+    /// Single quantified hop: the reachable adjacency fed to the `Expand` spec.
+    QuantifiedAdjacency(Arc<varve_plan::EdgeAdjacency>),
+}
+
 impl Db {
     /// Volatile database: memory log, zero group-commit window (there is no
     /// fsync to amortize — decision 11). Requires a Tokio runtime.
@@ -359,6 +372,12 @@ impl Db {
         // MATCH becomes a left-deep chain of hash joins in `execute_pattern`.
         // The query's temporal bounds flow into every element's snapshot.
         let specs = varve_plan::scan_specs(&q, DEFAULT_GRAPH, self.max_path_depth)?;
+        // Task 12: anchor-reachable edge pruning. When the linear path's start
+        // node is point-anchored and the shape is one the bounded BFS provably
+        // covers with a SUPERSET of the reachable edges, build that pruned
+        // input once here; otherwise `plan_fast_path` returns `None` and every
+        // arm below falls back to the unchanged full-scan input verbatim.
+        let fast_path = self.plan_fast_path(&q, &specs, &bounds).await?;
         let mut inputs = Vec::with_capacity(specs.len());
         for spec in &specs {
             let input = match &spec.kind {
@@ -373,58 +392,231 @@ impl Db {
                     )
                     .await?,
                 ),
-                varve_plan::SpecKind::Edge { label, .. } => varve_plan::ScanInput::Batch(
-                    merged_snapshot(
-                        &self.state,
-                        &self.store,
-                        TableKind::Edges,
-                        label,
-                        &bounds,
-                        None,
-                    )
-                    .await?,
-                ),
+                // Fast path: every fixed `Edge` element shares the one
+                // reachable-edge batch (a superset; the join keys +
+                // `apply_element_predicates` select each element's rows).
+                // Fallback: the full label-filtered edge snapshot, as before.
+                varve_plan::SpecKind::Edge { label, .. } => match &fast_path {
+                    Some(FastPath::FixedEdges(batch)) => {
+                        varve_plan::ScanInput::Batch(batch.clone())
+                    }
+                    _ => varve_plan::ScanInput::Batch(
+                        merged_snapshot(
+                            &self.state,
+                            &self.store,
+                            TableKind::Edges,
+                            label,
+                            &bounds,
+                            None,
+                        )
+                        .await?,
+                    ),
+                },
                 // Quantified hops (task 9): resolve the label-filtered edge
                 // adjacency AT THE QUERY'S TEMPORAL BOUNDS (so AS-OF-time
                 // quantified traversal is correct — an edge invisible at the
                 // bounds never appears), oriented per the hop's direction, and
-                // hand the walk-semantics core the ready-made adjacency.
+                // hand the walk-semantics core the ready-made adjacency. The
+                // fast path (task 12) hands the SAME kind of adjacency, pruned
+                // to nodes reachable from the anchor within `max` hops.
                 varve_plan::SpecKind::Expand {
                     label,
                     direction,
                     props,
                     ..
-                } => {
-                    let adj_direction = match direction {
-                        varve_gql::ast::Direction::Out => crate::scan::AdjDirection::Out,
-                        varve_gql::ast::Direction::In => crate::scan::AdjDirection::In,
-                    };
-                    let entries = crate::scan::edge_adjacency(
-                        &self.state,
-                        &self.store,
-                        label,
-                        props,
-                        adj_direction,
-                        None,
-                        &bounds,
-                    )
-                    .await?;
-                    let adjacency =
-                        varve_plan::EdgeAdjacency::from_entries(entries.into_iter().map(|e| {
-                            (
-                                e.node,
-                                varve_plan::AdjEdge {
-                                    neighbor: e.neighbor,
-                                    edge: e.edge,
-                                },
-                            )
-                        }));
-                    varve_plan::ScanInput::Adjacency(Arc::new(adjacency))
-                }
+                } => match &fast_path {
+                    Some(FastPath::QuantifiedAdjacency(adj)) => {
+                        varve_plan::ScanInput::Adjacency(adj.clone())
+                    }
+                    _ => {
+                        let adj_direction = match direction {
+                            varve_gql::ast::Direction::Out => crate::scan::AdjDirection::Out,
+                            varve_gql::ast::Direction::In => crate::scan::AdjDirection::In,
+                        };
+                        let entries = crate::scan::edge_adjacency(
+                            &self.state,
+                            &self.store,
+                            label,
+                            props,
+                            adj_direction,
+                            None,
+                            &bounds,
+                        )
+                        .await?;
+                        let adjacency =
+                            varve_plan::EdgeAdjacency::from_entries(entries.into_iter().map(|e| {
+                                (
+                                    e.node,
+                                    varve_plan::AdjEdge {
+                                        neighbor: e.neighbor,
+                                        edge: e.edge,
+                                    },
+                                )
+                            }));
+                        varve_plan::ScanInput::Adjacency(Arc::new(adjacency))
+                    }
+                },
             };
             inputs.push(input);
         }
         Ok(varve_plan::execute_pattern(&q, &specs, inputs).await?)
+    }
+
+    /// Task 12 fast-path selection: decide whether this query's shape is one
+    /// the bounded reachable-edge BFS provably covers with a SUPERSET of the
+    /// edges that can lie on a qualifying path, and if so build the pruned
+    /// input. Returns `None` — the caller then uses the full-scan path
+    /// verbatim — for anything not confidently covered (unanchored start, a
+    /// heterogeneous fixed path, a mix of fixed and quantified hops, an edge
+    /// element whose properties the query references, …). Correctness over
+    /// speed: the fast path is a layer over the unchanged, already-correct
+    /// scan, never a replacement, so an unsure verdict simply falls back.
+    async fn plan_fast_path(
+        &self,
+        q: &varve_gql::ast::QueryStmt,
+        specs: &[varve_plan::ScanSpec],
+        bounds: &varve_types::TemporalBounds,
+    ) -> Result<Option<FastPath>, EngineError> {
+        use varve_gql::ast::Direction;
+        // Require a point-anchored start node and at least one hop.
+        let Some(varve_plan::ScanSpec {
+            kind:
+                varve_plan::SpecKind::Node {
+                    iid_point: Some(anchor),
+                    ..
+                },
+            ..
+        }) = specs.first()
+        else {
+            return Ok(None);
+        };
+        let anchor = *anchor;
+        let Some(path) = q.paths.first() else {
+            return Ok(None);
+        };
+        if path.hops.is_empty() {
+            return Ok(None);
+        }
+        let dir_to_adj = |d: Direction| match d {
+            Direction::Out => crate::scan::AdjDirection::Out,
+            Direction::In => crate::scan::AdjDirection::In,
+        };
+
+        // Case B: a single quantified hop `(a)-[:L*m..n]->(b)`. All `max`
+        // levels use the same (label, direction, props) — homogeneous — so the
+        // BFS collects a superset of the reachable adjacency; `expand_paths`
+        // only ever reads nodes reachable from the anchor, so the pruned
+        // adjacency yields identical walks to the full one. No edge doc columns
+        // exist for a quantified hop (adjacency is iid-only), so no schema
+        // check is needed.
+        if specs.len() == 3 {
+            if let varve_plan::SpecKind::Expand {
+                label,
+                direction,
+                props,
+                max,
+                ..
+            } = &specs[1].kind
+            {
+                let hop = crate::scan::HopSpec {
+                    label,
+                    props,
+                    direction: dir_to_adj(*direction),
+                };
+                let hops = vec![hop; *max as usize];
+                let reachable = crate::scan::reachable_edges(
+                    &self.state,
+                    &self.store,
+                    anchor,
+                    &hops,
+                    None,
+                    bounds,
+                )
+                .await?;
+                let adjacency = varve_plan::EdgeAdjacency::from_entries(
+                    reachable.entries.into_iter().map(|e| {
+                        (
+                            e.node,
+                            varve_plan::AdjEdge {
+                                neighbor: e.neighbor,
+                                edge: e.edge,
+                            },
+                        )
+                    }),
+                );
+                return Ok(Some(FastPath::QuantifiedAdjacency(Arc::new(adjacency))));
+            }
+        }
+
+        // Case A: a fixed k-hop path, all `Edge` hops. Every odd spec must be
+        // an `Edge`; a single `Expand` (or a mix) bails to the fallback.
+        let mut edge_specs: Vec<(&str, &str, Direction)> = Vec::with_capacity(path.hops.len());
+        for spec in specs.iter().skip(1).step_by(2) {
+            match &spec.kind {
+                varve_plan::SpecKind::Edge { label, direction } => {
+                    edge_specs.push((spec.var.as_str(), label.as_str(), *direction));
+                }
+                _ => return Ok(None),
+            }
+        }
+        // Homogeneous label + direction across all hops (so the global
+        // `expanded` dedup in the BFS is sound, and one batch under one label
+        // serves every `Edge` element).
+        let (_, first_label, first_dir) = edge_specs[0];
+        if !edge_specs
+            .iter()
+            .all(|(_, l, d)| *l == first_label && *d == first_dir)
+        {
+            return Ok(None);
+        }
+        // No inline edge props, and no edge element referenced by WHERE or
+        // RETURN. Otherwise the reachable subset's (possibly narrower)
+        // doc-column schema could differ from the full scan's, turning an
+        // empty result into an `UnknownColumn` error (not result-identical).
+        // The structural join/temporal columns are always present, so a query
+        // that touches no edge doc property is safe.
+        if path.hops.iter().any(|(edge, _)| !edge.props.is_empty()) {
+            return Ok(None);
+        }
+        let references_edge_var = |var: &str| edge_specs.iter().any(|(v, _, _)| *v == var);
+        if let Some(varve_gql::ast::Expr::PropEq { var, .. }) = &q.where_clause {
+            if references_edge_var(var) {
+                return Ok(None);
+            }
+        }
+        for item in &q.return_items {
+            let referenced = match item {
+                varve_gql::ast::ReturnItem::Prop { var, .. }
+                | varve_gql::ast::ReturnItem::TemporalFn { var, .. }
+                | varve_gql::ast::ReturnItem::Var { var, .. } => var.as_str(),
+            };
+            if references_edge_var(referenced) {
+                return Ok(None);
+            }
+        }
+
+        // Build the shared reachable-edge batch: level i follows hop i (all the
+        // same label + direction). Props are ignored in the BFS (a wider, still
+        // correct, superset) and re-applied per element by
+        // `apply_element_predicates`.
+        let hops: Vec<crate::scan::HopSpec> = edge_specs
+            .iter()
+            .map(|(_, _, direction)| crate::scan::HopSpec {
+                label: first_label,
+                props: &[],
+                direction: dir_to_adj(*direction),
+            })
+            .collect();
+        let reachable = crate::scan::reachable_edges(
+            &self.state,
+            &self.store,
+            anchor,
+            &hops,
+            Some(first_label),
+            bounds,
+        )
+        .await?;
+        Ok(Some(FastPath::FixedEdges(reachable.batch)))
     }
 
     /// Report-only capability probe (spec §12, D5): classifies whether the

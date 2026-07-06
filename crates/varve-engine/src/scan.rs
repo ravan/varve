@@ -6,6 +6,7 @@
 use crate::db::EngineError;
 use crate::state::{TableKind, TableState, DEFAULT_GRAPH, EDGES_TABLE};
 use datafusion::arrow::record_batch::RecordBatch;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, RwLock};
 use varve_gql::ast::Literal;
 use varve_index::{decode_events, snapshot_entities, Event, Op};
@@ -126,6 +127,12 @@ pub(crate) struct AdjacencyEntry {
 ///
 /// Correctness contract: for any anchor, the anchored result equals the full
 /// (`anchor == None`) result filtered to that node.
+///
+/// When `collect_events` is set, the surviving (matched) edges' merged event
+/// lists are returned alongside the entries — the raw rows the task-12
+/// reachable-edge batch is built from (`snapshot_entities`). The two thin
+/// public wrappers pass `false` so the full-scan callers never pay the clone.
+#[allow(clippy::too_many_arguments)]
 async fn edge_adjacency_impl(
     state: &Arc<RwLock<TableState>>,
     store: &Arc<dyn ObjectStore>,
@@ -134,7 +141,8 @@ async fn edge_adjacency_impl(
     direction: AdjDirection,
     anchor: Option<Iid>,
     bounds: &TemporalBounds,
-) -> Result<Vec<AdjacencyEntry>, EngineError> {
+    collect_events: bool,
+) -> Result<(Vec<AdjacencyEntry>, Vec<(Iid, Vec<Event>)>), EngineError> {
     // 1. One read lock: live edge events (narrowed by the live adjacency
     //    views when anchored) + the persisted family's trie list.
     let (live_events, tries) = {
@@ -199,6 +207,7 @@ async fn edge_adjacency_impl(
     //    visible version is a Put carrying `label`, emit sorted entries.
     let merged = varve_index::merge_sources(blocks, live_events);
     let mut entries = Vec::new();
+    let mut edge_events = Vec::new();
     for (edge, events) in &merged {
         let visible = varve_index::resolve(events, bounds);
         // A hop matches when some visible version is a `Put` carrying `label`
@@ -231,9 +240,12 @@ async fn edge_adjacency_impl(
             neighbor,
             edge: *edge,
         });
+        if collect_events {
+            edge_events.push((*edge, events.clone()));
+        }
     }
     entries.sort_by_key(|e| (e.node, e.neighbor, e.edge));
-    Ok(entries)
+    Ok((entries, edge_events))
 }
 
 /// Label-filtered adjacency lookup: kept alongside `incident_edges` so T8/T9
@@ -248,7 +260,18 @@ pub(crate) async fn edge_adjacency(
     anchor: Option<Iid>,
     bounds: &TemporalBounds,
 ) -> Result<Vec<AdjacencyEntry>, EngineError> {
-    edge_adjacency_impl(state, store, Some(label), props, direction, anchor, bounds).await
+    Ok(edge_adjacency_impl(
+        state,
+        store,
+        Some(label),
+        props,
+        direction,
+        anchor,
+        bounds,
+        false,
+    )
+    .await?
+    .0)
 }
 
 /// Label-blind variant of `edge_adjacency`: every visible `Put` edge
@@ -263,7 +286,127 @@ pub(crate) async fn incident_edges(
     node: Iid,
     bounds: &TemporalBounds,
 ) -> Result<Vec<AdjacencyEntry>, EngineError> {
-    edge_adjacency_impl(state, store, None, &[], direction, Some(node), bounds).await
+    Ok(edge_adjacency_impl(
+        state,
+        store,
+        None,
+        &[],
+        direction,
+        Some(node),
+        bounds,
+        false,
+    )
+    .await?
+    .0)
+}
+
+/// One BFS level's traversal (task 12): the edge family (`label` + `direction`)
+/// and inline `props` to match at that level. For a fixed k-hop path this is
+/// that level's hop; for a quantified `{_,max}` hop it is the single hop,
+/// repeated `max` times.
+#[derive(Clone, Copy)]
+pub(crate) struct HopSpec<'a> {
+    pub label: &'a str,
+    pub props: &'a [(String, Literal)],
+    pub direction: AdjDirection,
+}
+
+/// The reachable-edge set from a bounded BFS: adjacency entries (deduped by
+/// edge iid, for building an `EdgeAdjacency`) and, when a batch label was
+/// requested, the reachable-edge snapshot batch (identical schema to
+/// `merged_snapshot(TableKind::Edges, label, …)`, since both resolve the same
+/// per-edge event lists through `snapshot_entities`).
+pub(crate) struct ReachableEdges {
+    pub entries: Vec<AdjacencyEntry>,
+    pub batch: Option<RecordBatch>,
+}
+
+/// Anchor-reachable edge pruning (task 12): a bounded BFS from `anchor`
+/// collecting the SUPERSET of every edge that can lie on a qualifying path
+/// within the hop bound. `hops[i]` drives level `i`; the family MUST be
+/// homogeneous across levels (same label + direction + props — the only shape
+/// `Db::query`'s fast path selects), so a node is expanded at most once
+/// (`expanded`) and the collected edge set is independent of visit order.
+///
+/// Superset proof (homogeneous hops, `hops.len()` levels): any qualifying path
+/// `anchor = n0 -e0-> n1 … -e_{k-1}-> nk` reaches each `ni` (i < k) at shortest
+/// distance `di ≤ i ≤ hops.len()-1`, so `ni` enters the frontier at level
+/// `di ≤ hops.len()-1` and is expanded (first time), collecting ALL its
+/// matching edges — including `ei`. Thus every edge on a qualifying path is
+/// collected; extra edges are harmless (the join keys + per-element predicates
+/// select the right rows). Each per-node lookup reuses the anchored
+/// `edge_adjacency_impl`, so visibility is resolved at `bounds` exactly as the
+/// full scan resolves it — bitemporal correctness is preserved.
+///
+/// `batch_label` selects the single label the batch is built under (all fixed
+/// `Edge` specs share it); pass `None` to skip the batch (a quantified hop
+/// needs only `entries`, and skipping avoids cloning every surviving edge's
+/// event list).
+pub(crate) async fn reachable_edges(
+    state: &Arc<RwLock<TableState>>,
+    store: &Arc<dyn ObjectStore>,
+    anchor: Iid,
+    hops: &[HopSpec<'_>],
+    batch_label: Option<&str>,
+    bounds: &TemporalBounds,
+) -> Result<ReachableEdges, EngineError> {
+    let mut frontier: Vec<Iid> = vec![anchor];
+    let mut expanded: HashSet<Iid> = HashSet::new();
+    let mut entries: Vec<AdjacencyEntry> = Vec::new();
+    // One event list per surviving edge, deduped by iid (a homogeneous walk
+    // can re-encounter the same edge). `BTreeMap` keeps batch rows in a stable
+    // iid order (deterministic output).
+    let mut edge_events: BTreeMap<Iid, Vec<Event>> = BTreeMap::new();
+    let collect = batch_label.is_some();
+    for hop in hops {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut next_frontier: Vec<Iid> = Vec::new();
+        let mut next_seen: HashSet<Iid> = HashSet::new();
+        for node in std::mem::take(&mut frontier) {
+            if !expanded.insert(node) {
+                continue;
+            }
+            let (node_entries, node_edges) = edge_adjacency_impl(
+                state,
+                store,
+                Some(hop.label),
+                hop.props,
+                hop.direction,
+                Some(node),
+                bounds,
+                collect,
+            )
+            .await?;
+            for e in &node_entries {
+                if next_seen.insert(e.neighbor) {
+                    next_frontier.push(e.neighbor);
+                }
+            }
+            for (edge, events) in node_edges {
+                edge_events.entry(edge).or_insert(events);
+            }
+            entries.extend(node_entries);
+        }
+        frontier = next_frontier;
+    }
+    // A homogeneous walk expands each node once, so entries are already unique
+    // per edge; sort+dedup keeps the invariant explicit and deterministic.
+    entries.sort_by_key(|e| (e.node, e.neighbor, e.edge));
+    entries.dedup();
+
+    let batch = match batch_label {
+        Some(label) => snapshot_entities(
+            edge_events
+                .iter()
+                .map(|(iid, events)| (*iid, events.as_slice())),
+            label,
+            bounds,
+        )?,
+        None => None,
+    };
+    Ok(ReachableEdges { entries, batch })
 }
 
 #[cfg(test)]
