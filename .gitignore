@@ -4,6 +4,7 @@ Cargo.lock.orig
 
 # Reference checkouts (not part of this repo)
 refs/
+.worktrees/
 
 # Local tooling state
 .venv/
