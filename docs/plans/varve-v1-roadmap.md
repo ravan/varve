@@ -232,25 +232,32 @@ S3/MinIO 167.5→111.1 ms). **✅ SLICE COMPLETE 2026-07-05 (1 session, SDD, 10 
 
 **Sessions:** 2–3. **Depends:** slice 4 (works on local FS; 5 not required).
 
-- [ ] Edge events: `_src_iid`/`_dst_iid` columns; `INSERT (a)-[:REL {props}]->(b)` binding
+- [x] Edge events: `_src_iid`/`_dst_iid` columns; `INSERT (a)-[:REL {props}]->(b)` binding
       previously matched or inline nodes; edge `_id` (user or derived).
-- [ ] Adjacency families: edges flushed under three sort orders (`data/`, `adj-out/`,
+- [x] Adjacency families: edges flushed under three sort orders (`data/`, `adj-out/`,
       `adj-in/` per spec §9); live table maintains src- and dst-ordered views.
-- [ ] Pattern lowering: multi-element `MATCH` paths → scans + hash joins on iids
+- [x] Pattern lowering: multi-element `MATCH` paths → scans + hash joins on iids
       (DF `HashJoinExec` via logical plan joins); label + property predicates pushed to
       each element's scan; join order by simple size heuristics.
-- [ ] `PathExpand` custom DataFusion operator: quantified `{m,n}` / bounded `*` expansion,
+- [x] `PathExpand` custom DataFusion operator: quantified `{m,n}` / bounded `*` expansion,
       breadth-wise iteration with GQL WALK semantics + `max_path_depth` config cap;
       path variables bind lists of elements.
-- [ ] `DETACH DELETE` (delete node + incident edges as one tx); plain `DELETE` on still-
+- [x] `DETACH DELETE` (delete node + incident edges as one tx); plain `DELETE` on still-
       connected node errors per GQL.
-- [ ] Traversal oracle tests: naive in-memory graph walker in `varve-testkit`; property
+- [x] Traversal oracle tests: naive in-memory graph walker in `varve-testkit`; property
       tests over random graphs (≤200 nodes) comparing all `{m,n}` expansions; social-graph
       fixture (10k nodes / 60k edges) for integration + perf smoke.
 
 **Exit criteria:** 2-hop friend-of-friend and `-[:KNOWS]->{1,3}` queries correct vs oracle;
 bitemporal traversal correct (edge validity respected at AS-OF time — new property tests);
 2-hop over the fixture < 50ms warm.
+**✅ SLICE COMPLETE 2026-07-06 (1 session, SDD, 12 tasks + 1 perf-opt task).** Exit-criteria evidence:
+`{1,3}` friend-of-friend + 2-hop correct vs the independent traversal oracle (pure property at 10k
+cases + e2e property + 10k/60k social-graph fixture cross-check); bitemporal AS-OF traversal
+property-tested (future-valid edges invisible at NOW, visible AS OF); **warm 2-hop 16.23 ms < 50 ms**
+after the anchor-reachable edge-pruning optimization (was 88.92 ms full-scan); `just check` green,
+clippy `-D warnings` clean. A mid-slice Critical (props-ignoring `DELETE` over-delete) was caught by
+review and fixed. Demo: `cargo run --release --example traversal_bench -p varve`.
 
 ---
 

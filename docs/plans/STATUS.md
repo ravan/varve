@@ -5,7 +5,30 @@
 
 ## Current position
 
-- **Current slice:** 5 (S3-API backends, object-store log, disk cache, capability probe) — ✅ COMPLETE
+- **Current slice:** 6 (edges, adjacency, multi-hop traversal, paths) — ✅ COMPLETE
+  (2026-07-06, 1 session, SDD, 12 tasks + 1 perf-opt task). Varve is now a real graph DB. `Event` gained
+  `src`/`dst` endpoints (nullable `_src_iid`/`_dst_iid` FSB16 IPC cols); `LiveTable` maintains src-/dst-ordered
+  adjacency views; `TableState` split into `nodes`/`edges` cores + `adj_out`/`adj_in` families. `INSERT
+  (a)-[:REL {props}]->(b)` (inline OR `MATCH…INSERT`-bound endpoints, statement-local Cartesian bindings);
+  edges flushed under 3 sort orders (primary/`adj-out`/`adj-in`) in ONE atomic manifest (`TableTries.family`
+  tag 4, backward-compatible empty=primary); anchor-pruned `edge_adjacency` lookup. Multi-element `MATCH`
+  lowers to DataFusion left-deep hash joins (mangled `{var}__{col}` columns, per-element label/prop/WHERE
+  pushdown, size heuristic); `PathExpand` = a real custom DataFusion operator (`UserDefinedLogicalNodeCore` +
+  `ExecutionPlan` + `QueryPlanner`) for `{m,n}`/`*` quantified WALK traversal + `RETURN p` path lists, capped by
+  `[query] max_path_depth`. `DETACH DELETE` cascades incident edges in one tx; plain `DELETE` on a connected
+  node → `EngineError::StillConnected`. A **perf optimization** (anchor-reachable edge pruning) makes anchored
+  traversal exploit the adjacency families: warm 2-hop over 10k/60k = **16.23 ms** (was 88.92 ms full-scan) —
+  exit criterion met. Correctness proven by an INDEPENDENT traversal oracle (pure property at 10k cases + e2e
+  Db-via-GQL property incl. AS-OF + flush-invariance) and a deterministic 10k/60k social-graph fixture. New
+  surfaces: `varve-index` (`SortOrder`/`encode_block_by`), `varve-gql` (path/edge/quantifier grammar + AST
+  reshape + DETACH), `varve-storage` (`adj_*_key`, `ADJ_OUT`/`ADJ_IN`, manifest `family`), `varve-plan`
+  (`pattern`/`expand` modules), `varve-testkit` (`oracle`/`fixture`). Demo: `cargo run --release --example
+  traversal_bench -p varve`. 372 workspace tests.
+- **Next action:** GENERATE the slice-7 detailed plan (GQL completion & TCK — spec §8) with the writing-plans
+  skill, commit it, then execute. Slice 7 depends on slice 6 (paths) + slice 5 (backends). Carry forward the
+  slice-6 fast-follows below (esp. the `where_for_var` single-variant `Expr` closure that breaks when WHERE
+  grows variants, and the T10 e2e-property CI wall-time).
+- **Slice 5 (S3-API backends, object-store log, disk cache, capability probe):** ✅ COMPLETE
   (2026-07-05, 1 session, SDD, 10 tasks). `storage = "s3"` now runs the whole stack against any S3-API
   backend (Garage/SeaweedFS/MinIO/Ceph RGW via `object_store/aws`, default-on `s3` feature);
   `log = "object-store"` writes one object per group-commit batch (`v1/log/<epoch>/<offset-lexhex>.vlog`)
@@ -19,9 +42,6 @@
   harness in `varve-testkit`, and CI `backend-matrix` (garage/seaweedfs/minio) + `backend-ceph-weekly`.
   LIVE-validated against real containers: `just s3-matrix` (garage+seaweedfs+minio) fully green.
   Demos: `cargo run --release --example cache_bench -p varve` and `just s3-matrix`.
-- **Next action:** GENERATE the slice-6 detailed plan (edges, adjacency, traversal — spec §5/§7) with the
-  writing-plans skill, commit it, then execute. Slice 6 depends only on slice 4's block/scan machinery
-  (not on slice 5's backends), so it can proceed independently. `BuildContext` is now landed and in use.
 - **Slice 4 (blocks: flush to object storage, persisted scan, restart):** ✅ COMPLETE (2026-07-05).
   `varve-storage` `ObjectStore` trait + Arrow block codec + `BlockManifest` atomic commit + one-lock
   merged live∪persisted scan + `Db::open` manifest/log-tail recovery. Demo: `cargo run --release --example block_bench -p varve`.
@@ -87,6 +107,65 @@
   byte format, so it is pinned). `.superpowers/` is SDD scratch (self-ignored).
 
 ## Decisions made during implementation
+
+- **2026-07-06 (slice 6) edge model + IPC (decisions 1–3):** `Event` gained `src: Option<Iid>`/`dst: Option<Iid>`
+  (Some on EVERY edge event incl. Delete/Erase; None on nodes; endpoints immutable per edge `_id`). Event IPC gained
+  two NULLABLE `FixedSizeBinary(16)` cols `_src_iid`/`_dst_iid` between `_valid_to` and `op` (op/payload shift to
+  6/7); `encode/decode_events` sigs unchanged; IPC bytes still NOT golden-pinned (round-trip only). `LiveTable` keeps
+  `out`/`in_` `BTreeMap<Iid,BTreeSet<Iid>>` views (updated in `append` when both endpoints present, incl. Delete —
+  visibility resolved at read time); edge snapshots emit non-null endpoint cols; mixed node/edge in one snapshot errors.
+- **2026-07-06 (slice 6) `TableState` split + adjacency families (decisions 3–5):** `TableState { nodes: TableCore,
+  edges: TableCore, adj_out: Vec<PersistedTrie>, adj_in: Vec<PersistedTrie> }` under ONE RwLock (slice-4 decision 8
+  upheld). `encode_block_by(live, rows, SortOrder::{ByIid,BySrc,ByDst})` sorts `(sort_key, iid, system_from desc)` and
+  records the SORT KEY range in `PageMeta.min_iid/max_iid`, so `PageMeta::selected(bounds, Some(anchor))` prunes adj
+  pages by src/dst with ZERO new prune code; `encode_block` = thin wrapper over `ByIid` (BYTE-IDENTICAL, pinned +
+  10k flush_equivalence proptest). One flush = one block_id = up to 4 `TableTries` (nodes primary, edges primary,
+  edges adj-out, edges adj-in) in ONE atomic manifest PUT (crash hooks unmoved; crash matrix green). `TableTries.family`
+  = prost string tag 4 (`""`=primary; empty encodes to zero bytes ⇒ old golden wire unchanged). Keys
+  `v1/graphs/<g>/tables/<t>/<family>/{data,meta}/<trie>.arrow`. `edge_adjacency(anchor)` == full result filtered to
+  anchor, across live+flushed+restart (property-verified).
+- **2026-07-06 (slice 6) GQL grammar reshape (decisions 6–9,15,16):** path-based AST — `NodePattern{var, labels:Vec,
+  props}`, `EdgePattern{var, label (REQUIRED v1 — unlabeled edge = parse error), props, direction, quantifier}`,
+  `Quantifier{min, max:Option}`, `PathPattern`, `MatchPart`, reshaped `InsertStmt{match_part, paths, valid_from/to}`,
+  `DeleteStmt.detach`, `QueryStmt.paths`+`single_node()`, `ReturnItem::Var`; `InsertNode` deleted. `{n}`⇒(n,n),
+  `{m,n}`, `{m,}`⇒(m,max_path_depth), `*`⇒(0,max_path_depth); quantified-edge-with-var = slice-7 error. Negative
+  literals parse (`Minus` arm). Multi-label node in AST but MATCH uses ≤1 (>1 ⇒ Unsupported). Comma-multi-path MATCH ⇒
+  Unsupported (single linear path v1).
+- **2026-07-06 (slice 6) writer effects + bindings (decision 6c):** `Effects{nodes,edges}`; `resolve_insert` async
+  (reads match-part), statement-local bindings via Cartesian product of per-variable candidate iids; edge id fallback
+  `varve:gen:{tx_id}:{ordinal}`. A resolve failure (Unbound/AlreadyBound) applies NOTHING (atomic). `MATCH…INSERT` and
+  DETACH DELETE read at current snapshot (slice-3 pattern).
+- **2026-07-06 (slice 6) DETACH DELETE + still-connected (decision 8):** plain `DELETE` on a node with ≥1 visible
+  incident edge (live OR flushed) → `EngineError::StillConnected(count)`, whole tx fails, nothing applied. `DETACH
+  DELETE` emits node Delete + one edge Delete per distinct incident edge (self-loops deduped via BTreeMap keyed by edge
+  iid → deleted once) in ONE tx. Incidence uses label-BLIND `incident_edges` (both directions).
+- **2026-07-06 (slice 6) pattern lowering + PathExpand (decisions 9–13):** multi-element MATCH → per-element scans with
+  mangled `{var}__{col}` columns, label+inline-prop+WHERE pushdown per element, left-deep hash-join chain oriented by a
+  terminal-size heuristic. `PathExpand` = real DataFusion extension (`PathExpandNode` UDLN + `PathExpandExec` +
+  `VarveQueryPlanner`); `expand_paths` = WALK semantics (repeats allowed, depth-cap termination, min=0 zero-length,
+  interleaved `[n0,e1,n1,…]`); EdgeAdjacency built engine-side AT QUERY BOUNDS (AS-OF-correct); `RETURN p` = List<FSB16>
+  (single quantified hop only). `[query] max_path_depth` (default 10) caps `*`/`{m,}`; explicit bound > cap errors.
+  Quantified-hop inline props filter EVERY traversed hop (decision 13). Task-8 consolidated the single-node guard into
+  `scan_specs` (deleted `require_single_node`/`execute_query`/`snapshot_for_query`).
+- **2026-07-06 (slice 6) traversal oracle + property economics (decision 14):** `GraphOracle` is an INDEPENDENT naive
+  BFS walker (structurally cannot import `expand_paths` — varve-plan is a dev-dep, oracle.rs is lib code). Pure-layer
+  property (`expand_paths` == oracle.walk) at full PROPTEST_CASES; e2e-layer (Db via GQL, ≤200 nodes, n≤3, AS-OF probes)
+  capped `min(cases,128)`; flush-invariance capped `min(cases,32)`. Nodes inserted at epoch VALID FROM (load-bearing —
+  else grid probes see nothing); edge iids mirror the engine's derivation; SYSTEM probes always `i64::MAX`.
+- **2026-07-06 (slice 6) PERF OPT — anchor-reachable edge pruning (added per user decision, exit-criterion fix):**
+  when a linear path's start node is point-anchored, a bounded BFS over `edge_adjacency(anchor=Some)` builds the edges
+  reachable within the hop bound and feeds that subset to the hash-join edge scans AND PathExpand's adjacency; falls
+  back to full scan otherwise. RESULT-IDENTICAL (superset of all edges on qualifying paths; join/filter/RETURN/WALK
+  unchanged). **Warm 2-hop 88.92 → 16.23 ms; {1,3} 87.44 → 26.71 ms; row counts unchanged (33/211).**
+- **2026-07-06 (slice 6) mid-slice CRITICAL caught by review:** the AST reshape gave MATCH `NodePattern` a `props`
+  field; the DELETE path initially ignored it (`MATCH (p:L {prop}) DELETE p` deleted ALL `:L` nodes — data loss). Fixed
+  with an engine-side guard, then fully resolved in Task 7 by real props filtering through `iids_from_snapshot`.
+- **2026-07-06 (slice 6) deviations:** the plan's per-task `force_flush` test helper can't trigger a flush on a live
+  `Db::local` handle, so flush-dependent tests use the config route (`Db::open(blocks_config(dir, N))` + a benign tx →
+  size trigger); the plan's Task 5 markdown had an unbalanced code fence (worked around during brief extraction, plan
+  file untouched); the social-graph INTEGRATION test ships a reduced 2k/12k fixture (full 10k/60k exceeded 5 min in a
+  debug test) while the BENCH example uses the full 10k/60k; ingest is slow (57 tx/s / ~17 min for 60k edges) due to the
+  v1 one-tx-per-edge write surface (multi-edge INSERT bodies land in slice 7) + a 100%-full dev disk.
 
 - **2026-07-05 (slice 5) `BuildContext` landed (decision 1):** `ComponentFactory::build(&self, cfg: &ConfigSection,
   ctx: &BuildContext)` — spec §4's full signature. `BuildContext` is a typed component map (`TypeId → Box<dyn Any + Send + Sync>`,
@@ -315,6 +394,26 @@
 
 ## Open items / decisions needed
 
+- **Slice-6 fast-follows (non-blocking; whole-branch review triaged READY TO MERGE):**
+  - **T10 e2e property CI wall-time (user tuning decision):** `db_traversal_matches_oracle` runs `min(cases,128)`
+    cases over `arb_graph(200,400)`, each booting a Db + replaying hundreds of `MATCH…INSERT` — ~200 s, on EVERY
+    CI `check` (not just nightly), because the cap is 128 regardless of `PROPTEST_CASES`. Plan-mandated. Mitigate by
+    shrinking arb_graph bounds or making the e2e cap scale with `PROPTEST_CASES` if CI wall-time matters.
+  - **`where_for_var` single-variant `Expr` closure (WATCH in slice 7):** `writer.rs::resolve_insert`'s
+    `.filter(|Expr::PropEq{..}| …)` uses an irrefutable pattern that compiles only while `Expr` has one variant; it
+    will fail to compile when slice-7 WHERE grows variants — fix then.
+  - **`EngineError::Unsupported` is now dead** (zero constructors after the T8 scan_specs consolidation) but kept as
+    pub API — remove if slice 7 doesn't need it.
+  - **Fixed-path traversal not property-fuzzed / no fixed-path AS-OF test:** the fixed multi-Edge-hop shape shares the
+    `reachable_edges`/`edge_adjacency_impl` core with the heavily-fuzzed quantified path (analytically + transitively
+    covered), but a random-graph fuzz + an AS-OF regression test for fixed paths would close the gap empirically.
+  - **`MixedPropertyTypes` error-mode divergence (pre-existing, doc-note):** a pruned edge/node batch (subset) can
+    succeed where a full scan would error on an unrelated same-label entity with a conflicting doc-column type — error
+    behavior only, never wrong rows; same asymmetry already exists for node `iid_point` reads.
+  - **Trivial (as-is):** codec sibling-append error taxonomy (Codec vs Arrow, unreachable); `PathExpandNode` Debug
+    would print the whole adjacency; `StillConnected` message says "node(s)" but counts edges; `pattern.rs` duplicates
+    `DEFAULT_GRAPH`/`NODES_TABLE` literals; social_graph test lacks a `!is_empty()` guard.
+
 - **~~SPEC INCONSISTENCY~~ — RESOLVED** 2026-07-04 (`3e0f539`): §5.2 aligned to §5.3.
 - **~~ENV-OVERRIDE DESIGN (slice 3)~~ — RESOLVED** 2026-07-04 (`1b517e8`): nesting + scalar
   coercion implemented and tested; no longer a slice-3 decision.
@@ -413,7 +512,7 @@
 | 3 durability (log) | ✅ complete | 1 | `cargo run --release --example write_bench -p varve` | `varve-log` crate: `Log` trait + prost envelope + `memory`/`local` backends (CRC32C frames, fsync-before-ack, torn-tail recovery) + writer loop group commit + `Db::open` replay + pluggable `Clock`/`Registries` + `kill -9` crash matrix; bench memory 6226 / local 340 tx/s (M3 Max); 181 workspace tests |
 | 4 blocks & persisted scan | ✅ complete | 1 | `cargo run --release --example block_bench -p varve` | `varve-storage` crate (sovereign `ObjectStore` over object_store 0.13, §9 lex-hex keys, `BlockManifest` commit point, memory cache) + paged block codec/prune in `varve-index` + `Log::trim` + one-lock merged live∪persisted scan + writer-loop flush (data/meta→manifest→reset→trim) + `Db::open` manifest+log-tail recovery + kill-during-flush crash matrix + flush-equivalence proptest; bench 1M events @ 39.8k ev/s, reopen 38 ms, warm point lookup 7.6 ms (<100 ms); 247 workspace tests (incl. post-slice `merge_sources` extraction fast-follow) |
 | 5 s3 backends & caches | ✅ complete | 1 | `just s3-matrix` / `cargo run --release --example cache_bench -p varve` | `BuildContext` (spec-§4 factory sig); `storage/s3` (`object_store/aws`, default-on) for Garage/SeaweedFS/MinIO/Ceph; `log/object-store` (1 object per group-commit batch, shared bucket); disk `CacheTier` + `[cache] tiers` registry (memory/disk builtins, replaces `[cache] memory_max_bytes`); optional `ConditionalStore` + 4-step capability probe (`Db::probe_capabilities`); docker-CLI backend harness + CI `backend-matrix`/`backend-ceph-weekly`. LIVE trio (garage/seaweedfs/minio) green; probe verdicts minio=Supported, garage/seaweedfs=Inconsistent. 293 workspace tests |
-| 6 edges & traversal | not started | – | – | no detailed plan yet |
+| 6 edges & traversal | ✅ complete | 1 | `cargo run --release --example traversal_bench -p varve` | edge events (`_src_iid`/`_dst_iid`) + `LiveTable` adjacency views; `INSERT (a)-[:REL]->(b)` inline + `MATCH…INSERT`; 3 sort-order edge families (primary/adj-out/adj-in) in one atomic manifest (`TableTries.family`); anchor-pruned `edge_adjacency`; multi-element MATCH → DataFusion hash joins; `PathExpand` UDLN+ExecutionPlan for `{m,n}`/`*` WALK + `RETURN p`; `DETACH DELETE` + still-connected error; independent traversal oracle (pure 10k + e2e + flush-invariance properties) + 10k/60k social fixture; anchor-reachable edge-pruning perf opt → **warm 2-hop 16.23 ms** (<50 ms). Caught+fixed a mid-slice `DELETE` data-loss bug. 372 workspace tests |
 | 7 GQL completion & TCK | not started | – | – | no detailed plan yet |
 | 8 compaction & GC | not started | – | – | no detailed plan yet |
 | 9 server, CLI, query nodes | not started | – | – | no detailed plan yet |
