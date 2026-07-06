@@ -129,6 +129,28 @@ async fn two_hop_friend_of_friend() {
 }
 
 #[tokio::test]
+async fn two_hop_anchored_id_takes_fast_path_result_identical() {
+    // `WHERE a._id = 1` point-anchors the start node, so the two-hop fixed
+    // path takes task-12's anchor-reachable edge-pruning fast path (homogeneous
+    // `:KNOWS`-out hops, no edge props/vars referenced). The result MUST equal
+    // both the known-correct set AND the name-anchored form, which does NOT
+    // fast-path (`a.name` is no iid pushdown) and runs the full-scan path — a
+    // direct result-identity cross-check between the pruned and full paths.
+    let db = Db::memory();
+    seed_triangle(&db).await;
+    let fast = db
+        .query("MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) WHERE a._id = 1 RETURN c.name")
+        .await
+        .unwrap();
+    let full = db
+        .query("MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) WHERE a.name = 'Ada' RETURN c.name")
+        .await
+        .unwrap();
+    assert_eq!(names(&fast, "name"), vec!["Cy".to_string()]);
+    assert_eq!(names(&fast, "name"), names(&full, "name"));
+}
+
+#[tokio::test]
 async fn reverse_direction_and_edge_props() {
     let db = Db::memory();
     seed_triangle(&db).await;
