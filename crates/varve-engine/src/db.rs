@@ -67,7 +67,7 @@ pub enum EngineError {
     UnboundVariable(String),
     #[error("INSERT re-binds already-bound variable '{0}' (a reference must be a bare `(x)` — no labels or properties)")]
     AlreadyBoundVariable(String),
-    #[error("cannot DELETE {0} still-connected node(s); use DETACH DELETE")]
+    #[error("cannot DELETE node(s) with {0} still-connected edge(s); use DETACH DELETE")]
     StillConnected(usize),
 }
 
