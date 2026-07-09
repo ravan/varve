@@ -1,53 +1,11 @@
 #![allow(clippy::unwrap_used)]
 
 use std::path::Path;
-use std::time::Duration;
-use varve::{Config, Db};
 
-fn gc_config(dir: &Path, max_block_rows: usize) -> Config {
-    let log_dir = toml_escaped(&dir.join("log"));
-    let store_dir = toml_escaped(&dir.join("store"));
-    Config::from_toml_str(&format!(
-        "[log]\n\
-         backend = \"local\"\n\
-         group_commit_window_ms = 1\n\
-         [log.local]\n\
-         dir = {log_dir}\n\
-         [storage]\n\
-         backend = \"local\"\n\
-         max_block_rows = {max_block_rows}\n\
-         [storage.local]\n\
-         dir = {store_dir}\n\
-         [gc]\n\
-         enabled = true\n\
-         blocks_to_keep = 0\n\
-         garbage_lifetime_hours = 0\n"
-    ))
-    .unwrap()
-}
-
-fn toml_escaped(dir: &Path) -> String {
-    format!("{:?}", dir.display().to_string())
-}
-
-fn rows(batches: &[varve::RecordBatch]) -> usize {
-    batches.iter().map(|batch| batch.num_rows()).sum()
-}
-
-async fn wait_for_manifest_count(dir: &Path, count: usize) {
-    let blocks = dir.join("store").join("v1").join("blocks");
-    for _ in 0..200 {
-        let got = blocks
-            .read_dir()
-            .map(|entries| entries.count())
-            .unwrap_or(0);
-        if got >= count {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("expected at least {count} manifests under {blocks:?}");
-}
+use varve::Db;
+use varve_testkit::db_harness::{
+    local_gc_blocks_config as gc_config, row_count as rows, wait_for_manifest_count,
+};
 
 async fn compacted_db(dir: &Path) -> Db {
     let db = Db::open(gc_config(dir, 1)).await.unwrap();

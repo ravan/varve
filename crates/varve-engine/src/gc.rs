@@ -103,6 +103,17 @@ struct EntryId {
     trie_key: String,
 }
 
+impl EntryId {
+    fn from_manifest_entry(entry: varve_storage::manifest::ManifestTrieEntry<'_>) -> EntryId {
+        EntryId {
+            graph: entry.graph.to_string(),
+            table: entry.table.to_string(),
+            family: entry.family.to_string(),
+            trie_key: entry.entry.trie_key.clone(),
+        }
+    }
+}
+
 fn protect_unexpired_garbage(
     manifests: &[&BlockManifest],
     latest_time_us: i64,
@@ -112,10 +123,13 @@ fn protect_unexpired_garbage(
     let Some(latest) = manifests.last().copied() else {
         return;
     };
-    let latest_entries: BTreeSet<_> = manifest_entries(latest).into_iter().collect();
+    let latest_entries: BTreeSet<_> = latest
+        .trie_entries()
+        .map(EntryId::from_manifest_entry)
+        .collect();
     let mut last_present = BTreeMap::new();
     for (idx, manifest) in manifests.iter().enumerate() {
-        for entry in manifest_entries(manifest) {
+        for entry in manifest.trie_entries().map(EntryId::from_manifest_entry) {
             last_present.insert(entry, idx);
         }
     }
@@ -137,44 +151,24 @@ fn protect_unexpired_garbage(
 }
 
 fn protect_manifest_entries(manifest: &BlockManifest, protected: &mut BTreeSet<String>) {
-    for entry in manifest_entries(manifest) {
+    for entry in manifest.trie_entries().map(EntryId::from_manifest_entry) {
         protect_entry(&entry, protected);
     }
 }
 
-fn manifest_entries(manifest: &BlockManifest) -> Vec<EntryId> {
-    let mut entries = Vec::new();
-    for table in &manifest.tables {
-        for entry in &table.tries {
-            entries.push(EntryId {
-                graph: table.graph.clone(),
-                table: table.table.clone(),
-                family: table.family.clone(),
-                trie_key: entry.trie_key.clone(),
-            });
-        }
-    }
-    entries
-}
-
 fn protect_entry(entry: &EntryId, protected: &mut BTreeSet<String>) {
-    if entry.family.is_empty() {
-        protected.insert(keys::data_key(&entry.graph, &entry.table, &entry.trie_key));
-        protected.insert(keys::meta_key(&entry.graph, &entry.table, &entry.trie_key));
-    } else {
-        protected.insert(keys::adj_data_key(
-            &entry.graph,
-            &entry.table,
-            &entry.family,
-            &entry.trie_key,
-        ));
-        protected.insert(keys::adj_meta_key(
-            &entry.graph,
-            &entry.table,
-            &entry.family,
-            &entry.trie_key,
-        ));
-    }
+    protected.insert(keys::data_key_for_family(
+        &entry.graph,
+        &entry.table,
+        &entry.family,
+        &entry.trie_key,
+    ));
+    protected.insert(keys::meta_key_for_family(
+        &entry.graph,
+        &entry.table,
+        &entry.family,
+        &entry.trie_key,
+    ));
 }
 
 fn should_delete_key(

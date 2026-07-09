@@ -17,6 +17,15 @@ fn trie_key_round_trips_l0_l1_l2() {
     };
     assert_eq!(l1h.to_key_string(), "l01-r20200106-b09");
     assert_eq!(TrieKey::parse("l01-r20200106-b09").unwrap(), l1h);
+    assert_eq!(
+        l1h.child(3, 10),
+        TrieKey {
+            level: 2,
+            recency: Recency::Week { yyyymmdd: 20200106 },
+            part: vec![3],
+            block: 10,
+        }
+    );
 
     let l2c = TrieKey {
         level: 2,

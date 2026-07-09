@@ -30,14 +30,14 @@ impl TrieCatalog {
             return Ok(catalog);
         };
 
-        let latest_entries = manifest_entries(latest)?;
+        let latest_entries = parsed_manifest_entries(latest)?;
         let latest_keys: BTreeSet<_> = latest_entries
             .iter()
             .map(|entry| entry.catalog_key())
             .collect();
 
         for manifest in manifests {
-            for entry in manifest_entries(manifest)? {
+            for entry in parsed_manifest_entries(manifest)? {
                 if manifest.block_id == latest.block_id
                     || latest_keys.contains(&entry.catalog_key())
                 {
@@ -113,18 +113,16 @@ impl ParsedEntry {
     }
 }
 
-fn manifest_entries(manifest: &BlockManifest) -> Result<Vec<ParsedEntry>, StorageError> {
+fn parsed_manifest_entries(manifest: &BlockManifest) -> Result<Vec<ParsedEntry>, StorageError> {
     let mut out = Vec::new();
-    for table in &manifest.tables {
-        for entry in &table.tries {
-            out.push(ParsedEntry {
-                graph: table.graph.clone(),
-                table: table.table.clone(),
-                family: table.family.clone(),
-                entry: entry.clone(),
-                key: TrieKey::parse(&entry.trie_key)?,
-            });
-        }
+    for manifest_entry in manifest.trie_entries() {
+        out.push(ParsedEntry {
+            graph: manifest_entry.graph.to_string(),
+            table: manifest_entry.table.to_string(),
+            family: manifest_entry.family.to_string(),
+            entry: manifest_entry.entry.clone(),
+            key: TrieKey::parse(&manifest_entry.entry.trie_key)?,
+        });
     }
     Ok(out)
 }

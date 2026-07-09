@@ -51,6 +51,21 @@ impl TrieKey {
         }
     }
 
+    pub fn child(&self, bucket: u8, block: u64) -> TrieKey {
+        assert!(
+            bucket < TRIE_BRANCH_FACTOR,
+            "trie bucket {bucket} outside branch factor {TRIE_BRANCH_FACTOR}"
+        );
+        let mut part = self.part.clone();
+        part.push(bucket);
+        TrieKey {
+            level: self.level + 1,
+            recency: self.recency.clone(),
+            part,
+            block,
+        }
+    }
+
     pub fn to_key_string(&self) -> String {
         let mut key = format!("l{}-r{}", lex_hex(self.level), self.recency.as_key_part());
         if !self.part.is_empty() {
@@ -218,6 +233,22 @@ pub fn adj_meta_key(graph: &str, table: &str, family: &str, trie_key: &str) -> S
     format!("v1/graphs/{graph}/tables/{table}/{family}/meta/{trie_key}.arrow")
 }
 
+pub fn data_key_for_family(graph: &str, table: &str, family: &str, trie_key: &str) -> String {
+    if family.is_empty() {
+        data_key(graph, table, trie_key)
+    } else {
+        adj_data_key(graph, table, family, trie_key)
+    }
+}
+
+pub fn meta_key_for_family(graph: &str, table: &str, family: &str, trie_key: &str) -> String {
+    if family.is_empty() {
+        meta_key(graph, table, trie_key)
+    } else {
+        adj_meta_key(graph, table, family, trie_key)
+    }
+}
+
 pub const MANIFEST_PREFIX: &str = "v1/blocks";
 
 pub fn manifest_key(block_id: u64) -> String {
@@ -334,7 +365,15 @@ mod tests {
             "v1/graphs/default/tables/nodes/data/l00-rc-b00.arrow"
         );
         assert_eq!(
+            data_key_for_family("default", "nodes", "", "l00-rc-b00"),
+            "v1/graphs/default/tables/nodes/data/l00-rc-b00.arrow"
+        );
+        assert_eq!(
             meta_key("default", "nodes", "l00-rc-b00"),
+            "v1/graphs/default/tables/nodes/meta/l00-rc-b00.arrow"
+        );
+        assert_eq!(
+            meta_key_for_family("default", "nodes", "", "l00-rc-b00"),
             "v1/graphs/default/tables/nodes/meta/l00-rc-b00.arrow"
         );
         assert_eq!(manifest_key(0), "v1/blocks/00.manifest");
@@ -348,7 +387,15 @@ mod tests {
             "v1/graphs/default/tables/edges/adj-out/data/l00-rc-b00.arrow"
         );
         assert_eq!(
+            data_key_for_family("default", "edges", ADJ_OUT, "l00-rc-b00"),
+            "v1/graphs/default/tables/edges/adj-out/data/l00-rc-b00.arrow"
+        );
+        assert_eq!(
             adj_meta_key("default", "edges", ADJ_IN, "l00-rc-b00"),
+            "v1/graphs/default/tables/edges/adj-in/meta/l00-rc-b00.arrow"
+        );
+        assert_eq!(
+            meta_key_for_family("default", "edges", ADJ_IN, "l00-rc-b00"),
             "v1/graphs/default/tables/edges/adj-in/meta/l00-rc-b00.arrow"
         );
     }

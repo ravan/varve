@@ -5,32 +5,8 @@
 
 use std::path::Path;
 use std::time::Duration;
-use varve::{Config, Db};
-
-fn config(dir: &Path) -> Result<Config, Box<dyn std::error::Error>> {
-    let log_dir = toml_escaped(&dir.join("log"));
-    let store_dir = toml_escaped(&dir.join("store"));
-    Ok(Config::from_toml_str(&format!(
-        "[log]\n\
-         backend = \"local\"\n\
-         group_commit_window_ms = 1\n\
-         [log.local]\n\
-         dir = {log_dir}\n\
-         [storage]\n\
-         backend = \"local\"\n\
-         max_block_rows = 1\n\
-         [storage.local]\n\
-         dir = {store_dir}\n\
-         [gc]\n\
-         enabled = true\n\
-         blocks_to_keep = 0\n\
-         garbage_lifetime_hours = 0\n"
-    ))?)
-}
-
-fn toml_escaped(dir: &Path) -> String {
-    format!("{:?}", dir.display().to_string())
-}
+use varve::Db;
+use varve_testkit::db_harness::{compact_until_idle, local_gc_blocks_config, row_count};
 
 async fn object_count(dir: &Path) -> Result<usize, Box<dyn std::error::Error>> {
     let store = varve_storage::local_store(&dir.join("store"))?;
@@ -57,26 +33,10 @@ async fn wait_for_l0_data(dir: &Path, count: usize) -> Result<(), Box<dyn std::e
     Err(format!("expected at least {count} L0 data objects").into())
 }
 
-async fn compact_until_idle(db: &Db) -> Result<usize, Box<dyn std::error::Error>> {
-    let mut jobs = 0;
-    for _ in 0..8 {
-        let report = db.compact_once().await?;
-        if report.jobs == 0 {
-            return Ok(jobs);
-        }
-        jobs += report.jobs;
-    }
-    Err("compaction did not become idle".into())
-}
-
-fn row_count(batches: &[varve::RecordBatch]) -> usize {
-    batches.iter().map(|batch| batch.num_rows()).sum()
-}
-
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let db = Db::open(config(dir.path())?).await?;
+    let db = Db::open(local_gc_blocks_config(dir.path(), 1)).await?;
 
     db.execute("INSERT (:P {_id: 1, token: 'erase-me'})")
         .await?;
