@@ -198,17 +198,14 @@ fn select_same_shard_jobs(live: &[LiveTrie], jobs: &mut Vec<CompactionJob>) {
             .map(|trie| trie.key.block)
             .max()
             .unwrap_or_default();
+        let parent = TrieKey {
+            level: shard.level,
+            recency: shard.recency.clone(),
+            part: shard.part.clone(),
+            block,
+        };
         let output_trie_keys = (0..TRIE_BRANCH_FACTOR)
-            .map(|bucket| {
-                let mut part = shard.part.clone();
-                part.push(bucket);
-                TrieKey {
-                    level: shard.level + 1,
-                    recency: shard.recency.clone(),
-                    part,
-                    block,
-                }
-            })
+            .map(|bucket| parent.child(bucket, block))
             .collect();
         jobs.push(CompactionJob {
             kind: CompactionKind::SameShard,

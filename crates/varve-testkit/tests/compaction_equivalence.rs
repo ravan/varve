@@ -2,44 +2,11 @@
 
 use std::path::Path;
 use std::time::Duration;
-use varve::{Config, Db, Instant};
-
-fn blocks_config(dir: &Path, max_block_rows: usize) -> Config {
-    let log_dir = toml_escaped(&dir.join("log"));
-    let store_dir = toml_escaped(&dir.join("store"));
-    Config::from_toml_str(&format!(
-        "[log]\n\
-         backend = \"local\"\n\
-         group_commit_window_ms = 1\n\
-         [log.local]\n\
-         dir = {log_dir}\n\
-         [storage]\n\
-         backend = \"local\"\n\
-         max_block_rows = {max_block_rows}\n\
-         [storage.local]\n\
-         dir = {store_dir}\n"
-    ))
-    .unwrap()
-}
-
-fn toml_escaped(dir: &Path) -> String {
-    format!("{:?}", dir.display().to_string())
-}
-
-async fn wait_for_manifest_count(dir: &Path, count: usize) {
-    let blocks = dir.join("store").join("v1").join("blocks");
-    for _ in 0..200 {
-        let got = blocks
-            .read_dir()
-            .map(|entries| entries.count())
-            .unwrap_or(0);
-        if got >= count {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("expected at least {count} manifests under {blocks:?}");
-}
+use varve::{Db, Instant};
+use varve_testkit::db_harness::{
+    compact_until_idle, local_blocks_config as blocks_config,
+    local_gc_blocks_config as gc_blocks_config, wait_for_manifest_count,
+};
 
 fn manifest_count(dir: &Path) -> usize {
     dir.join("store")
@@ -83,16 +50,6 @@ fn column_i64(batches: &[varve::RecordBatch], name: &str) -> Vec<i64> {
     out
 }
 
-async fn compact_until_idle(db: &Db) {
-    for _ in 0..16 {
-        let report = db.compact_once().await.unwrap();
-        if report.jobs == 0 {
-            return;
-        }
-    }
-    panic!("compaction did not become idle");
-}
-
 async fn query_i64(db: &Db, gql: &str, name: &str) -> Vec<i64> {
     column_i64(&db.query(gql).await.unwrap(), name)
 }
@@ -120,7 +77,7 @@ async fn compaction_preserves_node_query_results() {
     let before_current = query_i64(&db, current, "v").await;
     let before_historical = query_i64(&db, &historical, "v").await;
 
-    compact_until_idle(&db).await;
+    compact_until_idle(&db).await.unwrap();
 
     assert_eq!(query_i64(&db, current, "v").await, before_current);
     assert_eq!(query_i64(&db, &historical, "v").await, before_historical);
@@ -150,7 +107,7 @@ async fn compaction_preserves_adjacency_traversal_results() {
     let gql = "MATCH (a:P)-[:K]->(b:P) WHERE a._id = 1 RETURN b._id AS id";
     let before = query_i64(&db, gql, "id").await;
 
-    compact_until_idle(&db).await;
+    compact_until_idle(&db).await.unwrap();
 
     assert_eq!(query_i64(&db, gql, "id").await, before);
 }
@@ -178,7 +135,7 @@ async fn compaction_preserves_delete_and_erase_query_results() {
     let gql = "MATCH (p:P) RETURN p._id AS id";
     let before = query_i64(&db, gql, "id").await;
 
-    compact_until_idle(&db).await;
+    compact_until_idle(&db).await.unwrap();
 
     assert_eq!(query_i64(&db, gql, "id").await, before);
     assert!(!before.contains(&2));
@@ -190,28 +147,6 @@ fn historical_query(system_time: Instant) -> String {
         "FOR SYSTEM_TIME AS OF TIMESTAMP '{}' MATCH (p:P) RETURN p.v AS v",
         system_time
     )
-}
-
-fn gc_blocks_config(dir: &Path, max_block_rows: usize) -> Config {
-    let log_dir = toml_escaped(&dir.join("log"));
-    let store_dir = toml_escaped(&dir.join("store"));
-    Config::from_toml_str(&format!(
-        "[log]\n\
-         backend = \"local\"\n\
-         group_commit_window_ms = 1\n\
-         [log.local]\n\
-         dir = {log_dir}\n\
-         [storage]\n\
-         backend = \"local\"\n\
-         max_block_rows = {max_block_rows}\n\
-         [storage.local]\n\
-         dir = {store_dir}\n\
-         [gc]\n\
-         enabled = true\n\
-         blocks_to_keep = 0\n\
-         garbage_lifetime_hours = 0\n"
-    ))
-    .unwrap()
 }
 
 async fn block_store_object_count(dir: &Path) -> usize {
@@ -236,7 +171,7 @@ async fn storage_object_count_plateaus_under_update_churn() {
         }
         wait_for_manifest_count(dir.path(), baseline_manifests + 64).await;
         wait_for_l0_data_count(dir.path(), 64).await;
-        compact_until_idle(&db).await;
+        compact_until_idle(&db).await.unwrap();
         db.gc_once().await.unwrap();
         let objects = block_store_object_count(dir.path()).await;
         max_objects = max_objects.max(objects);

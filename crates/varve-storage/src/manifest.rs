@@ -48,7 +48,26 @@ pub struct BlockManifest {
     pub tables: Vec<TableTries>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct ManifestTrieEntry<'a> {
+    pub graph: &'a str,
+    pub table: &'a str,
+    pub family: &'a str,
+    pub entry: &'a TrieEntry,
+}
+
 impl BlockManifest {
+    pub fn trie_entries(&self) -> impl Iterator<Item = ManifestTrieEntry<'_>> {
+        self.tables.iter().flat_map(|table| {
+            table.tries.iter().map(|entry| ManifestTrieEntry {
+                graph: &table.graph,
+                table: &table.table,
+                family: &table.family,
+                entry,
+            })
+        })
+    }
+
     /// Protobuf wire bytes (the object body stored at `keys::manifest_key`).
     pub fn to_wire(&self) -> Vec<u8> {
         self.encode_to_vec()
@@ -121,6 +140,17 @@ mod tests {
     fn wire_round_trips() {
         let m = sample();
         assert_eq!(BlockManifest::from_wire(&m.to_wire()).unwrap(), m);
+    }
+
+    #[test]
+    fn trie_entries_iterates_table_scopes() {
+        let m = sample();
+        let entries = m.trie_entries().collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].graph, "default");
+        assert_eq!(entries[0].table, "nodes");
+        assert_eq!(entries[0].family, "");
+        assert_eq!(entries[0].entry.trie_key, "l00-rc-b00");
     }
 
     #[test]

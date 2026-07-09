@@ -1,13 +1,10 @@
 #![allow(clippy::unwrap_used)]
 
-use std::path::Path;
-
 use arrow::array::{Array, StringArray};
 use varve::{Config, Db, EngineError, RecordBatch};
-
-fn rows(batches: &[RecordBatch]) -> usize {
-    batches.iter().map(|b| b.num_rows()).sum()
-}
+use varve_testkit::db_harness::{
+    local_blocks_config as blocks_config, row_count as rows, wait_for_manifest_count,
+};
 
 fn strings(batches: &[RecordBatch], col: &str) -> Vec<String> {
     let mut out: Vec<String> = batches
@@ -28,48 +25,12 @@ fn strings(batches: &[RecordBatch], col: &str) -> Vec<String> {
     out
 }
 
-fn toml_escaped(dir: &Path) -> String {
-    format!("{:?}", dir.display().to_string())
-}
-
-fn blocks_config(dir: &Path, max_block_rows: usize) -> Config {
-    let log_dir = toml_escaped(&dir.join("log"));
-    let store_dir = toml_escaped(&dir.join("store"));
-    Config::from_toml_str(&format!(
-        "[log]\nbackend = \"local\"\ngroup_commit_window_ms = 1\n\
-         [log.local]\ndir = {log_dir}\n\
-         [storage]\nbackend = \"local\"\nmax_block_rows = {max_block_rows}\n\
-         [storage.local]\ndir = {store_dir}\n"
-    ))
-    .unwrap()
-}
-
 fn group_commit_config() -> Config {
     Config::from_toml_str(
         "[log]\nbackend = \"memory\"\ngroup_commit_window_ms = 100\n\
          [storage]\nbackend = \"memory\"\nmax_block_rows = 1000\n",
     )
     .unwrap()
-}
-
-async fn wait_for_manifest_count(dir: &Path, want: usize) {
-    let blocks = dir.join("store").join("v1").join("blocks");
-    for _ in 0..200 {
-        let count = blocks
-            .read_dir()
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .filter(|entry| entry.file_name().to_string_lossy().ends_with(".manifest"))
-                    .count()
-            })
-            .unwrap_or(0);
-        if count >= want {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    panic!("fewer than {want} manifest(s) under {blocks:?} within 5s");
 }
 
 #[tokio::test]

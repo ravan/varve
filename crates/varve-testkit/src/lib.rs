@@ -1,4 +1,5 @@
 pub mod backends;
+pub mod db_harness;
 pub mod fixture;
 pub mod oracle;
 pub mod reference;

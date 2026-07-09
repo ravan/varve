@@ -13,7 +13,7 @@ use crate::state::{
 };
 use crate::writer::{spawn_writer, Submission, WriterConfig, WriterState};
 use datafusion::arrow::record_batch::RecordBatch;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -369,52 +369,31 @@ fn compaction_sort_order(table: &str, family: &str) -> Result<SortOrder, EngineE
     }
 }
 
-fn compaction_data_key(graph: &str, table: &str, family: &str, trie_key: &str) -> String {
-    if family.is_empty() {
-        keys::data_key(graph, table, trie_key)
-    } else {
-        keys::adj_data_key(graph, table, family, trie_key)
-    }
-}
-
-fn compaction_meta_key(graph: &str, table: &str, family: &str, trie_key: &str) -> String {
-    if family.is_empty() {
-        keys::meta_key(graph, table, trie_key)
-    } else {
-        keys::adj_meta_key(graph, table, family, trie_key)
-    }
-}
-
-fn sort_entries(entries: &mut [TrieEntry]) {
-    entries.sort_by(|a, b| a.trie_key.cmp(&b.trie_key));
-}
-
 fn compacted_manifest(
     latest: &BlockManifest,
     job: &crate::compact::CompactionJob,
     output_entries: Vec<TrieEntry>,
 ) -> BlockManifest {
-    let input_keys = job
-        .input_trie_keys
-        .iter()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
+    let input_keys = compaction_input_key_set(job);
     let mut tables = latest.tables.clone();
     let mut replaced = false;
     for table in &mut tables {
         if table.graph == job.graph && table.table == job.table && table.family == job.family {
-            table
-                .tries
-                .retain(|entry| !input_keys.contains(&entry.trie_key));
-            table.tries.extend(output_entries.clone());
-            sort_entries(&mut table.tries);
+            replace_compacted_tries(
+                &mut table.tries,
+                &input_keys,
+                output_entries.clone(),
+                |entry| entry.trie_key.as_str(),
+            );
             replaced = true;
             break;
         }
     }
     if !replaced && !output_entries.is_empty() {
-        let mut tries = output_entries;
-        sort_entries(&mut tries);
+        let mut tries = Vec::new();
+        replace_compacted_tries(&mut tries, &input_keys, output_entries, |entry| {
+            entry.trie_key.as_str()
+        });
         tables.push(TableTries {
             graph: job.graph.clone(),
             table: job.table.clone(),
@@ -429,6 +408,21 @@ fn compacted_manifest(
         max_system_time_us: latest.max_system_time_us,
         tables,
     }
+}
+
+fn compaction_input_key_set(job: &crate::compact::CompactionJob) -> BTreeSet<String> {
+    job.input_trie_keys.iter().cloned().collect()
+}
+
+fn replace_compacted_tries<T>(
+    tries: &mut Vec<T>,
+    input_keys: &BTreeSet<String>,
+    outputs: impl IntoIterator<Item = T>,
+    trie_key: impl Fn(&T) -> &str,
+) {
+    tries.retain(|entry| !input_keys.contains(trie_key(entry)));
+    tries.extend(outputs);
+    tries.sort_by(|a, b| trie_key(a).cmp(trie_key(b)));
 }
 
 pub(crate) enum FastPath {
@@ -870,7 +864,7 @@ impl Db {
         for trie_key in &job.input_trie_keys {
             let data = self
                 .store
-                .get(&compaction_data_key(
+                .get(&keys::data_key_for_family(
                     &job.graph,
                     &job.table,
                     &job.family,
@@ -879,7 +873,7 @@ impl Db {
                 .await?;
             let meta = self
                 .store
-                .get(&compaction_meta_key(
+                .get(&keys::meta_key_for_family(
                     &job.graph,
                     &job.table,
                     &job.family,
@@ -911,13 +905,13 @@ impl Db {
             };
             self.store
                 .put(
-                    &compaction_data_key(&job.graph, &job.table, &job.family, &trie_key),
+                    &keys::data_key_for_family(&job.graph, &job.table, &job.family, &trie_key),
                     bytes::Bytes::from(output.encoded.data.clone()),
                 )
                 .await?;
             self.store
                 .put(
-                    &compaction_meta_key(&job.graph, &job.table, &job.family, &trie_key),
+                    &keys::meta_key_for_family(&job.graph, &job.table, &job.family, &trie_key),
                     bytes::Bytes::from(output.encoded.meta.clone()),
                 )
                 .await?;
@@ -938,11 +932,7 @@ impl Db {
             .await?;
 
         {
-            let input_keys = job
-                .input_trie_keys
-                .iter()
-                .cloned()
-                .collect::<std::collections::BTreeSet<_>>();
+            let input_keys = compaction_input_key_set(&job);
             let mut state = self.state.write().map_err(|_| EngineError::Poisoned)?;
             let table = state
                 .graph_mut(&job.graph)
@@ -959,9 +949,9 @@ impl Db {
                     )))
                 }
             };
-            tries.retain(|trie| !input_keys.contains(&trie.entry.trie_key));
-            tries.extend(persisted);
-            tries.sort_by(|a, b| a.entry.trie_key.cmp(&b.entry.trie_key));
+            replace_compacted_tries(tries, &input_keys, persisted, |trie| {
+                trie.entry.trie_key.as_str()
+            });
         }
 
         Ok(CompactionReport {
@@ -1402,16 +1392,12 @@ async fn recover(
                     }
                 };
                 for entry in &table.tries {
-                    let meta_key = if table.family.is_empty() {
-                        varve_storage::keys::meta_key(&table.graph, &table.table, &entry.trie_key)
-                    } else {
-                        varve_storage::keys::adj_meta_key(
-                            &table.graph,
-                            &table.table,
-                            &table.family,
-                            &entry.trie_key,
-                        )
-                    };
+                    let meta_key = varve_storage::keys::meta_key_for_family(
+                        &table.graph,
+                        &table.table,
+                        &table.family,
+                        &entry.trie_key,
+                    );
                     let meta = store.get(&meta_key).await?;
                     let pages = varve_index::block::decode_meta(&meta)?;
                     dest.push(PersistedTrie {
