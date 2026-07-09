@@ -169,6 +169,11 @@ impl ObjectStore for CachedStore {
         self.inner.list(prefix).await
     }
 
+    async fn delete(&self, key: &str) -> Result<(), StorageError> {
+        self.cache.invalidate_path(key);
+        self.inner.delete(key).await
+    }
+
     fn conditional(&self) -> Option<&dyn crate::store::ConditionalStore> {
         self.inner.conditional()
     }
@@ -247,6 +252,10 @@ mod tests {
         }
         async fn list(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
             self.inner.list(prefix).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), StorageError> {
+            self.inner.delete(key).await
         }
     }
 

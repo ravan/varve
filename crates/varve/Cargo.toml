@@ -14,8 +14,10 @@ datafusion = { workspace = true }
 arrow = { workspace = true }
 tokio = { workspace = true }
 tempfile = { workspace = true }
-# traversal_bench.rs (task 11) reuses the deterministic social-graph fixture
-# rather than duplicating the LCG generator; dev-only back-edge (varve-testkit
+varve-index = { path = "../varve-index" }
+varve-storage = { path = "../varve-storage" }
+# traversal_bench.rs (task 11) reuses deterministic social-graph fixture
+# duplicating LCG generator; dev-only back-edge (varve-testkit
 # depends on varve normally) — no cycle, since examples aren't build inputs.
 varve-testkit = { path = "../varve-testkit" }
 

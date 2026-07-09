@@ -590,6 +590,10 @@ mod tests {
         async fn list(&self, _prefix: &str) -> Result<Vec<String>, StorageError> {
             Ok(Vec::new())
         }
+
+        async fn delete(&self, key: &str) -> Result<(), StorageError> {
+            Err(StorageError::NotFound(key.to_string()))
+        }
     }
 
     #[tokio::test]

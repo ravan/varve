@@ -3,39 +3,19 @@
 > Update end EVERY session. entry point next session — read first, then `varve-v1-roadmap.md`, then current slice's detailed plan.
 
 ## Current position
-- **Current entry point:** Slice 8 planning/start from `docs/plans/varve-v1-roadmap.md` (generate the detailed Slice 8 plan first if it does not exist).
-- **Current slice:** 7 (GQL practical-core completion + conformance harness) — ✅ COMPLETE and reclosed through Task 25. Slice demo: `cargo run --release --example gql_tour -p varve`. Final Task 25 verification green: `cargo fmt --all --check`; `cargo run --release --example gql_tour -p varve`; `cargo test --workspace -- --test-threads=1` (596 passed, 64 suites, 133.84s); `cargo clippy --workspace --all-targets -- -D warnings`; `PROPTEST_CASES=1024 cargo test -p varve-testkit --release --test traversal_oracle -- --test-threads=1` (6 passed, 49.17s); TCK gate `cargo test -p varve-testkit --test tck -- --test-threads=1` (3,897 total, 3,386 excluded, 511 adapted, 445 passed, 66 non-excluded failures, pass rate 0.870841); `cargo test -p varve-testkit --lib` (25 passed); `cargo test -p varve-testkit --test tck_values` (11 passed); `cargo test -p varve-testkit -- --test-threads=1` (65 passed, 14 suites, 116.10s); parser fuzz `cargo +nightly fuzz run parse -- -max_total_time=600 -rss_limit_mb=4096` (13,903,093 execs, corpus 2324/559Kb, RSS 1822Mb, no crashes/assertions).
-- **Slice 7 resource boundary:** `PathExpand` now enforces configurable shared row/frontier/output-batch budgets plus hop cap and returns `ResourcesExhausted` before cyclic `WALK` queries can materialize unbounded paths. This is a bounded-memory/work guarantee, not constant-CPU for arbitrary graph queries; future hardening remains streaming/cursor path expansion, backpressure, and non-materializing adjacency scans for million-edge fallback cases.
-- **Slice 7 follow-ups complete (2026-07-08/09):** Tasks 20-25 closed configurable query budgets, streaming `PathExpandExec` batches, reachable-edge BFS/adjacency budget gates, traversal-oracle CPU reduction, TCK side effects/path-value comparison, and the final fuzz/TCK/traversal reclose.
-- **Slice 6:** ✅ COMPLETE (2026-07-06). Traversal, adjacency families, label filters, clause pipeline, `EXISTS` semi/anti joins, and traversal oracle/perf gates complete. Previous checkpoint demo: `cargo test -p varve --test labels`.
-
-- **Slice 5 (S3-API backends, object-store log, disk cache, capability probe):** ✅ COMPLETE
-  (2026-07-05, 1 session, SDD, 10 tasks). `storage = "s3"` now runs the whole stack against any S3-API
-  backend (Garage/SeaweedFS/MinIO/Ceph RGW via `object_store/aws`, default-on `s3` feature);
-  `log = "object-store"` writes one object per group-commit batch (`v1/log/<epoch>/<offset-lexhex>.vlog`)
-  into the shared block store; a disk `CacheTier` selected by name (`[cache] tiers`) survives restarts;
-  and a report-only 4-step capability probe classifies conditional-PUT semantics (Supported/Unsupported/
-  Inconsistent) — the gate slice-10 cas-failover will consume. Realized spec §4's full factory signature:
-  `ComponentFactory::build(cfg, ctx: &BuildContext)` (`BuildContext` = typed component map; engine builds
-  storage first, inserts the RAW store, then log/clock/cache factories build with it). New surfaces in
-  `varve-storage` (`s3`, `disk` cache, `cache_registry`, optional `ConditionalStore`+`probe`), `varve-log`
-  (`object-store` feature + `ObjectStoreLog`), engine `Db::probe_capabilities`, a docker-CLI backend
-  harness in `varve-testkit`, and CI `backend-matrix` (garage/seaweedfs/minio) + `backend-ceph-weekly`.
-  LIVE-validated against real containers: `just s3-matrix` (garage+seaweedfs+minio) fully green.
-  Demos: `cargo run --release --example cache_bench -p varve` and `just s3-matrix`.
-- **Slice 4 (blocks: flush to object storage, persisted scan, restart):** ✅ COMPLETE (2026-07-05).
-  `varve-storage` `ObjectStore` trait + Arrow block codec + `BlockManifest` atomic commit + one-lock
-  merged live∪persisted scan + `Db::open` manifest/log-tail recovery. Demo: `cargo run --release --example block_bench -p varve`.
-- **Slice 3 (durability: log, group commit, crash safety):** ✅ COMPLETE (2026-07-05). Log-serialized
-  writer loop + group commit onto a pluggable `Log` (`varve-log`: CRC32C frames, fsync-before-ack,
-  torn-tail recovery); `Db::open` replay; `kill -9` crash matrix. Demo: `cargo run --release --example write_bench -p varve`.
-- **Slice 2 (bitemporal core):** ✅ COMPLETE (2026-07-04). Events + XTDB Ceiling/Polygon port +
-  temporal GQL. Demo: `cargo run --example time_travel -p varve`.
-- **Slice 1 (walking skeleton):** ✅ COMPLETE (2026-07-04). INSERT → MATCH end-to-end in memory.
-  Demo: `cargo run --example hello -p varve` (still green under slice 3's writer loop).
-- **Detailed plans ready:** slice 0 ✅ (done) · slice 1 ✅ (done) · slice 2 ✅ (done) ·
-  slice 3 ✅ (done) · slices 4–11 generated just-in-time from the roadmap (writing-plans skill)
-  at each slice's start.
+- **Current entry point:** Slice 9 planning in `docs/plans/varve-v1-roadmap.md` -- write the Slice 9 detailed plan for server, CLI, and query-node role, then execute it task-by-task.
+- **Current slice:** 9 (Server, CLI, query nodes) -- NOT STARTED. Slice 8 is COMPLETE.
+- **Slice 8 completed session:** Task 14 whole-slice verification and docs closeout.
+- **Slice 8 shipped:** hash-trie key/parser and page path metadata; recovery/query trie-path pruning; manifest-history trie catalog; GC-only object-store delete; deterministic embedded compaction through manifest state; compaction query equivalence coverage; retention-aware embedded `Db::gc_once()`/`GcReport`; raw-object GDPR erase proof; churn plateau smoke/demo.
+- **Slice 8 Task 13 deviation:** plateau smoke reopens `Db` between compact+GC admin cycles so writer `next_block_id` recovers from latest manifest; avoid post-admin churn on the same handle until admin compaction/GC is routed through shared writer block-id state.
+- **Slice 8 final verification:** `rtk cargo fmt --all --check`; `rtk cargo clippy --workspace --all-targets -- -D warnings`; `rtk cargo test --workspace -- --test-threads=1` (630 passed, 71 suites); `rtk cargo test -p varve-testkit --test compaction_equivalence -- --test-threads=1` (4 passed); `rtk cargo run --release --example compaction_gc -p varve` printed objects before compaction 192, compaction jobs 1, objects after compaction 195, GC deleted 192 planned / 192 deleted, objects after GC 3, current rows 62.
+- **Slice 7:** COMPLETE (2026-07-09 reclosed through Task 25). Demo: `cargo run --release --example gql_tour -p varve`.
+- **Slice 6:** COMPLETE (2026-07-06). Demo: `cargo run --release --example traversal_bench -p varve`.
+- **Slice 5:** COMPLETE (2026-07-05). Demo: `cargo run --release --example cache_bench -p varve`; `just s3-matrix`.
+- **Slice 4:** COMPLETE (2026-07-05). Demo: `cargo run --release --example block_bench -p varve`.
+- **Slice 3:** COMPLETE (2026-07-05). Demo: `cargo run --release --example write_bench -p varve`.
+- **Slice 2:** COMPLETE (2026-07-04). Demo: `cargo run --example time_travel -p varve`.
+- **Slice 1:** COMPLETE (2026-07-04). Demo: `cargo run --example hello -p varve`.
 
 ## Environment facts (verify before relying on)
 
@@ -496,7 +476,7 @@
 | 5 s3 backends & caches | ✅ complete | 1 | `just s3-matrix` / `cargo run --release --example cache_bench -p varve` | `BuildContext` (spec-§4 factory sig); `storage/s3` (`object_store/aws`, default-on) for Garage/SeaweedFS/MinIO/Ceph; `log/object-store` (1 object per group-commit batch, shared bucket); disk `CacheTier` + `[cache] tiers` registry (memory/disk builtins, replaces `[cache] memory_max_bytes`); optional `ConditionalStore` + 4-step capability probe (`Db::probe_capabilities`); docker-CLI backend harness + CI `backend-matrix`/`backend-ceph-weekly`. LIVE trio (garage/seaweedfs/minio) green; probe verdicts minio=Supported, garage/seaweedfs=Inconsistent. 293 workspace tests |
 | 6 edges & traversal | ✅ complete | 1 | `cargo run --release --example traversal_bench -p varve` | edge events (`_src_iid`/`_dst_iid`) + `LiveTable` adjacency views; `INSERT (a)-[:REL]->(b)` inline + `MATCH…INSERT`; 3 sort-order edge families (primary/adj-out/adj-in) in one atomic manifest (`TableTries.family`); anchor-pruned `edge_adjacency`; multi-element MATCH → DataFusion hash joins; `PathExpand` UDLN+ExecutionPlan for `{m,n}`/`*` WALK + `RETURN p`; `DETACH DELETE` + still-connected error; independent traversal oracle (pure 10k + e2e + flush-invariance properties) + 10k/60k social fixture; anchor-reachable edge-pruning perf opt → **warm 2-hop 16.23 ms** (<50 ms). Caught+fixed a mid-slice `DELETE` data-loss bug. 372 workspace tests |
 | 7 GQL completion & TCK | ✅ complete | 5 | `cargo run --release --example gql_tour -p varve` | Tasks 1-25 complete. Practical-core expressions/statements/mutations/catalog/TCK/differential/fuzz/demo shipped; post-exit hardening closed configurable query budgets, streaming `PathExpandExec`, reachable-edge BFS budgets, traversal-oracle CPU reduction, TCK side effects/path values, and final fuzz reclose. Final verification: 596 workspace tests, clippy clean, fmt clean, release traversal oracle 6 passed in 49.17s, TCK 445/511 adapted passed (0.870841), 10-min parser fuzz 13,903,093 execs no crashes. Open future hardening: million-edge streaming/cursor/backpressure work. |
-| 8 compaction & GC | not started | – | – | no detailed plan yet |
+| 8 compaction & GC | ✅ complete | 4 | `cargo run --release --example compaction_gc -p varve` | Full hash trie keys/meta/recovery pruning; manifest-history trie catalog; deterministic embedded compaction; compaction query equivalence; retention-aware GC; raw-object erase proof; churn plateau demo. Final verification: fmt, clippy, workspace tests 630 passed, compaction equivalence 4 passed. Demo: 192 objects before compaction, 3 after GC, 62 current rows. |
 | 9 server, CLI, query nodes | not started | – | – | no detailed plan yet |
 | 10 coordination | not started | – | – | no detailed plan yet |
 | 11 ship | not started | – | – | no detailed plan yet |

@@ -116,6 +116,10 @@ impl ObjectStore for CountingStore {
     async fn list(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
         self.inner.list(prefix).await
     }
+
+    async fn delete(&self, key: &str) -> Result<(), StorageError> {
+        self.inner.delete(key).await
+    }
 }
 
 #[tokio::test]

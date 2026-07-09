@@ -172,6 +172,44 @@ async fn bitemporal_history_survives_flush_and_restart() {
 }
 
 #[tokio::test]
+async fn flushed_meta_paths_survive_restart() {
+    let dir = tempfile::tempdir().unwrap();
+
+    {
+        let db = Db::open(blocks_config(dir.path(), 2)).await.unwrap();
+        db.execute("INSERT (:Person {_id: 1, name: 'Ada'})")
+            .await
+            .unwrap();
+        db.execute("INSERT (:Person {_id: 2, name: 'Bob'})")
+            .await
+            .unwrap();
+        wait_for_flush(dir.path()).await;
+    }
+
+    let meta_path = dir
+        .path()
+        .join("store")
+        .join("v1")
+        .join("graphs")
+        .join("default")
+        .join("tables")
+        .join("nodes")
+        .join("meta")
+        .join("l00-rc-b00.arrow");
+    let meta = std::fs::read(&meta_path).unwrap();
+    let pages = varve_index::decode_meta(&meta).unwrap();
+    assert!(!pages.is_empty());
+    assert!(pages.iter().all(|page| page.path.is_empty()));
+
+    let db = Db::open(blocks_config(dir.path(), 2)).await.unwrap();
+    let point = db
+        .query("MATCH (p:Person) WHERE p._id = 2 RETURN p.name AS name")
+        .await
+        .unwrap();
+    assert_eq!(rows(&point), 1);
+}
+
+#[tokio::test]
 async fn local_log_with_memory_storage_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let log_dir = toml_escaped(&dir.path().join("log"));

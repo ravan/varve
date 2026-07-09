@@ -75,6 +75,23 @@ pub async fn latest_manifest(
     Ok(Some(BlockManifest::from_wire(&bytes)?))
 }
 
+pub async fn manifest_history(store: &dyn ObjectStore) -> Result<Vec<BlockManifest>, StorageError> {
+    let mut ids: Vec<u64> = store
+        .list(MANIFEST_PREFIX)
+        .await?
+        .iter()
+        .filter_map(|key| manifest_block_id(key))
+        .collect();
+    ids.sort_unstable();
+
+    let mut manifests = Vec::with_capacity(ids.len());
+    for id in ids {
+        let bytes = store.get(&manifest_key(id)).await?;
+        manifests.push(BlockManifest::from_wire(&bytes)?);
+    }
+    Ok(manifests)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

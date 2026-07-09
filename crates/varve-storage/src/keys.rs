@@ -23,10 +23,241 @@ pub fn parse_lex_hex(s: &str) -> Option<u64> {
     u64::from_str_radix(body, 16).ok()
 }
 
+pub const TRIE_LEVEL_BITS: u8 = 2;
+pub const TRIE_BRANCH_FACTOR: u8 = 1 << TRIE_LEVEL_BITS;
+pub const LOG_LIMIT: usize = 64;
+pub const PAGE_LIMIT: usize = 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Recency {
+    Current,
+    Week { yyyymmdd: u32 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TrieKey {
+    pub level: u64,
+    pub recency: Recency,
+    pub part: Vec<u8>,
+    pub block: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TrieShard {
+    pub level: u64,
+    pub recency: Recency,
+    pub part: Vec<u8>,
+}
+
+impl TrieKey {
+    pub fn l0(block: u64) -> TrieKey {
+        TrieKey {
+            level: 0,
+            recency: Recency::Current,
+            part: Vec::new(),
+            block,
+        }
+    }
+
+    pub fn child(&self, bucket: u8, block: u64) -> TrieKey {
+        let mut part = self.part.clone();
+        part.push(bucket);
+        TrieKey {
+            level: self.level + 1,
+            recency: self.recency.clone(),
+            part,
+            block,
+        }
+    }
+
+    pub fn to_key_string(&self) -> String {
+        let mut key = format!("l{}-r{}", lex_hex(self.level), self.recency.as_key_part());
+        if !self.part.is_empty() {
+            key.push_str("-p");
+            for bucket in &self.part {
+                key.push(char::from(b'0' + *bucket));
+            }
+        }
+        key.push_str("-b");
+        key.push_str(&lex_hex(self.block));
+        key
+    }
+
+    pub fn parse(s: &str) -> Result<TrieKey, crate::StorageError> {
+        let mut segments = s.split('-');
+        let level = segments
+            .next()
+            .and_then(|seg| seg.strip_prefix('l'))
+            .and_then(parse_lex_hex)
+            .ok_or_else(|| invalid_trie_key(s))?;
+        let recency = segments
+            .next()
+            .and_then(|seg| seg.strip_prefix('r'))
+            .ok_or_else(|| invalid_trie_key(s))
+            .and_then(|seg| Recency::parse(seg).ok_or_else(|| invalid_trie_key(s)))?;
+        let next = segments.next().ok_or_else(|| invalid_trie_key(s))?;
+        let (part, block_segment) = if let Some(part_text) = next.strip_prefix('p') {
+            if part_text.is_empty() {
+                return Err(invalid_trie_key(s));
+            }
+            let mut part = Vec::with_capacity(part_text.len());
+            for ch in part_text.chars() {
+                let Some(bucket) = ch.to_digit(TRIE_BRANCH_FACTOR as u32) else {
+                    return Err(invalid_trie_key(s));
+                };
+                part.push(bucket as u8);
+            }
+            (part, segments.next().ok_or_else(|| invalid_trie_key(s))?)
+        } else {
+            (Vec::new(), next)
+        };
+        if segments.next().is_some() {
+            return Err(invalid_trie_key(s));
+        }
+        let block = block_segment
+            .strip_prefix('b')
+            .and_then(parse_lex_hex)
+            .ok_or_else(|| invalid_trie_key(s))?;
+        Ok(TrieKey {
+            level,
+            recency,
+            part,
+            block,
+        })
+    }
+
+    pub fn shard(&self) -> TrieShard {
+        TrieShard {
+            level: self.level,
+            recency: self.recency.clone(),
+            part: self.part.clone(),
+        }
+    }
+}
+
+impl Recency {
+    fn as_key_part(&self) -> String {
+        match self {
+            Recency::Current => "c".to_string(),
+            Recency::Week { yyyymmdd } => format!("{yyyymmdd:08}"),
+        }
+    }
+
+    fn parse(s: &str) -> Option<Recency> {
+        if s == "c" {
+            return Some(Recency::Current);
+        }
+        if s.len() != 8 || !s.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let yyyymmdd = s.parse::<u32>().ok()?;
+        let year = yyyymmdd / 10_000;
+        let month = (yyyymmdd / 100) % 100;
+        let day = yyyymmdd % 100;
+        if valid_ymd(year, month, day) {
+            Some(Recency::Week { yyyymmdd })
+        } else {
+            None
+        }
+    }
+}
+
+pub struct Bucketer;
+
+impl Bucketer {
+    pub fn bucket(iid: &varve_types::Iid, level: usize) -> u8 {
+        let bit_idx = level * TRIE_LEVEL_BITS as usize;
+        assert!(bit_idx < 128, "trie level {level} exceeds 128-bit IID");
+        let byte_idx = bit_idx / 8;
+        let bit_offset = bit_idx % 8;
+        let shift = 8 - TRIE_LEVEL_BITS as usize - bit_offset;
+        (iid.as_bytes()[byte_idx] >> shift) & (TRIE_BRANCH_FACTOR - 1)
+    }
+
+    pub fn path(iid: &varve_types::Iid, levels: usize) -> Vec<u8> {
+        (0..levels)
+            .map(|level| Bucketer::bucket(iid, level))
+            .collect()
+    }
+
+    pub fn iid_start(path: &[u8]) -> varve_types::Iid {
+        let mut bytes = [0u8; 16];
+        for (level, bucket) in path.iter().copied().enumerate() {
+            assert!(
+                bucket < TRIE_BRANCH_FACTOR,
+                "trie bucket {bucket} outside branch factor {TRIE_BRANCH_FACTOR}"
+            );
+            let bit_idx = level * TRIE_LEVEL_BITS as usize;
+            assert!(bit_idx < 128, "trie path exceeds 128-bit IID");
+            let byte_idx = bit_idx / 8;
+            let bit_offset = bit_idx % 8;
+            let shift = 8 - TRIE_LEVEL_BITS as usize - bit_offset;
+            bytes[byte_idx] |= bucket << shift;
+        }
+        varve_types::Iid::from_bytes(bytes)
+    }
+
+    pub fn iid_next_start(path: &[u8]) -> Option<varve_types::Iid> {
+        if path.is_empty() {
+            return None;
+        }
+        let mut next = path.to_vec();
+        for idx in (0..next.len()).rev() {
+            if next[idx] + 1 < TRIE_BRANCH_FACTOR {
+                next[idx] += 1;
+                for bucket in &mut next[idx + 1..] {
+                    *bucket = 0;
+                }
+                return Some(Bucketer::iid_start(&next));
+            }
+        }
+        None
+    }
+
+    pub fn contains(path: &[u8], iid: &varve_types::Iid) -> bool {
+        path.iter()
+            .copied()
+            .enumerate()
+            .all(|(level, bucket)| Bucketer::bucket(iid, level) == bucket)
+    }
+
+    pub fn filter_iids_for_path<'a>(
+        iids: impl IntoIterator<Item = &'a varve_types::Iid>,
+        path: &[u8],
+    ) -> Vec<varve_types::Iid> {
+        iids.into_iter()
+            .copied()
+            .filter(|iid| Bucketer::contains(path, iid))
+            .collect()
+    }
+}
+
+fn invalid_trie_key(key: &str) -> crate::StorageError {
+    crate::StorageError::InvalidKey(key.to_string())
+}
+
+fn valid_ymd(year: u32, month: u32, day: u32) -> bool {
+    if year == 0 || !(1..=12).contains(&month) {
+        return false;
+    }
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=max_day).contains(&day)
+}
+
+fn is_leap_year(year: u32) -> bool {
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+}
+
 /// L0 trie key (XTDB `Trie.l0Key`): level 0, recency `c` (current), no part
 /// segment. Levels > 0, recency dates, and IID partitions arrive in slice 8.
 pub fn l0_trie_key(block_id: u64) -> String {
-    format!("l{}-rc-b{}", lex_hex(0), lex_hex(block_id))
+    TrieKey::l0(block_id).to_key_string()
 }
 
 pub fn data_key(graph: &str, table: &str, trie_key: &str) -> String {

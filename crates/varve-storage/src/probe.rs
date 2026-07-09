@@ -200,6 +200,10 @@ mod tests {
         async fn list(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
             self.0.list(prefix).await
         }
+
+        async fn delete(&self, key: &str) -> Result<(), StorageError> {
+            self.0.delete(key).await
+        }
     }
 
     #[tokio::test]
@@ -230,6 +234,11 @@ mod tests {
         async fn list(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
             self.inner.list(prefix).await
         }
+
+        async fn delete(&self, key: &str) -> Result<(), StorageError> {
+            self.inner.delete(key).await
+        }
+
         fn conditional(&self) -> Option<&dyn ConditionalStore> {
             Some(self)
         }
@@ -295,6 +304,11 @@ mod tests {
         async fn list(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
             self.inner.list(prefix).await
         }
+
+        async fn delete(&self, key: &str) -> Result<(), StorageError> {
+            self.inner.delete(key).await
+        }
+
         fn conditional(&self) -> Option<&dyn ConditionalStore> {
             Some(self)
         }

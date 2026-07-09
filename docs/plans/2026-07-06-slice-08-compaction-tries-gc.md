@@ -158,6 +158,23 @@ pub async fn gc_once(store: &Arc<dyn ObjectStore>, cfg: &GcConfig) -> Result<GcR
 
 ## Task Breakdown
 
+## Task Status
+
+- [x] Task 1: Trie key parser and Bucketer
+- [x] Task 2: Page meta carries trie path and prunes by path
+- [x] Task 3: Recovery and scans consume path-aware meta
+- [x] Task 4: Manifest history reader and derived trie catalog
+- [x] Task 5: Add GC-only delete to ObjectStore
+- [x] Task 6: Pure compaction job selection
+- [x] Task 7: Compaction block writer and deterministic merge
+- [x] Task 8: Commit compaction through manifest and in-memory state
+- [x] Task 9: Query equivalence before and after compaction
+- [x] Task 10: GC planning from block retention and garbage lifetime
+- [x] Task 11: Execute GC and expose embedded API
+- [x] Task 12: Physical erase proof after compaction plus GC
+- [x] Task 13: Churn plateau smoke test and compaction demo
+- [x] Task 14: Whole-slice verification and docs closeout
+
 ### Task 1: Trie key parser and Bucketer
 
 **Files:**
@@ -497,14 +514,14 @@ pub async fn gc_once(store: &Arc<dyn ObjectStore>, cfg: &GcConfig) -> Result<GcR
 - Modify: `docs/plans/STATUS.md`
 
 **Checklist:**
-- [ ] `rtk cargo fmt --all --check`
-- [ ] `rtk cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `rtk cargo test --workspace -- --test-threads=1`
-- [ ] `rtk cargo test -p varve-testkit --test compaction_equivalence -- --test-threads=1`
-- [ ] `rtk cargo run --release --example compaction_gc -p varve`
-- [ ] STATUS.md updated with position, decisions, deviations, demo command, and next entry point.
-- [ ] Roadmap Slice 8 boxes checked.
-- [ ] This plan's completed task boxes checked.
+- [x] `rtk cargo fmt --all --check`
+- [x] `rtk cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `rtk cargo test --workspace -- --test-threads=1`
+- [x] `rtk cargo test -p varve-testkit --test compaction_equivalence -- --test-threads=1`
+- [x] `rtk cargo run --release --example compaction_gc -p varve`
+- [x] STATUS.md updated with position, decisions, deviations, demo command, and next entry point.
+- [x] Roadmap Slice 8 boxes checked.
+- [x] This plan's completed task boxes checked.
 
 **Commit:**
 - `docs: close slice 8 compaction gc`
