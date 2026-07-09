@@ -1,6 +1,6 @@
 use crate::clock::{Clock, MonotonicClock};
 use crate::compact::{
-    select_compaction_jobs, write_compacted_blocks, CompactionConfig, CompactionInputBlock,
+    self, select_compaction_jobs, write_compacted_blocks, CompactionConfig, CompactionInputBlock,
     CompactionReport,
 };
 use crate::const_eval::const_value;
@@ -13,7 +13,7 @@ use crate::state::{
 };
 use crate::writer::{spawn_writer, Submission, WriterConfig, WriterState};
 use datafusion::arrow::record_batch::RecordBatch;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -22,12 +22,12 @@ use tokio::sync::{mpsc, oneshot};
 use varve_config::{BuildContext, Config, ConfigError, ConfigSection, RegistryError};
 use varve_gql::ast::{Expr, LabelSpec, QueryBody, Statement};
 use varve_gql::token::GqlError;
-use varve_index::{decode_events, Event, IndexError, LabelFilter, LiveTable, Op, SortOrder};
+use varve_index::{decode_events, Event, IndexError, LabelFilter, LiveTable, Op};
 use varve_log::{LocalLog, Log, LogError, MemoryLog, DEFAULT_SEGMENT_MAX_BYTES};
 use varve_plan::PlanError;
 use varve_storage::{
-    keys, manifest_history, memory_store, BlockManifest, CachedStore, MemoryCache, ObjectStore,
-    ProbeReport, StorageError, TableTries, TrieCatalog, TrieEntry,
+    keys, manifest_history, memory_store, CachedStore, MemoryCache, ObjectStore, ProbeReport,
+    StorageError, TrieCatalog, TrieEntry,
 };
 use varve_types::{Instant, LogPosition, TemporalBounds, TypeError, Value};
 
@@ -360,66 +360,6 @@ impl std::fmt::Debug for Db {
 /// [`Db::plan_fast_path`] when the query's shape is provably coverable. It is a
 /// pruned-but-complete drop-in for the full-scan input, never a replacement:
 /// when `plan_fast_path` returns `None`, `query` uses the full scan verbatim.
-fn compaction_sort_order(table: &str, family: &str) -> Result<SortOrder, EngineError> {
-    match (table, family) {
-        (NODES_TABLE, "") | (EDGES_TABLE, "") => Ok(SortOrder::ByIid),
-        (EDGES_TABLE, varve_storage::ADJ_OUT) => Ok(SortOrder::BySrc),
-        (EDGES_TABLE, varve_storage::ADJ_IN) => Ok(SortOrder::ByDst),
-        _ => Err(EngineError::UnknownTable(format!("{table}/{family}"))),
-    }
-}
-
-fn compacted_manifest(
-    latest: &BlockManifest,
-    job: &crate::compact::CompactionJob,
-    output_entries: Vec<TrieEntry>,
-) -> BlockManifest {
-    let input_keys = compaction_input_key_set(job);
-    let mut tables = latest.tables.clone();
-    let mut replaced = false;
-    for table in &mut tables {
-        if table.scope_ref().eq(job.scope()) {
-            replace_compacted_tries(
-                &mut table.tries,
-                &input_keys,
-                output_entries.clone(),
-                |entry| entry.trie_key.as_str(),
-            );
-            replaced = true;
-            break;
-        }
-    }
-    if !replaced && !output_entries.is_empty() {
-        let mut tries = Vec::new();
-        replace_compacted_tries(&mut tries, &input_keys, output_entries, |entry| {
-            entry.trie_key.as_str()
-        });
-        tables.push(TableTries::new(job.scope().clone(), tries));
-    }
-    BlockManifest {
-        block_id: latest.block_id + 1,
-        watermark: latest.watermark,
-        max_tx_id: latest.max_tx_id,
-        max_system_time_us: latest.max_system_time_us,
-        tables,
-    }
-}
-
-fn compaction_input_key_set(job: &crate::compact::CompactionJob) -> BTreeSet<String> {
-    job.input_key_strings().into_iter().collect()
-}
-
-fn replace_compacted_tries<T>(
-    tries: &mut Vec<T>,
-    input_keys: &BTreeSet<String>,
-    outputs: impl IntoIterator<Item = T>,
-    trie_key: impl Fn(&T) -> &str,
-) {
-    tries.retain(|entry| !input_keys.contains(trie_key(entry)));
-    tries.extend(outputs);
-    tries.sort_by(|a, b| trie_key(a).cmp(trie_key(b)));
-}
-
 pub(crate) enum FastPath {
     /// Fixed homogeneous path (all hops `Edge`, one label + direction, no
     /// inline edge props, no edge var referenced): the shared reachable-edge
@@ -853,7 +793,9 @@ impl Db {
         let Some(job) = jobs.drain(..).next() else {
             return Ok(CompactionReport::default());
         };
-        let order = compaction_sort_order(&job.scope().table, &job.scope().family)?;
+        let order = job.target_sort_order().ok_or_else(|| {
+            EngineError::UnknownTable(format!("{}/{}", job.scope().table, job.scope().family))
+        })?;
 
         let mut inputs = Vec::with_capacity(job.input_trie_keys.len());
         for trie_key in &job.input_trie_keys {
@@ -903,7 +845,7 @@ impl Db {
         }
 
         let output_rows = output_entries.iter().map(|entry| entry.row_count).sum();
-        let manifest = compacted_manifest(latest, &job, output_entries.clone());
+        let manifest = compact::compacted_manifest(latest, &job, output_entries.clone());
         self.store
             .put(
                 &keys::manifest_key(manifest.block_id),
@@ -912,7 +854,6 @@ impl Db {
             .await?;
 
         {
-            let input_keys = compaction_input_key_set(&job);
             let mut state = self.state.write().map_err(|_| EngineError::Poisoned)?;
             let scope = job.scope();
             let table = state
@@ -930,9 +871,7 @@ impl Db {
                     )))
                 }
             };
-            replace_compacted_tries(tries, &input_keys, persisted, |trie| {
-                trie.entry.trie_key.as_str()
-            });
+            job.replace_inputs_with_outputs(tries, persisted, |trie| trie.entry.trie_key.as_str());
         }
 
         Ok(CompactionReport {
