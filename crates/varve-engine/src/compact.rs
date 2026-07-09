@@ -315,7 +315,7 @@ pub(crate) fn write_compacted_blocks(
                 Reverse(b.system_from),
             ))
         });
-        let encoded = encode_sorted_events_by(&rows, page_rows, order, &trie_key.part)?;
+        let encoded = encode_sorted_events_by(&rows, page_rows, order, trie_key.level as usize)?;
         if !encoded.pages.is_empty() {
             outputs.push(CompactedBlock { trie_key, encoded });
         }

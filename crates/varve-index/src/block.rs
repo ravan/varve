@@ -17,11 +17,12 @@ use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
-use varve_types::{Bucketer, Iid, Instant, TemporalBounds};
+use varve_types::{Bucketer, Iid, Instant, TemporalBounds, TRIE_LEVEL_BITS};
 
 /// Rows per page (XTDB `pageLimit`). A parameter on `encode_block` so tests
 /// can force page splits; the engine passes this constant.
 pub const DEFAULT_PAGE_ROWS: usize = 1024;
+const MAX_TRIE_PATH_LEVELS: usize = 128 / (TRIE_LEVEL_BITS as usize);
 
 /// One page's entry in the meta file: byte range in the data file plus the
 /// stats the scan prunes by.
@@ -141,26 +142,7 @@ pub fn encode_block_by(
         }
     }
 
-    let mut data = Vec::new();
-    let mut pages = Vec::new();
-    let chunk = page_rows.max(1);
-    for (i, events) in rows.chunks(chunk).enumerate() {
-        let offset = data.len() as u64;
-        let bytes = encode_events(events)?;
-        data.extend_from_slice(&bytes);
-        let key_chunk = &keys[i * chunk..i * chunk + events.len()];
-        let mut meta = page_meta(events, offset, bytes.len() as u64);
-        // Record the SORT KEY's range, not the row iids — this is what
-        // `PageMeta::selected` prunes an adjacency anchor against. For ByIid
-        // the sort key IS the iid, so this equals `page_meta`'s own min/max.
-        // A chunk is never empty (`chunks` skips empties), so the fallback
-        // is unreachable; `unwrap_or` only exists to satisfy the no-unwrap rule.
-        meta.min_iid = *key_chunk.iter().min().unwrap_or(&meta.min_iid);
-        meta.max_iid = *key_chunk.iter().max().unwrap_or(&meta.max_iid);
-        pages.push(meta);
-    }
-    let meta = encode_meta(&pages)?;
-    Ok(EncodedBlock { data, meta, pages })
+    encode_pages_by_keys(&rows, &keys, page_rows, 0)
 }
 
 /// Serializes rows already ordered for a compacted trie output.
@@ -168,25 +150,47 @@ pub fn encode_block_by(
 /// `rows` must be sorted by `(sort_key asc, _iid asc, _system_from desc)`.
 /// This helper exists so compaction can preserve deterministic merge order
 /// without rebuilding a `LiveTable`, while still sharing the exact page/meta
-/// codec used by ordinary flushes.
+/// codec used by ordinary flushes. Page paths are longest shared sort-key
+/// bucket prefixes, capped at `page_path_levels`.
 pub fn encode_sorted_events_by(
     rows: &[Event],
     page_rows: usize,
     order: SortOrder,
-    path: &[u8],
+    page_path_levels: usize,
 ) -> Result<EncodedBlock, IndexError> {
     let mut keys = Vec::with_capacity(rows.len());
     for event in rows {
-        let key = match order {
-            SortOrder::ByIid => event.iid,
-            SortOrder::BySrc => event.src.ok_or_else(|| {
-                IndexError::Codec("edge event missing src endpoint in adjacency encode".into())
-            })?,
-            SortOrder::ByDst => event.dst.ok_or_else(|| {
-                IndexError::Codec("edge event missing dst endpoint in adjacency encode".into())
-            })?,
-        };
-        keys.push(key);
+        keys.push(event_sort_key(event, order)?);
+    }
+
+    encode_pages_by_keys(rows, &keys, page_rows, page_path_levels)
+}
+
+fn event_sort_key(event: &Event, order: SortOrder) -> Result<Iid, IndexError> {
+    match order {
+        SortOrder::ByIid => Ok(event.iid),
+        SortOrder::BySrc => event.src.ok_or_else(|| {
+            IndexError::Codec("edge event missing src endpoint in adjacency encode".into())
+        }),
+        SortOrder::ByDst => event.dst.ok_or_else(|| {
+            IndexError::Codec("edge event missing dst endpoint in adjacency encode".into())
+        }),
+    }
+}
+
+fn encode_pages_by_keys(
+    rows: &[Event],
+    keys: &[Iid],
+    page_rows: usize,
+    page_path_levels: usize,
+) -> Result<EncodedBlock, IndexError> {
+    if rows.len() != keys.len() {
+        return Err(IndexError::Codec("page key count mismatch".into()));
+    }
+    if page_path_levels > MAX_TRIE_PATH_LEVELS {
+        return Err(IndexError::Codec(format!(
+            "page path level {page_path_levels} exceeds 128-bit IID trie depth"
+        )));
     }
 
     let mut data = Vec::new();
@@ -198,14 +202,41 @@ pub fn encode_sorted_events_by(
         data.extend_from_slice(&bytes);
         let key_chunk = &keys[i * chunk..i * chunk + events.len()];
         let mut meta = page_meta(events, offset, bytes.len() as u64);
-        meta.path = path.to_vec();
-        meta.min_iid = *key_chunk.iter().min().unwrap_or(&meta.min_iid);
-        meta.max_iid = *key_chunk.iter().max().unwrap_or(&meta.max_iid);
+        meta.path = shared_page_path(key_chunk, page_path_levels);
+        // Record the SORT KEY's range, not row iids; adjacency scans use this
+        // field for the anchor entity while primary scans use the row iid.
+        if let Some(min_iid) = key_chunk.iter().min().copied() {
+            meta.min_iid = min_iid;
+        }
+        if let Some(max_iid) = key_chunk.iter().max().copied() {
+            meta.max_iid = max_iid;
+        }
         pages.push(meta);
     }
 
     let meta = encode_meta(&pages)?;
     Ok(EncodedBlock { data, meta, pages })
+}
+
+fn shared_page_path(keys: &[Iid], page_path_levels: usize) -> Vec<u8> {
+    let Some(first) = keys.first() else {
+        return Vec::new();
+    };
+
+    let mut path = Vec::with_capacity(page_path_levels);
+    for level in 0..page_path_levels {
+        let bucket = Bucketer::bucket(first, level);
+        if keys
+            .iter()
+            .skip(1)
+            .all(|key| Bucketer::bucket(key, level) == bucket)
+        {
+            path.push(bucket);
+        } else {
+            break;
+        }
+    }
+    path
 }
 
 /// Stats over one page's events. `chunks()` never yields an empty slice.
@@ -444,6 +475,111 @@ mod tests {
                 doc: BTreeMap::new(),
             },
         }
+    }
+
+    fn raw_iid(first_byte: u8, tag: u8) -> Iid {
+        let mut bytes = [0; 16];
+        bytes[0] = first_byte;
+        bytes[15] = tag;
+        Iid::from_bytes(bytes)
+    }
+
+    fn put_raw(iid: Iid, at: i64) -> Event {
+        Event {
+            iid,
+            system_from: us(at),
+            valid_from: us(at),
+            valid_to: EOT,
+            src: None,
+            dst: None,
+            op: Op::Put {
+                labels: vec!["P".into()],
+                doc: Doc::new(),
+            },
+        }
+    }
+
+    fn edge_raw(iid: Iid, src: Iid, dst: Iid, at: i64) -> Event {
+        Event {
+            iid,
+            system_from: us(at),
+            valid_from: us(at),
+            valid_to: EOT,
+            src: Some(src),
+            dst: Some(dst),
+            op: Op::Put {
+                labels: vec!["KNOWS".into()],
+                doc: BTreeMap::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn encoded_meta_records_leaf_paths() {
+        let rows = vec![
+            put_raw(raw_iid(0b0000_0000, 1), 1),
+            put_raw(raw_iid(0b0100_0000, 2), 2),
+            put_raw(raw_iid(0b1000_0000, 3), 3),
+        ];
+
+        let block = encode_sorted_events_by(&rows, 1, SortOrder::ByIid, 1).unwrap();
+
+        assert_eq!(block.pages.len(), rows.len());
+        assert_eq!(
+            block
+                .pages
+                .iter()
+                .map(|page| page.path.clone())
+                .collect::<Vec<_>>(),
+            rows.iter()
+                .map(|row| Bucketer::path(&row.iid, 1))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(decode_meta(&block.meta).unwrap(), block.pages);
+
+        let shared_prefix_rows = vec![
+            put_raw(raw_iid(0b0000_0000, 4), 4),
+            put_raw(raw_iid(0b0010_0000, 5), 5),
+        ];
+        let shared_prefix =
+            encode_sorted_events_by(&shared_prefix_rows, 2, SortOrder::ByIid, 2).unwrap();
+
+        assert_eq!(shared_prefix.pages.len(), 1);
+        assert_eq!(
+            shared_prefix.pages[0].path,
+            vec![Bucketer::bucket(&shared_prefix_rows[0].iid, 0)]
+        );
+        assert_ne!(
+            shared_prefix.pages[0].path,
+            Bucketer::path(&shared_prefix_rows[0].iid, 2)
+        );
+    }
+
+    #[test]
+    fn by_src_adjacency_paths_use_sort_key_not_edge_iid() {
+        let src_a = raw_iid(0b0000_0000, 10);
+        let src_b = raw_iid(0b0100_0000, 11);
+        let dst = raw_iid(0b0000_0000, 12);
+        let rows = vec![
+            edge_raw(raw_iid(0b1100_0000, 20), src_a, dst, 1),
+            edge_raw(raw_iid(0b1000_0000, 21), src_b, dst, 2),
+        ];
+
+        let block = encode_sorted_events_by(&rows, 1, SortOrder::BySrc, 1).unwrap();
+
+        assert_eq!(block.pages.len(), 2);
+        assert_eq!(block.pages[0].path, Bucketer::path(&src_a, 1));
+        assert_eq!(block.pages[1].path, Bucketer::path(&src_b, 1));
+        assert_ne!(block.pages[0].path, Bucketer::path(&rows[0].iid, 1));
+        assert_ne!(block.pages[1].path, Bucketer::path(&rows[1].iid, 1));
+        assert_eq!(
+            (block.pages[0].min_iid, block.pages[0].max_iid),
+            (src_a, src_a)
+        );
+        assert_eq!(
+            (block.pages[1].min_iid, block.pages[1].max_iid),
+            (src_b, src_b)
+        );
     }
 
     #[test]
