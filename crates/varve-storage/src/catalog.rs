@@ -1,4 +1,4 @@
-use crate::keys::{Recency, ScopedTrieKey, TableScope, TrieKey};
+use crate::keys::{Recency, ScopedTrieKey, TrieKey};
 use crate::{BlockManifest, StorageError, TrieEntry};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -17,7 +17,7 @@ struct CatalogEntry {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScopedTrieEntry {
-    pub scope: TableScope,
+    pub scoped_key: ScopedTrieKey,
     pub entry: TrieEntry,
 }
 
@@ -75,7 +75,7 @@ impl TrieCatalog {
             .iter()
             .filter(|(_, entry)| entry.state == TrieState::Live)
             .map(|(key, entry)| ScopedTrieEntry {
-                scope: key.scope.clone(),
+                scoped_key: key.clone(),
                 entry: entry.entry.clone(),
             })
             .collect()
@@ -83,28 +83,30 @@ impl TrieCatalog {
 }
 
 struct ParsedEntry {
-    scope: TableScope,
+    scoped_key: ScopedTrieKey,
     entry: TrieEntry,
     key: TrieKey,
 }
 
 impl ParsedEntry {
     fn catalog_key(&self) -> ScopedTrieKey {
-        ScopedTrieKey::new(self.scope.clone(), self.entry.trie_key.clone())
+        self.scoped_key.clone()
     }
 
     fn same_scope(&self, other: &ParsedEntry) -> bool {
-        self.scope == other.scope
+        self.scoped_key.scope == other.scoped_key.scope
     }
 }
 
 fn parsed_manifest_entries(manifest: &BlockManifest) -> Result<Vec<ParsedEntry>, StorageError> {
     let mut out = Vec::new();
     for manifest_entry in manifest.trie_entries() {
+        let scoped_key = manifest_entry.scoped_trie_key();
+        let key = scoped_key.parse_trie_key()?;
         out.push(ParsedEntry {
-            scope: manifest_entry.scope(),
+            scoped_key,
             entry: manifest_entry.entry.clone(),
-            key: TrieKey::parse(&manifest_entry.entry.trie_key)?,
+            key,
         });
     }
     Ok(out)

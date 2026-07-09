@@ -62,6 +62,10 @@ impl TableScope {
             adj_meta_key(&self.graph, &self.table, &self.family, trie_key)
         }
     }
+
+    pub fn scoped_trie_key(&self, trie_key: impl Into<String>) -> ScopedTrieKey {
+        ScopedTrieKey::new(self.clone(), trie_key)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -85,6 +89,17 @@ impl ScopedTrieKey {
     pub fn meta_key(&self) -> String {
         self.scope.meta_key(&self.trie_key)
     }
+
+    pub fn parse_trie_key(&self) -> Result<TrieKey, crate::StorageError> {
+        TrieKey::parse(&self.trie_key)
+    }
+
+    pub fn trie_shard(&self) -> Result<TrieShard, crate::StorageError> {
+        Ok(TrieShard::from_trie_key(
+            self.scope.clone(),
+            &self.parse_trie_key()?,
+        ))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -94,10 +109,31 @@ pub struct TrieKeyShard {
     pub part: Vec<u8>,
 }
 
+impl TrieKeyShard {
+    pub fn to_trie_key(&self, block: u64) -> TrieKey {
+        TrieKey {
+            level: self.level,
+            recency: self.recency.clone(),
+            part: self.part.clone(),
+            block,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TrieShard {
     pub scope: TableScope,
     pub key_shard: TrieKeyShard,
+}
+
+impl TrieShard {
+    pub fn new(scope: TableScope, key_shard: TrieKeyShard) -> TrieShard {
+        TrieShard { scope, key_shard }
+    }
+
+    pub fn from_trie_key(scope: TableScope, trie_key: &TrieKey) -> TrieShard {
+        TrieShard::new(scope, trie_key.shard())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

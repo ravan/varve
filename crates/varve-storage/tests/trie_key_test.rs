@@ -1,6 +1,6 @@
 use varve_storage::keys::{
-    l0_trie_key, Bucketer, Recency, TableScope, TrieKey, TrieKeyShard, ADJ_IN, LOG_LIMIT,
-    TRIE_BRANCH_FACTOR, TRIE_LEVEL_BITS,
+    l0_trie_key, Bucketer, Recency, TableScope, TrieKey, TrieKeyShard, TrieShard, ADJ_IN,
+    LOG_LIMIT, TRIE_BRANCH_FACTOR, TRIE_LEVEL_BITS,
 };
 
 #[test]
@@ -74,6 +74,33 @@ fn trie_key_shard_excludes_block() {
         }
         .shard()
     );
+}
+
+#[test]
+fn scoped_trie_key_and_shard_helpers_round_trip() {
+    let scope = TableScope::new("default", "edges", ADJ_IN);
+    let key = TrieKey {
+        level: 2,
+        recency: Recency::Week { yyyymmdd: 20200106 },
+        part: vec![1, 3],
+        block: 9,
+    };
+    let scoped = scope.scoped_trie_key(key.to_key_string());
+
+    assert_eq!(scoped.scope, scope);
+    assert_eq!(scoped.parse_trie_key().unwrap(), key);
+    assert_eq!(
+        scoped.trie_shard().unwrap(),
+        TrieShard::new(
+            scoped.scope.clone(),
+            TrieKeyShard {
+                level: 2,
+                recency: Recency::Week { yyyymmdd: 20200106 },
+                part: vec![1, 3],
+            },
+        )
+    );
+    assert_eq!(key.shard().to_trie_key(10), TrieKey { block: 10, ..key });
 }
 
 #[test]

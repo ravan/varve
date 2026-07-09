@@ -5,7 +5,7 @@ use varve_index::{
     Polygon, SortOrder,
 };
 use varve_storage::keys::{Bucketer, Recency, TrieKey, TRIE_BRANCH_FACTOR};
-use varve_storage::{StorageError, TableScope, TrieCatalog, TrieShard};
+use varve_storage::{ScopedTrieKey, StorageError, TableScope, TrieCatalog, TrieShard};
 use varve_types::{Iid, Instant};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,8 +31,33 @@ pub(crate) enum CompactionKind {
 pub(crate) struct CompactionJob {
     pub kind: CompactionKind,
     pub scope: TableScope,
-    pub input_trie_keys: Vec<String>,
+    pub input_trie_keys: Vec<TrieKey>,
     pub output_trie_keys: Vec<TrieKey>,
+}
+
+impl CompactionJob {
+    pub(crate) fn scope(&self) -> &TableScope {
+        &self.scope
+    }
+
+    pub(crate) fn input_key_strings(&self) -> Vec<String> {
+        self.input_trie_keys
+            .iter()
+            .map(TrieKey::to_key_string)
+            .collect()
+    }
+
+    pub(crate) fn scoped_key(&self, trie_key: &TrieKey) -> ScopedTrieKey {
+        self.scope.scoped_trie_key(trie_key.to_key_string())
+    }
+
+    pub(crate) fn data_key(&self, trie_key: &TrieKey) -> String {
+        self.scoped_key(trie_key).data_key()
+    }
+
+    pub(crate) fn meta_key(&self, trie_key: &TrieKey) -> String {
+        self.scoped_key(trie_key).meta_key()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -46,7 +71,7 @@ pub struct CompactionReport {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CompactionInputBlock {
-    pub trie_key: String,
+    pub trie_key: TrieKey,
     pub data: Vec<u8>,
     pub pages: Vec<PageMeta>,
 }
@@ -58,7 +83,7 @@ pub(crate) struct CompactedBlock {
 
 #[derive(Clone)]
 struct LiveTrie {
-    scope: TableScope,
+    scoped_key: ScopedTrieKey,
     key: TrieKey,
 }
 
@@ -68,21 +93,22 @@ pub(crate) fn select_compaction_jobs(
 ) -> Result<Vec<CompactionJob>, StorageError> {
     let mut live = Vec::new();
     for live_entry in catalog.live_entries() {
+        let key = live_entry.scoped_key.parse_trie_key()?;
         live.push(LiveTrie {
-            scope: live_entry.scope,
-            key: TrieKey::parse(&live_entry.entry.trie_key)?,
+            scoped_key: live_entry.scoped_key,
+            key,
         });
     }
     live.sort_by(|a, b| {
         (
-            &a.scope,
+            &a.scoped_key.scope,
             &a.key.level,
             &a.key.recency,
             &a.key.part,
             &a.key.block,
         )
             .cmp(&(
-                &b.scope,
+                &b.scoped_key.scope,
                 &b.key.level,
                 &b.key.recency,
                 &b.key.part,
@@ -106,7 +132,10 @@ pub(crate) fn select_compaction_jobs(
 fn select_l0_jobs(live: &[LiveTrie], config: &CompactionConfig, jobs: &mut Vec<CompactionJob>) {
     let mut groups: BTreeMap<TableScope, Vec<&LiveTrie>> = BTreeMap::new();
     for trie in live.iter().filter(|trie| trie.key.level == 0) {
-        groups.entry(trie.scope.clone()).or_default().push(trie);
+        groups
+            .entry(trie.scoped_key.scope.clone())
+            .or_default()
+            .push(trie);
     }
 
     for (scope, mut tries) in groups {
@@ -123,7 +152,7 @@ fn select_l0_jobs(live: &[LiveTrie], config: &CompactionConfig, jobs: &mut Vec<C
         jobs.push(CompactionJob {
             kind: CompactionKind::L0ToL1Split,
             scope,
-            input_trie_keys: inputs.iter().map(|trie| trie.key.to_key_string()).collect(),
+            input_trie_keys: inputs.iter().map(|trie| trie.key.clone()).collect(),
             output_trie_keys: vec![TrieKey {
                 level: 1,
                 recency: Recency::Current,
@@ -138,10 +167,10 @@ fn select_same_shard_jobs(live: &[LiveTrie], jobs: &mut Vec<CompactionJob>) {
     let mut groups: BTreeMap<TrieShard, Vec<&LiveTrie>> = BTreeMap::new();
     for trie in live.iter().filter(|trie| trie.key.level >= 1) {
         groups
-            .entry(TrieShard {
-                scope: trie.scope.clone(),
-                key_shard: trie.key.shard(),
-            })
+            .entry(TrieShard::from_trie_key(
+                trie.scoped_key.scope.clone(),
+                &trie.key,
+            ))
             .or_default()
             .push(trie);
     }
@@ -160,19 +189,14 @@ fn select_same_shard_jobs(live: &[LiveTrie], jobs: &mut Vec<CompactionJob>) {
             .map(|trie| trie.key.block)
             .max()
             .unwrap_or_default();
-        let parent = TrieKey {
-            level: shard.key_shard.level,
-            recency: shard.key_shard.recency.clone(),
-            part: shard.key_shard.part.clone(),
-            block,
-        };
+        let parent = shard.key_shard.to_trie_key(block);
         let output_trie_keys = (0..TRIE_BRANCH_FACTOR)
             .map(|bucket| parent.child(bucket, block))
             .collect();
         jobs.push(CompactionJob {
             kind: CompactionKind::SameShard,
             scope: shard.scope,
-            input_trie_keys: inputs.iter().map(|trie| trie.key.to_key_string()).collect(),
+            input_trie_keys: inputs.iter().map(|trie| trie.key.clone()).collect(),
             output_trie_keys,
         });
     }
@@ -186,10 +210,7 @@ pub(crate) fn write_compacted_blocks(
 ) -> Result<Vec<CompactedBlock>, IndexError> {
     let mut sorted_inputs = Vec::with_capacity(inputs.len());
     for input in inputs {
-        let key = TrieKey::parse(&input.trie_key).map_err(|err| {
-            IndexError::Codec(format!("invalid compaction input trie key: {err}"))
-        })?;
-        sorted_inputs.push((key, input));
+        sorted_inputs.push((input.trie_key.clone(), input));
     }
     sorted_inputs.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -359,6 +380,10 @@ mod tests {
         }
     }
 
+    fn parse_trie_key(key: &str) -> TrieKey {
+        TrieKey::parse(key).unwrap()
+    }
+
     fn catalog(keys: Vec<String>) -> TrieCatalog {
         TrieCatalog::from_manifests(&[BlockManifest {
             block_id: 99,
@@ -387,6 +412,7 @@ mod tests {
         assert_eq!(job.kind, CompactionKind::L0ToL1Split);
         assert_eq!(job.scope, TableScope::new("default", "nodes", ""));
         assert_eq!(job.input_trie_keys.len(), 64);
+        assert_eq!(job.input_trie_keys[0], TrieKey::l0(0));
         assert_eq!(
             job.output_trie_keys,
             vec![TrieKey {
@@ -410,7 +436,12 @@ mod tests {
         assert_eq!(job.kind, CompactionKind::SameShard);
         assert_eq!(
             job.input_trie_keys,
-            vec!["l01-rc-b00", "l01-rc-b01", "l01-rc-b02", "l01-rc-b03",]
+            vec![
+                parse_trie_key("l01-rc-b00"),
+                parse_trie_key("l01-rc-b01"),
+                parse_trie_key("l01-rc-b02"),
+                parse_trie_key("l01-rc-b03"),
+            ]
         );
         assert_eq!(
             job.output_trie_keys,
@@ -522,7 +553,7 @@ mod tests {
         }
         let encoded = encode_block_by(&live, 4, SortOrder::ByIid).unwrap();
         CompactionInputBlock {
-            trie_key: trie_key.to_string(),
+            trie_key: parse_trie_key(trie_key),
             data: encoded.data,
             pages: encoded.pages,
         }
@@ -532,7 +563,7 @@ mod tests {
         CompactionJob {
             kind: CompactionKind::L0ToL1Split,
             scope: TableScope::new("default", "nodes", ""),
-            input_trie_keys: vec!["l00-rc-b00".into(), "l00-rc-b01".into()],
+            input_trie_keys: vec![parse_trie_key("l00-rc-b00"), parse_trie_key("l00-rc-b01")],
             output_trie_keys: vec![TrieKey {
                 level: 1,
                 recency: Recency::Current,

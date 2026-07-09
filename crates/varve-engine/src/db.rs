@@ -378,7 +378,7 @@ fn compacted_manifest(
     let mut tables = latest.tables.clone();
     let mut replaced = false;
     for table in &mut tables {
-        if table.scope_ref() == job.scope {
+        if table.scope_ref().eq(job.scope()) {
             replace_compacted_tries(
                 &mut table.tries,
                 &input_keys,
@@ -394,7 +394,7 @@ fn compacted_manifest(
         replace_compacted_tries(&mut tries, &input_keys, output_entries, |entry| {
             entry.trie_key.as_str()
         });
-        tables.push(TableTries::new(job.scope.clone(), tries));
+        tables.push(TableTries::new(job.scope().clone(), tries));
     }
     BlockManifest {
         block_id: latest.block_id + 1,
@@ -406,7 +406,7 @@ fn compacted_manifest(
 }
 
 fn compaction_input_key_set(job: &crate::compact::CompactionJob) -> BTreeSet<String> {
-    job.input_trie_keys.iter().cloned().collect()
+    job.input_key_strings().into_iter().collect()
 }
 
 fn replace_compacted_tries<T>(
@@ -853,12 +853,12 @@ impl Db {
         let Some(job) = jobs.drain(..).next() else {
             return Ok(CompactionReport::default());
         };
-        let order = compaction_sort_order(&job.scope.table, &job.scope.family)?;
+        let order = compaction_sort_order(&job.scope().table, &job.scope().family)?;
 
         let mut inputs = Vec::with_capacity(job.input_trie_keys.len());
         for trie_key in &job.input_trie_keys {
-            let data = self.store.get(&job.scope.data_key(trie_key)).await?;
-            let meta = self.store.get(&job.scope.meta_key(trie_key)).await?;
+            let data = self.store.get(&job.data_key(trie_key)).await?;
+            let meta = self.store.get(&job.meta_key(trie_key)).await?;
             inputs.push(CompactionInputBlock {
                 trie_key: trie_key.clone(),
                 data: data.to_vec(),
@@ -875,22 +875,23 @@ impl Db {
         let mut output_entries = Vec::with_capacity(compacted.len());
         let mut persisted = Vec::with_capacity(compacted.len());
         for output in compacted {
-            let trie_key = output.trie_key.to_key_string();
+            let trie_key = output.trie_key.clone();
+            let trie_key_string = trie_key.to_key_string();
             let row_count = output.encoded.pages.iter().map(|page| page.rows).sum();
             let entry = TrieEntry {
-                trie_key: trie_key.clone(),
+                trie_key: trie_key_string,
                 row_count,
                 data_len: output.encoded.data.len() as u64,
             };
             self.store
                 .put(
-                    &job.scope.data_key(&trie_key),
+                    &job.data_key(&trie_key),
                     bytes::Bytes::from(output.encoded.data.clone()),
                 )
                 .await?;
             self.store
                 .put(
-                    &job.scope.meta_key(&trie_key),
+                    &job.meta_key(&trie_key),
                     bytes::Bytes::from(output.encoded.meta.clone()),
                 )
                 .await?;
@@ -913,10 +914,11 @@ impl Db {
         {
             let input_keys = compaction_input_key_set(&job);
             let mut state = self.state.write().map_err(|_| EngineError::Poisoned)?;
+            let scope = job.scope();
             let table = state
-                .graph_mut(&job.scope.graph)
-                .ok_or_else(|| EngineError::UnknownGraph(job.scope.graph.clone()))?;
-            let tries = match (job.scope.table.as_str(), job.scope.family.as_str()) {
+                .graph_mut(&scope.graph)
+                .ok_or_else(|| EngineError::UnknownGraph(scope.graph.clone()))?;
+            let tries = match (scope.table.as_str(), scope.family.as_str()) {
                 (NODES_TABLE, "") => &mut table.nodes.tries,
                 (EDGES_TABLE, "") => &mut table.edges.tries,
                 (EDGES_TABLE, varve_storage::ADJ_OUT) => &mut table.adj_out,
@@ -924,7 +926,7 @@ impl Db {
                 _ => {
                     return Err(EngineError::UnknownTable(format!(
                         "{}/{}/{}",
-                        job.scope.graph, job.scope.table, job.scope.family
+                        scope.graph, scope.table, scope.family
                     )))
                 }
             };
