@@ -1,4 +1,4 @@
-use crate::keys::{Recency, TrieKey};
+use crate::keys::{Recency, ScopedTrieKey, TableScope, TrieKey};
 use crate::{BlockManifest, StorageError, TrieEntry};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,16 +11,19 @@ enum TrieState {
 
 #[derive(Clone)]
 struct CatalogEntry {
-    graph: String,
-    table: String,
-    family: String,
     entry: TrieEntry,
     state: TrieState,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScopedTrieEntry {
+    pub scope: TableScope,
+    pub entry: TrieEntry,
+}
+
 #[derive(Default)]
 pub struct TrieCatalog {
-    entries: BTreeMap<(String, String, String, String), CatalogEntry>,
+    entries: BTreeMap<ScopedTrieKey, CatalogEntry>,
 }
 
 impl TrieCatalog {
@@ -46,9 +49,6 @@ impl TrieCatalog {
                 catalog.entries.insert(
                     entry.catalog_key(),
                     CatalogEntry {
-                        graph: entry.graph,
-                        table: entry.table,
-                        family: entry.family,
                         entry: entry.entry,
                         state: TrieState::Garbage,
                     },
@@ -61,9 +61,6 @@ impl TrieCatalog {
             catalog.entries.insert(
                 entry.catalog_key(),
                 CatalogEntry {
-                    graph: entry.graph.clone(),
-                    table: entry.table.clone(),
-                    family: entry.family.clone(),
                     entry: entry.entry.clone(),
                     state,
                 },
@@ -73,43 +70,31 @@ impl TrieCatalog {
         Ok(catalog)
     }
 
-    pub fn live_entries(&self) -> Vec<(String, String, String, TrieEntry)> {
+    pub fn live_entries(&self) -> Vec<ScopedTrieEntry> {
         self.entries
-            .values()
-            .filter(|entry| entry.state == TrieState::Live)
-            .map(|entry| {
-                (
-                    entry.graph.clone(),
-                    entry.table.clone(),
-                    entry.family.clone(),
-                    entry.entry.clone(),
-                )
+            .iter()
+            .filter(|(_, entry)| entry.state == TrieState::Live)
+            .map(|(key, entry)| ScopedTrieEntry {
+                scope: key.scope.clone(),
+                entry: entry.entry.clone(),
             })
             .collect()
     }
 }
 
-#[derive(Clone)]
 struct ParsedEntry {
-    graph: String,
-    table: String,
-    family: String,
+    scope: TableScope,
     entry: TrieEntry,
     key: TrieKey,
 }
 
 impl ParsedEntry {
-    fn catalog_key(&self) -> (String, String, String, String) {
-        (
-            self.graph.clone(),
-            self.table.clone(),
-            self.family.clone(),
-            self.entry.trie_key.clone(),
-        )
+    fn catalog_key(&self) -> ScopedTrieKey {
+        ScopedTrieKey::new(self.scope.clone(), self.entry.trie_key.clone())
     }
 
     fn same_scope(&self, other: &ParsedEntry) -> bool {
-        self.graph == other.graph && self.table == other.table && self.family == other.family
+        self.scope == other.scope
     }
 }
 
@@ -117,9 +102,7 @@ fn parsed_manifest_entries(manifest: &BlockManifest) -> Result<Vec<ParsedEntry>,
     let mut out = Vec::new();
     for manifest_entry in manifest.trie_entries() {
         out.push(ParsedEntry {
-            graph: manifest_entry.graph.to_string(),
-            table: manifest_entry.table.to_string(),
-            family: manifest_entry.family.to_string(),
+            scope: manifest_entry.scope(),
             entry: manifest_entry.entry.clone(),
             key: TrieKey::parse(&manifest_entry.entry.trie_key)?,
         });
@@ -129,21 +112,21 @@ fn parsed_manifest_entries(manifest: &BlockManifest) -> Result<Vec<ParsedEntry>,
 
 fn classify_latest(entry: &ParsedEntry, latest: &[ParsedEntry]) -> TrieState {
     match (&entry.key.recency, entry.key.level) {
-        (_, 0) => TrieState::Live,
+        (Recency::Current, 0) => TrieState::Live,
         (Recency::Week { .. }, 1) => {
             if latest.iter().any(|candidate| {
                 entry.same_scope(candidate)
                     && candidate.key.level == 1
                     && candidate.key.recency == Recency::Current
-                    && candidate.key.block >= entry.key.block
+                    && candidate.key.block == entry.key.block
             }) {
                 TrieState::Live
             } else {
                 TrieState::Nascent
             }
         }
-        (_, level) if level >= 2 && !entry.key.part.is_empty() => {
-            if has_all_sibling_partitions(entry, latest) {
+        (Recency::Current, 2) => {
+            if !entry.key.part.is_empty() && has_all_sibling_partitions(entry, latest) {
                 TrieState::Live
             } else {
                 TrieState::Nascent

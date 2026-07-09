@@ -4,7 +4,7 @@
 //! would otherwise have to reconstruct, it carries the watermark and
 //! tx-id/clock floors the log alone can no longer provide once trimmed.
 
-use crate::keys::{manifest_block_id, manifest_key, MANIFEST_PREFIX};
+use crate::keys::{manifest_block_id, manifest_key, ScopedTrieKey, TableScope, MANIFEST_PREFIX};
 use crate::store::{ObjectStore, StorageError};
 use prost::Message;
 
@@ -34,6 +34,21 @@ pub struct TableTries {
     pub family: String,
 }
 
+impl TableTries {
+    pub fn new(scope: TableScope, tries: Vec<TrieEntry>) -> TableTries {
+        TableTries {
+            graph: scope.graph,
+            table: scope.table,
+            tries,
+            family: scope.family,
+        }
+    }
+
+    pub fn scope_ref(&self) -> TableScope {
+        TableScope::new(self.graph.clone(), self.table.clone(), self.family.clone())
+    }
+}
+
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BlockManifest {
     #[prost(uint64, tag = "1")]
@@ -54,6 +69,16 @@ pub struct ManifestTrieEntry<'a> {
     pub table: &'a str,
     pub family: &'a str,
     pub entry: &'a TrieEntry,
+}
+
+impl ManifestTrieEntry<'_> {
+    pub fn scope(&self) -> TableScope {
+        TableScope::new(self.graph, self.table, self.family)
+    }
+
+    pub fn scoped_trie_key(&self) -> ScopedTrieKey {
+        ScopedTrieKey::new(self.scope(), self.entry.trie_key.clone())
+    }
 }
 
 impl BlockManifest {

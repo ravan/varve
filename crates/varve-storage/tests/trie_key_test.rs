@@ -1,5 +1,6 @@
 use varve_storage::keys::{
-    l0_trie_key, Bucketer, Recency, TrieKey, LOG_LIMIT, TRIE_BRANCH_FACTOR, TRIE_LEVEL_BITS,
+    l0_trie_key, Bucketer, Recency, TableScope, TrieKey, TrieKeyShard, ADJ_IN, LOG_LIMIT,
+    TRIE_BRANCH_FACTOR, TRIE_LEVEL_BITS,
 };
 
 #[test]
@@ -46,6 +47,56 @@ fn trie_key_rejects_invalid_parts_and_recency() {
     assert!(TrieKey::parse("l02-p13-rc-b00").is_err());
     assert!(TrieKey::parse("l02-rC-p13-b00").is_err());
     assert!(TrieKey::parse("l02-rc-p13-bFF").is_err());
+}
+
+#[test]
+fn trie_key_shard_excludes_block() {
+    let key = TrieKey {
+        level: 2,
+        recency: Recency::Week { yyyymmdd: 20200106 },
+        part: vec![1, 3],
+        block: 9,
+    };
+
+    assert_eq!(
+        key.shard(),
+        TrieKeyShard {
+            level: 2,
+            recency: Recency::Week { yyyymmdd: 20200106 },
+            part: vec![1, 3],
+        }
+    );
+    assert_eq!(
+        key.shard(),
+        TrieKey {
+            block: 10,
+            ..key.clone()
+        }
+        .shard()
+    );
+}
+
+#[test]
+fn table_scope_routes_primary_and_family_object_keys() {
+    let primary = TableScope::new("default", "nodes", "");
+    assert_eq!(
+        primary.data_key("l00-rc-b00"),
+        "v1/graphs/default/tables/nodes/data/l00-rc-b00.arrow"
+    );
+    assert_eq!(
+        primary.meta_key("l00-rc-b00"),
+        "v1/graphs/default/tables/nodes/meta/l00-rc-b00.arrow"
+    );
+
+    let family = TableScope::new("default", "edges", ADJ_IN);
+    assert_eq!(
+        family.data_key("l00-rc-b00"),
+        "v1/graphs/default/tables/edges/adj-in/data/l00-rc-b00.arrow"
+    );
+    assert_eq!(
+        family.meta_key("l00-rc-b00"),
+        "v1/graphs/default/tables/edges/adj-in/meta/l00-rc-b00.arrow"
+    );
 }
 
 #[test]

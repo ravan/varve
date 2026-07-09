@@ -378,7 +378,7 @@ fn compacted_manifest(
     let mut tables = latest.tables.clone();
     let mut replaced = false;
     for table in &mut tables {
-        if table.graph == job.graph && table.table == job.table && table.family == job.family {
+        if table.scope_ref() == job.scope {
             replace_compacted_tries(
                 &mut table.tries,
                 &input_keys,
@@ -394,12 +394,7 @@ fn compacted_manifest(
         replace_compacted_tries(&mut tries, &input_keys, output_entries, |entry| {
             entry.trie_key.as_str()
         });
-        tables.push(TableTries {
-            graph: job.graph.clone(),
-            table: job.table.clone(),
-            family: job.family.clone(),
-            tries,
-        });
+        tables.push(TableTries::new(job.scope.clone(), tries));
     }
     BlockManifest {
         block_id: latest.block_id + 1,
@@ -858,28 +853,12 @@ impl Db {
         let Some(job) = jobs.drain(..).next() else {
             return Ok(CompactionReport::default());
         };
-        let order = compaction_sort_order(&job.table, &job.family)?;
+        let order = compaction_sort_order(&job.scope.table, &job.scope.family)?;
 
         let mut inputs = Vec::with_capacity(job.input_trie_keys.len());
         for trie_key in &job.input_trie_keys {
-            let data = self
-                .store
-                .get(&keys::data_key_for_family(
-                    &job.graph,
-                    &job.table,
-                    &job.family,
-                    trie_key,
-                ))
-                .await?;
-            let meta = self
-                .store
-                .get(&keys::meta_key_for_family(
-                    &job.graph,
-                    &job.table,
-                    &job.family,
-                    trie_key,
-                ))
-                .await?;
+            let data = self.store.get(&job.scope.data_key(trie_key)).await?;
+            let meta = self.store.get(&job.scope.meta_key(trie_key)).await?;
             inputs.push(CompactionInputBlock {
                 trie_key: trie_key.clone(),
                 data: data.to_vec(),
@@ -905,13 +884,13 @@ impl Db {
             };
             self.store
                 .put(
-                    &keys::data_key_for_family(&job.graph, &job.table, &job.family, &trie_key),
+                    &job.scope.data_key(&trie_key),
                     bytes::Bytes::from(output.encoded.data.clone()),
                 )
                 .await?;
             self.store
                 .put(
-                    &keys::meta_key_for_family(&job.graph, &job.table, &job.family, &trie_key),
+                    &job.scope.meta_key(&trie_key),
                     bytes::Bytes::from(output.encoded.meta.clone()),
                 )
                 .await?;
@@ -935,9 +914,9 @@ impl Db {
             let input_keys = compaction_input_key_set(&job);
             let mut state = self.state.write().map_err(|_| EngineError::Poisoned)?;
             let table = state
-                .graph_mut(&job.graph)
-                .ok_or_else(|| EngineError::UnknownGraph(job.graph.clone()))?;
-            let tries = match (job.table.as_str(), job.family.as_str()) {
+                .graph_mut(&job.scope.graph)
+                .ok_or_else(|| EngineError::UnknownGraph(job.scope.graph.clone()))?;
+            let tries = match (job.scope.table.as_str(), job.scope.family.as_str()) {
                 (NODES_TABLE, "") => &mut table.nodes.tries,
                 (EDGES_TABLE, "") => &mut table.edges.tries,
                 (EDGES_TABLE, varve_storage::ADJ_OUT) => &mut table.adj_out,
@@ -945,7 +924,7 @@ impl Db {
                 _ => {
                     return Err(EngineError::UnknownTable(format!(
                         "{}/{}/{}",
-                        job.graph, job.table, job.family
+                        job.scope.graph, job.scope.table, job.scope.family
                     )))
                 }
             };
