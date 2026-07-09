@@ -11,7 +11,7 @@ pub mod s3;
 pub mod store;
 
 pub use cache::{CacheKey, CacheTier, CachedStore, MemoryCache, MemoryCacheFactory};
-pub use catalog::{TrieCatalog, TrieState};
+pub use catalog::TrieCatalog;
 pub use disk::{DiskCache, DiskCacheFactory};
 pub use keys::{adj_data_key, adj_meta_key, ADJ_IN, ADJ_OUT};
 pub use local::{local_store, LocalStoreFactory};

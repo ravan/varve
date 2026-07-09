@@ -26,7 +26,6 @@ pub fn parse_lex_hex(s: &str) -> Option<u64> {
 pub const TRIE_LEVEL_BITS: u8 = 2;
 pub const TRIE_BRANCH_FACTOR: u8 = 1 << TRIE_LEVEL_BITS;
 pub const LOG_LIMIT: usize = 64;
-pub const PAGE_LIMIT: usize = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Recency {
@@ -42,30 +41,12 @@ pub struct TrieKey {
     pub block: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TrieShard {
-    pub level: u64,
-    pub recency: Recency,
-    pub part: Vec<u8>,
-}
-
 impl TrieKey {
     pub fn l0(block: u64) -> TrieKey {
         TrieKey {
             level: 0,
             recency: Recency::Current,
             part: Vec::new(),
-            block,
-        }
-    }
-
-    pub fn child(&self, bucket: u8, block: u64) -> TrieKey {
-        let mut part = self.part.clone();
-        part.push(bucket);
-        TrieKey {
-            level: self.level + 1,
-            recency: self.recency.clone(),
-            part,
             block,
         }
     }
@@ -125,14 +106,6 @@ impl TrieKey {
             block,
         })
     }
-
-    pub fn shard(&self) -> TrieShard {
-        TrieShard {
-            level: self.level,
-            recency: self.recency.clone(),
-            part: self.part.clone(),
-        }
-    }
 }
 
 impl Recency {
@@ -180,55 +153,11 @@ impl Bucketer {
             .collect()
     }
 
-    pub fn iid_start(path: &[u8]) -> varve_types::Iid {
-        let mut bytes = [0u8; 16];
-        for (level, bucket) in path.iter().copied().enumerate() {
-            assert!(
-                bucket < TRIE_BRANCH_FACTOR,
-                "trie bucket {bucket} outside branch factor {TRIE_BRANCH_FACTOR}"
-            );
-            let bit_idx = level * TRIE_LEVEL_BITS as usize;
-            assert!(bit_idx < 128, "trie path exceeds 128-bit IID");
-            let byte_idx = bit_idx / 8;
-            let bit_offset = bit_idx % 8;
-            let shift = 8 - TRIE_LEVEL_BITS as usize - bit_offset;
-            bytes[byte_idx] |= bucket << shift;
-        }
-        varve_types::Iid::from_bytes(bytes)
-    }
-
-    pub fn iid_next_start(path: &[u8]) -> Option<varve_types::Iid> {
-        if path.is_empty() {
-            return None;
-        }
-        let mut next = path.to_vec();
-        for idx in (0..next.len()).rev() {
-            if next[idx] + 1 < TRIE_BRANCH_FACTOR {
-                next[idx] += 1;
-                for bucket in &mut next[idx + 1..] {
-                    *bucket = 0;
-                }
-                return Some(Bucketer::iid_start(&next));
-            }
-        }
-        None
-    }
-
     pub fn contains(path: &[u8], iid: &varve_types::Iid) -> bool {
         path.iter()
             .copied()
             .enumerate()
             .all(|(level, bucket)| Bucketer::bucket(iid, level) == bucket)
-    }
-
-    pub fn filter_iids_for_path<'a>(
-        iids: impl IntoIterator<Item = &'a varve_types::Iid>,
-        path: &[u8],
-    ) -> Vec<varve_types::Iid> {
-        iids.into_iter()
-            .copied()
-            .filter(|iid| Bucketer::contains(path, iid))
-            .collect()
     }
 }
 

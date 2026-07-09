@@ -3,7 +3,7 @@ use crate::{BlockManifest, StorageError, TrieEntry};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TrieState {
+enum TrieState {
     Nascent,
     Live,
     Garbage,
@@ -73,19 +73,6 @@ impl TrieCatalog {
         Ok(catalog)
     }
 
-    pub fn live_for(&self, graph: &str, table: &str, family: &str) -> Vec<TrieEntry> {
-        self.entries
-            .values()
-            .filter(|entry| {
-                entry.state == TrieState::Live
-                    && entry.graph == graph
-                    && entry.table == table
-                    && entry.family == family
-            })
-            .map(|entry| entry.entry.clone())
-            .collect()
-    }
-
     pub fn live_entries(&self) -> Vec<(String, String, String, TrieEntry)> {
         self.entries
             .values()
@@ -99,38 +86,6 @@ impl TrieCatalog {
                 )
             })
             .collect()
-    }
-
-    pub fn garbage_entries(&self) -> Vec<(String, String, String, TrieEntry)> {
-        self.entries
-            .values()
-            .filter(|entry| entry.state == TrieState::Garbage)
-            .map(|entry| {
-                (
-                    entry.graph.clone(),
-                    entry.table.clone(),
-                    entry.family.clone(),
-                    entry.entry.clone(),
-                )
-            })
-            .collect()
-    }
-
-    pub fn state_for(
-        &self,
-        graph: &str,
-        table: &str,
-        family: &str,
-        trie_key: &str,
-    ) -> Option<TrieState> {
-        self.entries
-            .get(&(
-                graph.to_string(),
-                table.to_string(),
-                family.to_string(),
-                trie_key.to_string(),
-            ))
-            .map(|entry| entry.state)
     }
 }
 
