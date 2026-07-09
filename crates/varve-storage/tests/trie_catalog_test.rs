@@ -37,7 +37,7 @@ fn live_keys(catalog: &TrieCatalog, graph: &str, table: &str, family: &str) -> V
         catalog
             .live_entries()
             .into_iter()
-            .filter(|entry| entry.scope == scope)
+            .filter(|entry| entry.scoped_key.scope == scope)
             .map(|entry| entry.entry)
             .collect(),
     )
