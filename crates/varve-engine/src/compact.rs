@@ -4,9 +4,9 @@ use varve_index::{
     decode_events, encode_sorted_events_by, Ceiling, EncodedBlock, Event, IndexError, Op, PageMeta,
     Polygon, SortOrder,
 };
-use varve_storage::keys::{Bucketer, Recency, TrieKey, TRIE_BRANCH_FACTOR};
+use varve_storage::keys::{Recency, TrieKey};
 use varve_storage::{ScopedTrieKey, StorageError, TableScope, TrieCatalog, TrieShard};
-use varve_types::{Iid, Instant};
+use varve_types::{Bucketer, Iid, Instant, TRIE_BRANCH_FACTOR};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CompactionConfig {

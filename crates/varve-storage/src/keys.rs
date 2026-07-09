@@ -23,8 +23,8 @@ pub fn parse_lex_hex(s: &str) -> Option<u64> {
     u64::from_str_radix(body, 16).ok()
 }
 
-pub const TRIE_LEVEL_BITS: u8 = 2;
-pub const TRIE_BRANCH_FACTOR: u8 = 1 << TRIE_LEVEL_BITS;
+pub use varve_types::{Bucketer, TRIE_BRANCH_FACTOR, TRIE_LEVEL_BITS};
+
 pub const LOG_LIMIT: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -264,32 +264,6 @@ impl Recency {
         } else {
             None
         }
-    }
-}
-
-pub struct Bucketer;
-
-impl Bucketer {
-    pub fn bucket(iid: &varve_types::Iid, level: usize) -> u8 {
-        let bit_idx = level * TRIE_LEVEL_BITS as usize;
-        assert!(bit_idx < 128, "trie level {level} exceeds 128-bit IID");
-        let byte_idx = bit_idx / 8;
-        let bit_offset = bit_idx % 8;
-        let shift = 8 - TRIE_LEVEL_BITS as usize - bit_offset;
-        (iid.as_bytes()[byte_idx] >> shift) & (TRIE_BRANCH_FACTOR - 1)
-    }
-
-    pub fn path(iid: &varve_types::Iid, levels: usize) -> Vec<u8> {
-        (0..levels)
-            .map(|level| Bucketer::bucket(iid, level))
-            .collect()
-    }
-
-    pub fn contains(path: &[u8], iid: &varve_types::Iid) -> bool {
-        path.iter()
-            .copied()
-            .enumerate()
-            .all(|(level, bucket)| Bucketer::bucket(iid, level) == bucket)
     }
 }
 

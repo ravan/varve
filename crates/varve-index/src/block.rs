@@ -17,7 +17,7 @@ use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
-use varve_types::{Iid, Instant, TemporalBounds};
+use varve_types::{Bucketer, Iid, Instant, TemporalBounds};
 
 /// Rows per page (XTDB `pageLimit`). A parameter on `encode_block` so tests
 /// can force page splits; the engine passes this constant.
@@ -57,7 +57,7 @@ impl PageMeta {
     ///   introspection). Valid stats are recorded for slice 8.
     pub fn selected(&self, bounds: &TemporalBounds, iid_point: Option<&Iid>) -> bool {
         if let Some(iid) = iid_point {
-            if !self.path.is_empty() && !varve_storage::keys::Bucketer::contains(&self.path, iid) {
+            if !self.path.is_empty() && !Bucketer::contains(&self.path, iid) {
                 return false;
             }
             if *iid < self.min_iid || *iid > self.max_iid {

@@ -3554,7 +3554,6 @@ dependencies = [
  "arrow",
  "proptest",
  "thiserror",
- "varve-storage",
  "varve-types",
 ]
 
