@@ -9,7 +9,7 @@ use crate::event::{Event, Op};
 use crate::live::IndexError;
 use arrow::array::{
     ArrayRef, BinaryBuilder, BooleanBuilder, FixedSizeBinaryBuilder, Float64Builder, Int64Builder,
-    StringBuilder, TimestampMicrosecondBuilder,
+    ListBuilder, StringBuilder, TimestampMicrosecondBuilder,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -20,6 +20,7 @@ use varve_types::{Doc, Iid, Instant, TemporalBounds, Value};
 struct VisibleRow<'a> {
     iid: Iid,
     doc: &'a Doc,
+    labels: &'a [String],
     system_from: Instant,
     system_to: Instant,
     valid_from: Instant,
@@ -46,6 +47,68 @@ fn timestamp_type() -> DataType {
     DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
 }
 
+pub enum LabelFilter<'a> {
+    Single(&'a str),
+    All(&'a [String]),
+    Any(&'a [String]),
+}
+
+impl LabelFilter<'_> {
+    fn matches(&self, labels: &[String]) -> bool {
+        match self {
+            Self::Single(label) => labels.iter().any(|candidate| candidate == *label),
+            Self::All(required) => {
+                !required.is_empty()
+                    && required
+                        .iter()
+                        .all(|label| labels.iter().any(|candidate| candidate == label))
+            }
+            Self::Any(allowed) => allowed
+                .iter()
+                .any(|label| labels.iter().any(|candidate| candidate == label)),
+        }
+    }
+}
+
+fn visible_rows<'a, I>(entities: I, bounds: &TemporalBounds) -> Vec<VisibleRow<'a>>
+where
+    I: IntoIterator<Item = (Iid, &'a [Event])>,
+{
+    let mut visible: Vec<VisibleRow<'_>> = Vec::new();
+    for (iid, events) in entities {
+        for version in resolve(events, bounds) {
+            let Op::Put { labels, doc } = &version.event.op else {
+                continue; // resolve only emits Puts; defensive
+            };
+            visible.push(VisibleRow {
+                iid,
+                doc,
+                labels,
+                system_from: version.event.system_from,
+                system_to: version.system_to,
+                valid_from: version.valid_from,
+                valid_to: version.valid_to,
+                src: version.event.src,
+                dst: version.event.dst,
+            });
+        }
+    }
+    visible
+}
+
+pub fn visible_events<'a, I>(
+    entities: I,
+    bounds: &TemporalBounds,
+) -> Vec<(Iid, &'a [String], &'a Doc)>
+where
+    I: IntoIterator<Item = (Iid, &'a [Event])>,
+{
+    visible_rows(entities, bounds)
+        .into_iter()
+        .map(|row| (row.iid, row.labels, row.doc))
+        .collect()
+}
+
 /// Resolve each entity in `entities` against `bounds` and snapshot the
 /// visible versions carrying `label` into one RecordBatch (`None` when
 /// nothing is visible). This is the source-agnostic core of
@@ -60,32 +123,16 @@ fn timestamp_type() -> DataType {
 /// rules as v0).
 pub fn snapshot_entities<'a, I>(
     entities: I,
-    label: &str,
+    label: LabelFilter<'_>,
     bounds: &TemporalBounds,
 ) -> Result<Option<RecordBatch>, IndexError>
 where
     I: IntoIterator<Item = (Iid, &'a [Event])>,
 {
-    let mut visible: Vec<VisibleRow<'_>> = Vec::new();
-    for (iid, events) in entities {
-        for version in resolve(events, bounds) {
-            let Op::Put { labels, doc } = &version.event.op else {
-                continue; // resolve only emits Puts; defensive
-            };
-            if labels.iter().any(|l| l == label) {
-                visible.push(VisibleRow {
-                    iid,
-                    doc,
-                    system_from: version.event.system_from,
-                    system_to: version.system_to,
-                    valid_from: version.valid_from,
-                    valid_to: version.valid_to,
-                    src: version.event.src,
-                    dst: version.event.dst,
-                });
-            }
-        }
-    }
+    let visible: Vec<VisibleRow<'_>> = visible_rows(entities, bounds)
+        .into_iter()
+        .filter(|row| label.matches(row.labels))
+        .collect();
     if visible.is_empty() {
         return Ok(None);
     }
@@ -106,6 +153,9 @@ where
     let mut col_types: BTreeMap<&str, DataType> = BTreeMap::new();
     for row in &visible {
         for (k, v) in row.doc {
+            if k == "_labels" {
+                continue;
+            }
             if let Some(dt) = value_type(v) {
                 match col_types.get(k.as_str()) {
                     None => {
@@ -168,6 +218,20 @@ where
         fields.push(Field::new("_dst_iid", DataType::FixedSizeBinary(16), false));
         columns.push(Arc::new(dst_b.finish()));
     }
+
+    fields.push(Field::new(
+        "_labels",
+        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+        false,
+    ));
+    let mut labels_b = ListBuilder::new(StringBuilder::new());
+    for row in &visible {
+        for label in row.labels {
+            labels_b.values().append_value(label);
+        }
+        labels_b.append(true);
+    }
+    columns.push(Arc::new(labels_b.finish()));
 
     for (name, dt) in &col_types {
         fields.push(Field::new(*name, dt.clone(), true));
@@ -276,6 +340,7 @@ mod tests {
     use super::*;
     use crate::event::{Event, Op};
     use crate::live::LiveTable;
+    use arrow::array::{Array, ListArray, StringArray};
     use varve_types::{Doc, Iid, Instant, TemporalDimension, Value};
 
     fn iid(n: u8) -> Iid {
@@ -301,6 +366,27 @@ mod tests {
                 doc,
             },
         }
+    }
+
+    fn put_with_labels(entity: u8, sf: i64, labels: &[&str], name: &str) -> Event {
+        let mut event = put(entity, sf, name);
+        let Op::Put { labels: stored, .. } = &mut event.op else {
+            unreachable!("test put helper always creates Put events");
+        };
+        *stored = labels.iter().map(|label| (*label).to_string()).collect();
+        event
+    }
+
+    fn batch_names(batch: &RecordBatch) -> Vec<String> {
+        let col = batch
+            .column_by_name("name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let mut out: Vec<String> = (0..col.len()).map(|i| col.value(i).to_string()).collect();
+        out.sort();
+        out
     }
 
     fn now_bounds(n: i64) -> TemporalBounds {
@@ -333,7 +419,7 @@ mod tests {
         }
         let mut pairs = vec![(iid(1), a.as_slice()), (iid(2), b.as_slice())];
         pairs.sort_by_key(|(iid, _)| *iid);
-        let direct = snapshot_entities(pairs, "P", &now_bounds(10)).unwrap();
+        let direct = snapshot_entities(pairs, LabelFilter::Single("P"), &now_bounds(10)).unwrap();
 
         assert_eq!(via_live, direct);
         assert_eq!(direct.unwrap().num_rows(), 2);
@@ -342,9 +428,176 @@ mod tests {
     #[test]
     fn empty_input_yields_none() {
         let empty: Vec<(Iid, &[Event])> = Vec::new();
-        assert!(snapshot_entities(empty, "P", &now_bounds(10))
+        assert!(
+            snapshot_entities(empty, LabelFilter::Single("P"), &now_bounds(10))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn snapshot_emits_labels_column() {
+        let event = put_with_labels(1, 1, &["A", "B"], "Ada");
+        let batch = snapshot_entities(
+            [(event.iid, std::slice::from_ref(&event))],
+            LabelFilter::Single("A"),
+            &now_bounds(10),
+        )
+        .unwrap()
+        .unwrap();
+
+        let schema = batch.schema();
+        let names: Vec<&str> = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "_iid",
+                "_system_from",
+                "_system_to",
+                "_valid_from",
+                "_valid_to",
+                "_labels",
+                "name"
+            ]
+        );
+
+        let labels_field = schema.field(schema.index_of("_labels").unwrap());
+        assert!(!labels_field.is_nullable());
+        match labels_field.data_type() {
+            DataType::List(item) => {
+                assert_eq!(item.data_type(), &DataType::Utf8);
+                assert!(item.is_nullable());
+            }
+            other => panic!("unexpected _labels type: {other:?}"),
+        }
+
+        let labels = batch
+            .column_by_name("_labels")
             .unwrap()
-            .is_none());
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let values = labels.value(0);
+        let values = values.as_any().downcast_ref::<StringArray>().unwrap();
+        let got: Vec<&str> = (0..values.len()).map(|i| values.value(i)).collect();
+        assert_eq!(got, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn user_labels_property_does_not_collide_with_system_labels_column() {
+        let mut event = put_with_labels(1, 1, &["A"], "Ada");
+        let Op::Put { doc, .. } = &mut event.op else {
+            unreachable!("test put helper always creates Put events");
+        };
+        doc.insert("_labels".into(), Value::Str("shadow".into()));
+
+        let batch = snapshot_entities(
+            [(event.iid, std::slice::from_ref(&event))],
+            LabelFilter::Single("A"),
+            &now_bounds(10),
+        )
+        .unwrap()
+        .unwrap();
+
+        let schema = batch.schema();
+        let names: Vec<&str> = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        assert_eq!(names.iter().filter(|name| **name == "_labels").count(), 1);
+
+        let labels = batch
+            .column_by_name("_labels")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let values = labels.value(0);
+        let values = values.as_any().downcast_ref::<StringArray>().unwrap();
+        let got: Vec<&str> = (0..values.len()).map(|i| values.value(i)).collect();
+        assert_eq!(got, vec!["A"]);
+    }
+
+    #[test]
+    fn label_filter_all_requires_every_label() {
+        let ab = put_with_labels(1, 1, &["A", "B"], "ab");
+        let a = put_with_labels(2, 1, &["A"], "a");
+        let b = put_with_labels(3, 1, &["B"], "b");
+        let required = vec!["A".to_string(), "B".to_string()];
+
+        let batch = snapshot_entities(
+            [
+                (ab.iid, std::slice::from_ref(&ab)),
+                (a.iid, std::slice::from_ref(&a)),
+                (b.iid, std::slice::from_ref(&b)),
+            ],
+            LabelFilter::All(&required),
+            &now_bounds(10),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(batch_names(&batch), vec!["ab"]);
+    }
+
+    #[test]
+    fn label_filter_any_matches_either() {
+        let ab = put_with_labels(1, 1, &["A", "B"], "ab");
+        let ac = put_with_labels(2, 1, &["A", "C"], "ac");
+        let ad = put_with_labels(3, 1, &["A", "D"], "ad");
+        let allowed = vec!["B".to_string(), "C".to_string()];
+
+        let batch = snapshot_entities(
+            [
+                (ab.iid, std::slice::from_ref(&ab)),
+                (ac.iid, std::slice::from_ref(&ac)),
+                (ad.iid, std::slice::from_ref(&ad)),
+            ],
+            LabelFilter::Any(&allowed),
+            &now_bounds(10),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(batch_names(&batch), vec!["ab", "ac"]);
+    }
+
+    #[test]
+    fn visible_events_matches_snapshot_visibility() {
+        let ada_v1 = put(1, 1, "Ada");
+        let ada_v2 = put(1, 5, "Adele");
+        let bob = put(2, 2, "Bob");
+        let ada_events = vec![ada_v1, ada_v2];
+        let bob_events = vec![bob];
+        let entities = vec![
+            (iid(1), ada_events.as_slice()),
+            (iid(2), bob_events.as_slice()),
+        ];
+        let bounds = now_bounds(10);
+
+        let snapshot = snapshot_entities(
+            entities.iter().map(|(iid, events)| (*iid, *events)),
+            LabelFilter::Single("P"),
+            &bounds,
+        )
+        .unwrap()
+        .unwrap();
+        let visible = visible_events(entities, &bounds);
+
+        let visible_names = visible
+            .iter()
+            .map(|(_, _, doc)| match doc.get("name") {
+                Some(Value::Str(name)) => name.as_str(),
+                other => panic!("expected visible name string, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(visible_names, batch_names(&snapshot));
     }
 
     #[test]
@@ -439,7 +692,7 @@ mod tests {
             (iid(2), std::slice::from_ref(&edge_event)),
         ];
         pairs.sort_by_key(|(iid, _)| *iid);
-        let err = snapshot_entities(pairs, "P", &now_bounds(10)).unwrap_err();
+        let err = snapshot_entities(pairs, LabelFilter::Single("P"), &now_bounds(10)).unwrap_err();
         match err {
             IndexError::Codec(msg) => {
                 assert!(msg.contains("mixed node and edge events in one snapshot"))
@@ -467,7 +720,8 @@ mod tests {
             },
         };
         let pairs = vec![(bad_edge.iid, std::slice::from_ref(&bad_edge))];
-        let err = snapshot_entities(pairs, "KNOWS", &now_bounds(10)).unwrap_err();
+        let err =
+            snapshot_entities(pairs, LabelFilter::Single("KNOWS"), &now_bounds(10)).unwrap_err();
         match err {
             IndexError::Codec(msg) => assert!(msg.contains("edge event missing dst endpoint")),
             other => panic!("unexpected error: {other:?}"),
@@ -491,7 +745,7 @@ mod tests {
         };
         let batch = snapshot_entities(
             [(e.iid, std::slice::from_ref(&e))],
-            "KNOWS",
+            LabelFilter::Single("KNOWS"),
             &TemporalBounds {
                 valid: TemporalDimension::at(Instant::from_micros(5)),
                 system: TemporalDimension::at(Instant::from_micros(5)),

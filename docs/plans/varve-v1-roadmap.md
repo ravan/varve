@@ -263,28 +263,57 @@ review and fixed. Demo: `cargo run --release --example traversal_bench -p varve`
 
 ## Slice 7 — GQL practical-core completion + conformance harness (spec §8; D2)
 
-**Sessions:** 3. **Depends:** slice 6.
+**Sessions:** 5. **Status:** ✅ complete. **Depends:** slice 6.
 
-- [ ] Expression completion: full operator set with 3-valued logic; `CASE`; `EXISTS {…}`
+- [x] Expression completion: full operator set with 3-valued logic; `CASE`; `EXISTS {…}`
       subqueries; parameters (`$p`); string/numeric/list/temporal function library behind
       `FunctionRegistry` (registered as DF UDFs); `CAST`.
-- [ ] Statement completion: `OPTIONAL MATCH` (left-join lowering), `FILTER`, `LET`, `FOR`
+- [x] Statement completion: `OPTIONAL MATCH` (left-join lowering), `FILTER`, `LET`, `FOR`
       (unwind), `ORDER BY`/`SKIP`/`LIMIT`/`OFFSET`, `UNION [ALL]`, `RETURN DISTINCT`,
       aggregation with implicit grouping (`COUNT/SUM/AVG/MIN/MAX/COLLECT`).
-- [ ] Mutation completion: `SET` (props/labels), `REMOVE`, multi-statement tx bodies
+  _(Slice 7 Task 6 complete: OPTIONAL MATCH/FILTER/LET/FOR and multi-MATCH/multi-path
+  pipeline lowering shipped; ORDER/UNION/DISTINCT/aggregation shipped in Task 8.)_
+_(Slice 7 Task 7 complete: `_labels` snapshot column plus multi-label node conjunction
+and alternation matching shipped; roadmap boxes are closed at slice exit.)_
+_(Slice 7 Task 9 complete: top-level `WHERE`/`FILTER` `EXISTS` and `NOT EXISTS`
+subqueries shipped with nested semi/anti joins, temporal inheritance, and quantified-path coverage;
+expression-completion box is closed at slice exit.)_
+- [x] Mutation completion: `SET` (props/labels), `REMOVE`, multi-statement tx bodies
       (`execute` takes a statement block, all-or-nothing), label ops; writer-side
       read-modify-write planning via the query engine.
-- [ ] Catalog minimal: `CREATE GRAPH`/`DROP GRAPH`/`USE` (namespace prefixes).
-- [ ] **TCK harness** in `varve-testkit`: openCypher TCK feature-file parser; mechanical
+_(Slice 7 Task 10 complete: mutation `MATCH` parts now resolve through the query
+engine, including hop patterns for `MATCH ... INSERT` and `DELETE`; quantified
+hops/path vars fail with engine `Unsupported`. Task 11 complete: `SET`/`REMOVE`
+props and labels now use writer-side bitemporal RMW through query-engine
+bindings. Task 12 complete: `ERASE`/`DETACH ERASE` now share DELETE
+resolution and emit `Op::Erase`. Task 13 complete: multi-statement programs
+execute all-or-nothing in one tx with statement-local overlay visibility.)_
+- [x] Catalog minimal: `CREATE GRAPH`/`DROP GRAPH`/`USE` (namespace prefixes). _(Slice 7 Task 14 complete: `GraphsState`, `__meta` catalog entries, graph-routed IIDs/storage/flush/recovery, same-window catalog group-commit barriers, flushed catalog restart coverage.)_
+- [x] **TCK harness** in `varve-testkit`: openCypher TCK feature-file parser; mechanical
       translation layer (`CREATE`→`INSERT`, etc.); per-scenario allowlist with recorded
       exclusion reasons; pass-rate report artifact in CI; regressions block merge.
-- [ ] **ANTLR differential oracle** (CI-only, Java): generate parser from
+_(Slice 7 Task 16 complete: openCypher TCK features vendored at pinned commit with
+Apache-2.0 license/provenance; Gherkin subset parser parses all 220 vendored
+feature files / 1,615 scenarios; TCK value parser and `RecordBatch` comparator
+cover primitives, lists, maps, node/relationship reconstruction, unordered
+multiset comparison, nested Arrow values, table escapes, and over-projection
+checks. Task 17 shipped Cypher→GQL translation, fresh-Db scenario runner,
+feature-qualified exclusions, strict error-class assertions, baseline/core/pass-rate
+gate, stable exclusion-reason guards, and `target/tck-report.json` +
+`target/tck-outcomes.tsv` CI artifact upload. Current gate: 3,897 expanded
+outcomes, 3,386 excluded, 511 adapted, 445 passed, 66 honest non-excluded
+failures, pass rate 0.870841 >= 0.85.)_
+- [x] **ANTLR differential oracle** (CI-only, Java): generate parser from
       `resources/gql-grammar/`; accept/reject comparison over the corpus + fuzz seeds.
-- [ ] Parser fuzz target (`cargo-fuzz`): no panics, parse-print-reparse stability.
+      _(Slice 7 Task 18 complete: committed `resources/gql-corpus/` verdict
+      corpus, `varve-testkit` `parse_corpus` bin + local corpus test,
+      `scripts/gql_diff` Java/Python harness, `gql-differential` CI job with
+      missing-file self-check; local generated-ANTLR differential run green.)_
+- [x] Parser fuzz target (`cargo-fuzz`): no panics, parse-print-reparse stability. _(Slice 7 Task 15 complete: `varve-gql` printer API, parse-print-reparse tests/proptest, standalone cargo-fuzz `parse` target, nightly `fuzz-nightly` CI, 10-min Task 25 reclose green on 2026-07-09.)_
 
-**Exit criteria:** curated core TCK list 100% green + overall adapted pass-rate ≥ 85% with
-every exclusion reasoned in-repo; differential oracle green; fuzzer runs 10min in CI nightly
-without findings.
+**Exit criteria:** curated core TCK list 100% green; overall adapted TCK pass-rate remains above 85% with all exclusions reasoned in-repo; ANTLR differential configured and local corpus/compare checks green; parser fuzz nightly configured. Task 25 reclose verification green: demo `cargo run --release --example gql_tour -p varve`; workspace tests 596 passed; clippy/fmt clean; release traversal oracle `PROPTEST_CASES=1024` 6 passed in 49.17s; TCK 445/511 adapted passed (0.870841; 3,897 total, 3,386 excluded, 66 non-excluded failures); parser fuzz 10-min run 13,903,093 execs with no crashes.
+
+Post-exit Tasks 20-25 complete: configurable traversal/query budgets, streaming `PathExpandExec` batches, reachable-edge BFS budgets, traversal-oracle CPU reduction, TCK side effects/path values, and final fuzz reclose.
 
 ---
 

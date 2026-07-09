@@ -30,11 +30,16 @@ use crate::ReferenceStore;
 
 /// Traversal direction for [`GraphOracle::neighbors`]: `Out` follows an edge
 /// from its `src` to its `dst`; `In` follows it backwards (`dst` to `src`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum OracleDir {
     Out,
     In,
 }
+
+type IndexedEdges = BTreeMap<Iid, Iid>; // edge -> neighbor
+type IndexedNodes = BTreeMap<Iid, IndexedEdges>; // node -> edges
+type IndexedDirections = BTreeMap<OracleDir, IndexedNodes>;
+type IndexedLabels = BTreeMap<String, IndexedDirections>;
 
 /// Naive in-memory bitemporal graph walker — the traversal oracle. Nodes and
 /// edges each live in a [`ReferenceStore`]; `endpoints` records each edge's
@@ -44,6 +49,7 @@ pub struct GraphOracle {
     nodes: ReferenceStore,
     edges: ReferenceStore,
     endpoints: BTreeMap<Iid, (Iid, Iid)>, // edge -> (src, dst), immutable
+    adjacency: IndexedLabels,
 }
 
 impl GraphOracle {
@@ -69,9 +75,52 @@ impl GraphOracle {
         if let (Some(src), Some(dst)) = (event.src, event.dst) {
             // Endpoints are immutable per edge iid; first writer wins (later
             // events for the same edge must agree).
-            self.endpoints.entry(event.iid).or_insert((src, dst));
+            let (src, dst) = *self.endpoints.entry(event.iid).or_insert((src, dst));
+            self.index_edge_labels(event.iid, src, dst, &event.op);
         }
         self.edges.append(event);
+    }
+
+    fn index_edge_labels(&mut self, edge: Iid, src: Iid, dst: Iid, op: &Op) {
+        let Op::Put { labels, .. } = op else {
+            return;
+        };
+        for label in labels {
+            self.adjacency
+                .entry(label.clone())
+                .or_default()
+                .entry(OracleDir::Out)
+                .or_default()
+                .entry(src)
+                .or_default()
+                .insert(edge, dst);
+            self.adjacency
+                .entry(label.clone())
+                .or_default()
+                .entry(OracleDir::In)
+                .or_default()
+                .entry(dst)
+                .or_default()
+                .insert(edge, src);
+        }
+    }
+
+    fn indexed_candidates(&self, node: Iid, label: &str, dir: OracleDir) -> Vec<(Iid, Iid)> {
+        let Some(by_direction) = self.adjacency.get(label) else {
+            return Vec::new();
+        };
+        let Some(by_node) = by_direction.get(&dir) else {
+            return Vec::new();
+        };
+        let Some(edges) = by_node.get(&node) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(Iid, Iid)> = edges
+            .iter()
+            .map(|(&edge, &neighbor)| (neighbor, edge))
+            .collect();
+        out.sort_unstable();
+        out
     }
 
     /// Edges with `label` visible at `(valid, system)` leaving `node`
@@ -87,14 +136,7 @@ impl GraphOracle {
         system: Instant,
     ) -> Vec<(Iid, Iid)> {
         let mut out = Vec::new();
-        for (&edge, &(src, dst)) in &self.endpoints {
-            let (from, neighbor) = match dir {
-                OracleDir::Out => (src, dst),
-                OracleDir::In => (dst, src),
-            };
-            if from != node {
-                continue;
-            }
+        for (neighbor, edge) in self.indexed_candidates(node, label, dir) {
             // `visible_at` returns Some only for a visible `Op::Put`; filter by
             // its label set.
             if let Some(ev) = self.edges.visible_at(edge, valid, system) {
@@ -105,7 +147,6 @@ impl GraphOracle {
                 }
             }
         }
-        out.sort_unstable();
         out
     }
 
@@ -331,4 +372,107 @@ pub fn arb_graph(max_nodes: usize, max_edges: usize) -> impl Strategy<Value = Ar
         )
         .prop_map(move |edges| build_arb_graph(n, edges))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn put_edge(
+        edge: Iid,
+        src: Iid,
+        dst: Iid,
+        labels: &[&str],
+        system_from: i64,
+        valid_from: i64,
+        valid_to: Instant,
+    ) -> Event {
+        Event {
+            iid: edge,
+            system_from: Instant::from_micros(system_from),
+            valid_from: Instant::from_micros(valid_from),
+            valid_to,
+            src: Some(src),
+            dst: Some(dst),
+            op: Op::Put {
+                labels: labels.iter().map(|label| (*label).to_owned()).collect(),
+                doc: Doc::new(),
+            },
+        }
+    }
+
+    fn naive_neighbors(
+        oracle: &GraphOracle,
+        node: Iid,
+        label: &str,
+        dir: OracleDir,
+        valid: Instant,
+        system: Instant,
+    ) -> Vec<(Iid, Iid)> {
+        let mut out = Vec::new();
+        for (&edge, &(src, dst)) in &oracle.endpoints {
+            let (from, neighbor) = match dir {
+                OracleDir::Out => (src, dst),
+                OracleDir::In => (dst, src),
+            };
+            if from != node {
+                continue;
+            }
+            if let Some(ev) = oracle.edges.visible_at(edge, valid, system) {
+                if let Op::Put { labels, .. } = &ev.op {
+                    if labels.iter().any(|candidate| candidate == label) {
+                        out.push((neighbor, edge));
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    #[test]
+    fn indexed_neighbors_match_naive_scan_for_labels_directions_and_time() {
+        let a = node_iid(1);
+        let b = node_iid(2);
+        let c = node_iid(3);
+        let d = node_iid(4);
+        let e_ab = edge_iid(10);
+        let e_ac = edge_iid(11);
+        let e_ca = edge_iid(12);
+        let e_ad = edge_iid(13);
+
+        let mut oracle = GraphOracle::new();
+        oracle.append_edge(put_edge(e_ab, a, b, &["K"], 0, 0, Instant::END_OF_TIME));
+        oracle.append_edge(put_edge(e_ac, a, c, &["F"], 0, 0, Instant::END_OF_TIME));
+        oracle.append_edge(put_edge(e_ca, c, a, &["K"], 0, 0, Instant::END_OF_TIME));
+        oracle.append_edge(put_edge(e_ad, a, d, &["K"], 0, 0, Instant::from_micros(5)));
+
+        let mut expected_out_k = vec![(b, e_ab), (d, e_ad)];
+        expected_out_k.sort_unstable();
+        assert_eq!(
+            oracle.indexed_candidates(a, "K", OracleDir::Out),
+            expected_out_k
+        );
+        assert_eq!(
+            oracle.indexed_candidates(a, "F", OracleDir::Out),
+            vec![(c, e_ac)]
+        );
+        assert_eq!(
+            oracle.indexed_candidates(a, "K", OracleDir::In),
+            vec![(c, e_ca)]
+        );
+
+        for (node, label, dir, valid) in [
+            (a, "K", OracleDir::Out, Instant::from_micros(0)),
+            (a, "K", OracleDir::Out, Instant::from_micros(7)),
+            (a, "F", OracleDir::Out, Instant::from_micros(0)),
+            (a, "K", OracleDir::In, Instant::from_micros(0)),
+            (b, "K", OracleDir::Out, Instant::from_micros(0)),
+        ] {
+            assert_eq!(
+                oracle.neighbors(node, label, dir, valid, Instant::END_OF_TIME),
+                naive_neighbors(&oracle, node, label, dir, valid, Instant::END_OF_TIME)
+            );
+        }
+    }
 }

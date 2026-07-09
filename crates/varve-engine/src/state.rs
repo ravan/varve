@@ -1,10 +1,11 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use varve_index::block::PageMeta;
 use varve_index::LiveTable;
 use varve_storage::TrieEntry;
 
-/// v1: single default graph (spec §5.1); named graphs land in slice 7.
 pub(crate) const DEFAULT_GRAPH: &str = "default";
+pub(crate) const META_GRAPH: &str = "__meta";
 /// The two v1 tables (spec §5.1). Nodes carry entities; edges carry
 /// relationships with `src`/`dst` endpoints (slice 6).
 pub(crate) const NODES_TABLE: &str = "nodes";
@@ -95,5 +96,38 @@ impl TableState {
     /// size trigger.
     pub fn live_rows(&self) -> usize {
         self.nodes.live.event_count() + self.edges.live.event_count()
+    }
+}
+
+pub(crate) struct GraphsState {
+    pub graphs: BTreeMap<String, TableState>,
+}
+
+impl GraphsState {
+    pub fn new() -> GraphsState {
+        let mut graphs = BTreeMap::new();
+        graphs.insert(DEFAULT_GRAPH.to_string(), TableState::new());
+        graphs.insert(META_GRAPH.to_string(), TableState::new());
+        GraphsState { graphs }
+    }
+
+    pub fn graph(&self, graph: &str) -> Option<&TableState> {
+        self.graphs.get(graph)
+    }
+
+    pub fn graph_mut(&mut self, graph: &str) -> Option<&mut TableState> {
+        self.graphs.get_mut(graph)
+    }
+
+    pub fn insert_graph(&mut self, graph: String) -> bool {
+        self.graphs.insert(graph, TableState::new()).is_none()
+    }
+
+    pub fn remove_graph(&mut self, graph: &str) -> Option<TableState> {
+        self.graphs.remove(graph)
+    }
+
+    pub fn live_rows(&self) -> usize {
+        self.graphs.values().map(TableState::live_rows).sum()
     }
 }

@@ -8,6 +8,7 @@ refs/
 
 # Local tooling state
 .venv/
+__pycache__/
 .tokensave/
 .DS_Store
 /.agents/skills

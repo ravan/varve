@@ -1,0 +1,1 @@
+MATCH (a:Person {_id: 1}) INSERT (a)-[:KNOWS]->(:Person {_id: 2})

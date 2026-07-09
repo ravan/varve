@@ -1,33 +1,14 @@
 # Varve Implementation Status Ledger
 
-> Update at the end of EVERY session. This is the entry point for the next session —
-> read this first, then `varve-v1-roadmap.md`, then the current slice's detailed plan.
+> Update end EVERY session. entry point next session — read first, then `varve-v1-roadmap.md`, then current slice's detailed plan.
 
 ## Current position
+- **Current entry point:** Slice 8 planning/start from `docs/plans/varve-v1-roadmap.md` (generate the detailed Slice 8 plan first if it does not exist).
+- **Current slice:** 7 (GQL practical-core completion + conformance harness) — ✅ COMPLETE and reclosed through Task 25. Slice demo: `cargo run --release --example gql_tour -p varve`. Final Task 25 verification green: `cargo fmt --all --check`; `cargo run --release --example gql_tour -p varve`; `cargo test --workspace -- --test-threads=1` (596 passed, 64 suites, 133.84s); `cargo clippy --workspace --all-targets -- -D warnings`; `PROPTEST_CASES=1024 cargo test -p varve-testkit --release --test traversal_oracle -- --test-threads=1` (6 passed, 49.17s); TCK gate `cargo test -p varve-testkit --test tck -- --test-threads=1` (3,897 total, 3,386 excluded, 511 adapted, 445 passed, 66 non-excluded failures, pass rate 0.870841); `cargo test -p varve-testkit --lib` (25 passed); `cargo test -p varve-testkit --test tck_values` (11 passed); `cargo test -p varve-testkit -- --test-threads=1` (65 passed, 14 suites, 116.10s); parser fuzz `cargo +nightly fuzz run parse -- -max_total_time=600 -rss_limit_mb=4096` (13,903,093 execs, corpus 2324/559Kb, RSS 1822Mb, no crashes/assertions).
+- **Slice 7 resource boundary:** `PathExpand` now enforces configurable shared row/frontier/output-batch budgets plus hop cap and returns `ResourcesExhausted` before cyclic `WALK` queries can materialize unbounded paths. This is a bounded-memory/work guarantee, not constant-CPU for arbitrary graph queries; future hardening remains streaming/cursor path expansion, backpressure, and non-materializing adjacency scans for million-edge fallback cases.
+- **Slice 7 follow-ups complete (2026-07-08/09):** Tasks 20-25 closed configurable query budgets, streaming `PathExpandExec` batches, reachable-edge BFS/adjacency budget gates, traversal-oracle CPU reduction, TCK side effects/path-value comparison, and the final fuzz/TCK/traversal reclose.
+- **Slice 6:** ✅ COMPLETE (2026-07-06). Traversal, adjacency families, label filters, clause pipeline, `EXISTS` semi/anti joins, and traversal oracle/perf gates complete. Previous checkpoint demo: `cargo test -p varve --test labels`.
 
-- **Current slice:** 6 (edges, adjacency, multi-hop traversal, paths) — ✅ COMPLETE
-  (2026-07-06, 1 session, SDD, 12 tasks + 1 perf-opt task). Varve is now a real graph DB. `Event` gained
-  `src`/`dst` endpoints (nullable `_src_iid`/`_dst_iid` FSB16 IPC cols); `LiveTable` maintains src-/dst-ordered
-  adjacency views; `TableState` split into `nodes`/`edges` cores + `adj_out`/`adj_in` families. `INSERT
-  (a)-[:REL {props}]->(b)` (inline OR `MATCH…INSERT`-bound endpoints, statement-local Cartesian bindings);
-  edges flushed under 3 sort orders (primary/`adj-out`/`adj-in`) in ONE atomic manifest (`TableTries.family`
-  tag 4, backward-compatible empty=primary); anchor-pruned `edge_adjacency` lookup. Multi-element `MATCH`
-  lowers to DataFusion left-deep hash joins (mangled `{var}__{col}` columns, per-element label/prop/WHERE
-  pushdown, size heuristic); `PathExpand` = a real custom DataFusion operator (`UserDefinedLogicalNodeCore` +
-  `ExecutionPlan` + `QueryPlanner`) for `{m,n}`/`*` quantified WALK traversal + `RETURN p` path lists, capped by
-  `[query] max_path_depth`. `DETACH DELETE` cascades incident edges in one tx; plain `DELETE` on a connected
-  node → `EngineError::StillConnected`. A **perf optimization** (anchor-reachable edge pruning) makes anchored
-  traversal exploit the adjacency families: warm 2-hop over 10k/60k = **16.23 ms** (was 88.92 ms full-scan) —
-  exit criterion met. Correctness proven by an INDEPENDENT traversal oracle (pure property at 10k cases + e2e
-  Db-via-GQL property incl. AS-OF + flush-invariance) and a deterministic 10k/60k social-graph fixture. New
-  surfaces: `varve-index` (`SortOrder`/`encode_block_by`), `varve-gql` (path/edge/quantifier grammar + AST
-  reshape + DETACH), `varve-storage` (`adj_*_key`, `ADJ_OUT`/`ADJ_IN`, manifest `family`), `varve-plan`
-  (`pattern`/`expand` modules), `varve-testkit` (`oracle`/`fixture`). Demo: `cargo run --release --example
-  traversal_bench -p varve`. 372 workspace tests.
-- **Next action:** GENERATE the slice-7 detailed plan (GQL completion & TCK — spec §8) with the writing-plans
-  skill, commit it, then execute. Slice 7 depends on slice 6 (paths) + slice 5 (backends). Carry forward the
-  slice-6 fast-follows below (esp. the `where_for_var` single-variant `Expr` closure that breaks when WHERE
-  grows variants, and the T10 e2e-property CI wall-time).
 - **Slice 5 (S3-API backends, object-store log, disk cache, capability probe):** ✅ COMPLETE
   (2026-07-05, 1 session, SDD, 10 tasks). `storage = "s3"` now runs the whole stack against any S3-API
   backend (Garage/SeaweedFS/MinIO/Ceph RGW via `object_store/aws`, default-on `s3` feature);
@@ -428,9 +409,10 @@
   - STILL DEFERRED (intentional): the `SnapshotSource` trait seam waits for slice 4 (YAGNI
     before a second scan source); DELETE's documented `#[allow(await_holding_lock)]` on
     `execute_delete` dissolves in slice 3's log-serialized writer loop (spec D3).
-- **`_labels` roadmap divergence (user's call):** either add `_labels` to the LiveTable snapshot
-  when slice 6/7 needs it, OR reconcile the roadmap slice-1 text to match the detailed plan
-  (`_iid` + property columns). Not blocking; flagged so it isn't silently lost.
+- **~~`_labels` roadmap divergence~~ RESOLVED** 2026-07-06 (slice 7 Task 7): snapshots now
+  emit non-null system `_labels: List<Utf8>` for nodes and edges, node MATCH supports label
+  conjunction/alternation, and `_labels` is reserved from user property projection to avoid
+  duplicate system-column collisions.
 - **Slice-1 minor follow-ups (non-blocking, triaged DEFER by whole-branch review):** T1 strengthen
   the id collision test to a same-length case + narrow the `id_bytes` `other =>` arm (slice 2);
   T2 lexer `// v0` comment scope + per-ident `to_ascii_uppercase` alloc (slice 7); T3 empty
@@ -513,7 +495,7 @@
 | 4 blocks & persisted scan | ✅ complete | 1 | `cargo run --release --example block_bench -p varve` | `varve-storage` crate (sovereign `ObjectStore` over object_store 0.13, §9 lex-hex keys, `BlockManifest` commit point, memory cache) + paged block codec/prune in `varve-index` + `Log::trim` + one-lock merged live∪persisted scan + writer-loop flush (data/meta→manifest→reset→trim) + `Db::open` manifest+log-tail recovery + kill-during-flush crash matrix + flush-equivalence proptest; bench 1M events @ 39.8k ev/s, reopen 38 ms, warm point lookup 7.6 ms (<100 ms); 247 workspace tests (incl. post-slice `merge_sources` extraction fast-follow) |
 | 5 s3 backends & caches | ✅ complete | 1 | `just s3-matrix` / `cargo run --release --example cache_bench -p varve` | `BuildContext` (spec-§4 factory sig); `storage/s3` (`object_store/aws`, default-on) for Garage/SeaweedFS/MinIO/Ceph; `log/object-store` (1 object per group-commit batch, shared bucket); disk `CacheTier` + `[cache] tiers` registry (memory/disk builtins, replaces `[cache] memory_max_bytes`); optional `ConditionalStore` + 4-step capability probe (`Db::probe_capabilities`); docker-CLI backend harness + CI `backend-matrix`/`backend-ceph-weekly`. LIVE trio (garage/seaweedfs/minio) green; probe verdicts minio=Supported, garage/seaweedfs=Inconsistent. 293 workspace tests |
 | 6 edges & traversal | ✅ complete | 1 | `cargo run --release --example traversal_bench -p varve` | edge events (`_src_iid`/`_dst_iid`) + `LiveTable` adjacency views; `INSERT (a)-[:REL]->(b)` inline + `MATCH…INSERT`; 3 sort-order edge families (primary/adj-out/adj-in) in one atomic manifest (`TableTries.family`); anchor-pruned `edge_adjacency`; multi-element MATCH → DataFusion hash joins; `PathExpand` UDLN+ExecutionPlan for `{m,n}`/`*` WALK + `RETURN p`; `DETACH DELETE` + still-connected error; independent traversal oracle (pure 10k + e2e + flush-invariance properties) + 10k/60k social fixture; anchor-reachable edge-pruning perf opt → **warm 2-hop 16.23 ms** (<50 ms). Caught+fixed a mid-slice `DELETE` data-loss bug. 372 workspace tests |
-| 7 GQL completion & TCK | not started | – | – | no detailed plan yet |
+| 7 GQL completion & TCK | ✅ complete | 5 | `cargo run --release --example gql_tour -p varve` | Tasks 1-25 complete. Practical-core expressions/statements/mutations/catalog/TCK/differential/fuzz/demo shipped; post-exit hardening closed configurable query budgets, streaming `PathExpandExec`, reachable-edge BFS budgets, traversal-oracle CPU reduction, TCK side effects/path values, and final fuzz reclose. Final verification: 596 workspace tests, clippy clean, fmt clean, release traversal oracle 6 passed in 49.17s, TCK 445/511 adapted passed (0.870841), 10-min parser fuzz 13,903,093 execs no crashes. Open future hardening: million-edge streaming/cursor/backpressure work. |
 | 8 compaction & GC | not started | – | – | no detailed plan yet |
 | 9 server, CLI, query nodes | not started | – | – | no detailed plan yet |
 | 10 coordination | not started | – | – | no detailed plan yet |

@@ -9,7 +9,7 @@
 
 use proptest::prelude::*;
 use varve_index::block::{encode_block, EncodedBlock};
-use varve_index::{decode_events, snapshot_entities, Event, LiveTable};
+use varve_index::{decode_events, snapshot_entities, Event, LabelFilter, LiveTable};
 use varve_testkit::strategy::{arb_bounds, arb_history};
 use varve_types::Iid;
 
@@ -90,7 +90,7 @@ proptest! {
         let sources = varve_index::merge_sources(blocks, live_events);
         let got = snapshot_entities(
             sources.iter().map(|(iid, events)| (*iid, events.as_slice())),
-            "P",
+            LabelFilter::Single("P"),
             &bounds,
         )
         .unwrap();

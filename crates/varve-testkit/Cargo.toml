@@ -15,6 +15,7 @@ varve-log = { path = "../varve-log", features = ["fault-injection"] }
 varve-engine = { path = "../varve-engine", features = ["fault-injection"] }
 varve-storage = { path = "../varve-storage" }
 varve-config = { path = "../varve-config" }
+varve-gql = { path = "../varve-gql" }
 tokio = { workspace = true }
 # backends.rs is library code (not test-only) that shells out to docker and
 # needs scratch config directories, so tempfile lives here, not dev-deps.
@@ -25,6 +26,7 @@ chrono = { workspace = true }
 # oracle.rs::column_i64 (library code, task 11) downcasts RecordBatch columns
 # for both test files to share, so arrow is a normal dep, not dev-only.
 arrow = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 bytes = { workspace = true }

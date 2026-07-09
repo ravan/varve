@@ -106,6 +106,24 @@ async fn tx_and_clock_floors_survive_restart_with_a_trimmed_log() {
 }
 
 #[tokio::test]
+async fn flushed_catalog_graphs_survive_restart_without_user_data() {
+    let dir = tempfile::tempdir().unwrap();
+
+    {
+        let db = Db::open(blocks_config(dir.path(), 1)).await.unwrap();
+        db.execute("CREATE GRAPH tenant").await.unwrap();
+        wait_for_flush(dir.path()).await;
+    }
+
+    let db = Db::open(blocks_config(dir.path(), 1)).await.unwrap();
+    let rows_in_empty_graph = db
+        .query("USE tenant; MATCH (p:Person) RETURN p.name AS name")
+        .await
+        .unwrap();
+    assert_eq!(rows(&rows_in_empty_graph), 0);
+}
+
+#[tokio::test]
 async fn bitemporal_history_survives_flush_and_restart() {
     let dir = tempfile::tempdir().unwrap();
     let v1;

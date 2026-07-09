@@ -3540,6 +3540,7 @@ dependencies = [
 name = "varve-gql"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "thiserror",
  "varve-types",
 ]
@@ -3615,10 +3616,12 @@ dependencies = [
  "chrono",
  "proptest",
  "tempfile",
+ "thiserror",
  "tokio",
  "varve",
  "varve-config",
  "varve-engine",
+ "varve-gql",
  "varve-index",
  "varve-log",
  "varve-plan",

@@ -13,4 +13,4 @@ pub use block::{
 pub use codec::{decode_events, encode_events};
 pub use event::{Event, Op};
 pub use live::{IndexError, LiveTable};
-pub use scan::{merge_sources, snapshot_entities};
+pub use scan::{merge_sources, snapshot_entities, visible_events, LabelFilter};

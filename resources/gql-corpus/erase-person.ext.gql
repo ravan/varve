@@ -1,0 +1,1 @@
+MATCH (p:Person) WHERE p._id = 3 DETACH ERASE p
