@@ -1,11 +1,16 @@
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::state::{EDGES_TABLE, NODES_TABLE};
 use varve_index::{
     decode_events, encode_sorted_events_by, Ceiling, EncodedBlock, Event, IndexError, Op, PageMeta,
     Polygon, SortOrder,
 };
 use varve_storage::keys::{Recency, TrieKey};
-use varve_storage::{ScopedTrieKey, StorageError, TableScope, TrieCatalog, TrieShard};
+use varve_storage::{
+    BlockManifest, ScopedTrieKey, StorageError, TableScope, TableTries, TrieCatalog, TrieEntry,
+    TrieShard,
+};
 use varve_types::{Bucketer, Iid, Instant, TRIE_BRANCH_FACTOR};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +62,62 @@ impl CompactionJob {
 
     pub(crate) fn meta_key(&self, trie_key: &TrieKey) -> String {
         self.scoped_key(trie_key).meta_key()
+    }
+
+    pub(crate) fn target_sort_order(&self) -> Option<SortOrder> {
+        match (self.scope.table.as_str(), self.scope.family.as_str()) {
+            (NODES_TABLE, "") | (EDGES_TABLE, "") => Some(SortOrder::ByIid),
+            (EDGES_TABLE, varve_storage::ADJ_OUT) => Some(SortOrder::BySrc),
+            (EDGES_TABLE, varve_storage::ADJ_IN) => Some(SortOrder::ByDst),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn replace_inputs_with_outputs<T>(
+        &self,
+        tries: &mut Vec<T>,
+        outputs: impl IntoIterator<Item = T>,
+        trie_key: impl Fn(&T) -> &str,
+    ) {
+        let input_keys = self
+            .input_key_strings()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        tries.retain(|entry| !input_keys.contains(trie_key(entry)));
+        tries.extend(outputs);
+        tries.sort_by(|a, b| trie_key(a).cmp(trie_key(b)));
+    }
+}
+
+pub(crate) fn compacted_manifest(
+    latest: &BlockManifest,
+    job: &CompactionJob,
+    output_entries: Vec<TrieEntry>,
+) -> BlockManifest {
+    let mut tables = latest.tables.clone();
+    let mut replaced = false;
+    for table in &mut tables {
+        if table.scope_ref().eq(job.scope()) {
+            job.replace_inputs_with_outputs(&mut table.tries, output_entries.clone(), |entry| {
+                entry.trie_key.as_str()
+            });
+            replaced = true;
+            break;
+        }
+    }
+    if !replaced && !output_entries.is_empty() {
+        let mut tries = Vec::new();
+        job.replace_inputs_with_outputs(&mut tries, output_entries, |entry| {
+            entry.trie_key.as_str()
+        });
+        tables.push(TableTries::new(job.scope().clone(), tries));
+    }
+    BlockManifest {
+        block_id: latest.block_id + 1,
+        watermark: latest.watermark,
+        max_tx_id: latest.max_tx_id,
+        max_system_time_us: latest.max_system_time_us,
+        tables,
     }
 }
 
@@ -398,6 +459,118 @@ mod tests {
             }],
         }])
         .unwrap()
+    }
+
+    fn empty_manifest(tables: Vec<TableTries>) -> BlockManifest {
+        BlockManifest {
+            block_id: 7,
+            watermark: 8,
+            max_tx_id: 9,
+            max_system_time_us: 10,
+            tables,
+        }
+    }
+
+    fn job_for_scope(scope: TableScope) -> CompactionJob {
+        CompactionJob {
+            kind: CompactionKind::L0ToL1Split,
+            scope,
+            input_trie_keys: vec![parse_trie_key("l00-rc-b00")],
+            output_trie_keys: vec![parse_trie_key("l01-rc-b00")],
+        }
+    }
+
+    #[test]
+    fn target_sort_order_matches_table_scope() {
+        assert_eq!(
+            job_for_scope(TableScope::new("default", "nodes", "")).target_sort_order(),
+            Some(SortOrder::ByIid)
+        );
+        assert_eq!(
+            job_for_scope(TableScope::new("default", "edges", "")).target_sort_order(),
+            Some(SortOrder::ByIid)
+        );
+        assert_eq!(
+            job_for_scope(TableScope::new("default", "edges", varve_storage::ADJ_OUT))
+                .target_sort_order(),
+            Some(SortOrder::BySrc)
+        );
+        assert_eq!(
+            job_for_scope(TableScope::new("default", "edges", varve_storage::ADJ_IN))
+                .target_sort_order(),
+            Some(SortOrder::ByDst)
+        );
+    }
+
+    #[test]
+    fn target_sort_order_returns_none_for_unknown_scope() {
+        assert_eq!(
+            job_for_scope(TableScope::new("default", "widgets", "")).target_sort_order(),
+            None
+        );
+        assert_eq!(
+            job_for_scope(TableScope::new("default", "edges", "adj-sideways")).target_sort_order(),
+            None
+        );
+    }
+
+    #[test]
+    fn compacted_manifest_replaces_inputs_adds_outputs_and_sorts_tries() {
+        let scope = TableScope::new("default", "nodes", "");
+        let latest = empty_manifest(vec![TableTries::new(
+            scope.clone(),
+            vec![
+                entry("l00-rc-b01".into()),
+                entry("l00-rc-b02".into()),
+                entry("l00-rc-b03".into()),
+                entry("l01-rc-b10".into()),
+            ],
+        )]);
+        let job = CompactionJob {
+            input_trie_keys: vec![parse_trie_key("l00-rc-b02"), parse_trie_key("l00-rc-b03")],
+            ..job_for_scope(scope.clone())
+        };
+
+        let compacted = compacted_manifest(
+            &latest,
+            &job,
+            vec![entry("l01-rc-b04".into()), entry("l01-rc-b00".into())],
+        );
+
+        assert_eq!(compacted.block_id, latest.block_id + 1);
+        assert_eq!(compacted.watermark, latest.watermark);
+        assert_eq!(compacted.max_tx_id, latest.max_tx_id);
+        assert_eq!(compacted.max_system_time_us, latest.max_system_time_us);
+        assert_eq!(compacted.tables.len(), 1);
+        assert_eq!(compacted.tables[0].scope_ref(), scope);
+        assert_eq!(
+            compacted.tables[0]
+                .tries
+                .iter()
+                .map(|entry| entry.trie_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["l00-rc-b01", "l01-rc-b00", "l01-rc-b04", "l01-rc-b10"]
+        );
+    }
+
+    #[test]
+    fn compacted_manifest_adds_missing_scope_when_outputs_are_non_empty() {
+        let scope = TableScope::new("default", "edges", varve_storage::ADJ_OUT);
+        let latest = empty_manifest(Vec::new());
+        let job = job_for_scope(scope.clone());
+
+        let compacted = compacted_manifest(&latest, &job, vec![entry("l01-rc-b00".into())]);
+
+        assert_eq!(compacted.tables.len(), 1);
+        assert_eq!(compacted.tables[0].scope_ref(), scope);
+        assert_eq!(
+            compacted.tables[0]
+                .tries
+                .iter()
+                .map(|entry| entry.trie_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["l01-rc-b00"]
+        );
     }
 
     #[test]
