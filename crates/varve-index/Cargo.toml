@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 varve-types = { path = "../varve-types" }
-varve-storage = { path = "../varve-storage", default-features = false }
 arrow = { workspace = true }
 thiserror = { workspace = true }
 
