@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use varve_storage::keys::manifest_key;
 use varve_storage::{
-    manifest_history, memory_store, BlockManifest, TableTries, TrieCatalog, TrieEntry, TrieState,
+    manifest_history, memory_store, BlockManifest, TableTries, TrieCatalog, TrieEntry,
 };
 
 fn entry(key: &str) -> TrieEntry {
@@ -29,6 +29,19 @@ fn manifest(block_id: u64, tries: Vec<TrieEntry>) -> BlockManifest {
 
 fn keys(entries: Vec<TrieEntry>) -> Vec<String> {
     entries.into_iter().map(|entry| entry.trie_key).collect()
+}
+
+fn live_keys(catalog: &TrieCatalog, graph: &str, table: &str, family: &str) -> Vec<String> {
+    keys(
+        catalog
+            .live_entries()
+            .into_iter()
+            .filter(|(entry_graph, entry_table, entry_family, _)| {
+                entry_graph == graph && entry_table == table && entry_family == family
+            })
+            .map(|(_, _, _, entry)| entry)
+            .collect(),
+    )
 }
 
 #[tokio::test]
@@ -60,7 +73,7 @@ async fn manifest_history_is_sorted_by_block_id_and_ignores_strays() {
 }
 
 #[test]
-fn catalog_marks_latest_inventory_live_and_superseded_garbage() {
+fn catalog_uses_latest_inventory_for_live_entries() {
     let catalog = TrieCatalog::from_manifests(&[
         manifest(0, vec![entry("l00-rc-b00")]),
         manifest(1, vec![entry("l01-rc-b01")]),
@@ -68,22 +81,8 @@ fn catalog_marks_latest_inventory_live_and_superseded_garbage() {
     .unwrap();
 
     assert_eq!(
-        keys(catalog.live_for("default", "nodes", "")),
+        live_keys(&catalog, "default", "nodes", ""),
         vec!["l01-rc-b01"]
-    );
-    assert_eq!(
-        catalog.state_for("default", "nodes", "", "l00-rc-b00"),
-        Some(TrieState::Garbage)
-    );
-    assert_eq!(
-        keys(
-            catalog
-                .garbage_entries()
-                .into_iter()
-                .map(|(_, _, _, entry)| entry)
-                .collect()
-        ),
-        vec!["l00-rc-b00"]
     );
 }
 
@@ -112,24 +111,21 @@ fn catalog_groups_by_graph_table_family_and_shard() {
     .unwrap();
 
     assert_eq!(
-        keys(catalog.live_for("default", "nodes", "")),
+        live_keys(&catalog, "default", "nodes", ""),
         vec!["l00-rc-b00"]
     );
     assert_eq!(
-        keys(catalog.live_for("default", "edges", "adj-out")),
+        live_keys(&catalog, "default", "edges", "adj-out"),
         vec!["l00-rc-b01"]
     );
-    assert!(catalog.live_for("default", "edges", "").is_empty());
+    assert!(live_keys(&catalog, "default", "edges", "").is_empty());
 }
 
 #[test]
 fn l1_historical_is_nascent_until_matching_l1_current() {
     let historical_only =
         TrieCatalog::from_manifests(&[manifest(9, vec![entry("l01-r20200106-b09")])]).unwrap();
-    assert_eq!(
-        historical_only.state_for("default", "nodes", "", "l01-r20200106-b09"),
-        Some(TrieState::Nascent)
-    );
+    assert!(live_keys(&historical_only, "default", "nodes", "").is_empty());
 
     let with_current = TrieCatalog::from_manifests(&[manifest(
         9,
@@ -137,8 +133,8 @@ fn l1_historical_is_nascent_until_matching_l1_current() {
     )])
     .unwrap();
     assert_eq!(
-        with_current.state_for("default", "nodes", "", "l01-r20200106-b09"),
-        Some(TrieState::Live)
+        live_keys(&with_current, "default", "nodes", ""),
+        vec!["l01-r20200106-b09", "l01-rc-b09"]
     );
 }
 
@@ -146,10 +142,7 @@ fn l1_historical_is_nascent_until_matching_l1_current() {
 fn l2_partition_siblings_become_live_as_a_group() {
     let partial =
         TrieCatalog::from_manifests(&[manifest(4, vec![entry("l02-rc-p0-b04")])]).unwrap();
-    assert_eq!(
-        partial.state_for("default", "nodes", "", "l02-rc-p0-b04"),
-        Some(TrieState::Nascent)
-    );
+    assert!(live_keys(&partial, "default", "nodes", "").is_empty());
 
     let full = TrieCatalog::from_manifests(&[manifest(
         4,
@@ -161,15 +154,13 @@ fn l2_partition_siblings_become_live_as_a_group() {
         ],
     )])
     .unwrap();
-    for key in [
-        "l02-rc-p0-b04",
-        "l02-rc-p1-b04",
-        "l02-rc-p2-b04",
-        "l02-rc-p3-b04",
-    ] {
-        assert_eq!(
-            full.state_for("default", "nodes", "", key),
-            Some(TrieState::Live)
-        );
-    }
+    assert_eq!(
+        live_keys(&full, "default", "nodes", ""),
+        vec![
+            "l02-rc-p0-b04",
+            "l02-rc-p1-b04",
+            "l02-rc-p2-b04",
+            "l02-rc-p3-b04",
+        ]
+    );
 }

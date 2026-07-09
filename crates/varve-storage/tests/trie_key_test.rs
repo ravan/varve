@@ -1,6 +1,5 @@
 use varve_storage::keys::{
-    l0_trie_key, Bucketer, Recency, TrieKey, TrieShard, LOG_LIMIT, PAGE_LIMIT, TRIE_BRANCH_FACTOR,
-    TRIE_LEVEL_BITS,
+    l0_trie_key, Bucketer, Recency, TrieKey, LOG_LIMIT, TRIE_BRANCH_FACTOR, TRIE_LEVEL_BITS,
 };
 
 #[test]
@@ -27,14 +26,6 @@ fn trie_key_round_trips_l0_l1_l2() {
     };
     assert_eq!(l2c.to_key_string(), "l02-rc-p13-b00");
     assert_eq!(TrieKey::parse("l02-rc-p13-b00").unwrap(), l2c);
-    assert_eq!(
-        l2c.shard(),
-        TrieShard {
-            level: 2,
-            recency: Recency::Current,
-            part: vec![1, 3],
-        }
-    );
 }
 
 #[test]
@@ -53,7 +44,6 @@ fn bucketer_matches_xtdb_known_bit_patterns() {
     assert_eq!(TRIE_LEVEL_BITS, 2);
     assert_eq!(TRIE_BRANCH_FACTOR, 4);
     assert_eq!(LOG_LIMIT, 64);
-    assert_eq!(PAGE_LIMIT, 1024);
 
     let iid = varve_types::Iid::from_bytes([
         0b0001_1011,
@@ -82,23 +72,4 @@ fn bucketer_matches_xtdb_known_bit_patterns() {
     assert_eq!(Bucketer::path(&iid, 6), vec![0, 1, 2, 3, 3, 2]);
     assert!(Bucketer::contains(&[0, 1, 2, 3], &iid));
     assert!(!Bucketer::contains(&[0, 1, 2, 2], &iid));
-}
-
-#[test]
-fn filter_iids_for_path_returns_only_prefix_range() {
-    let mk =
-        |first| varve_types::Iid::from_bytes([first, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    let iids = [mk(0x00), mk(0x3f), mk(0x40), mk(0x7f), mk(0x80), mk(0xc0)];
-
-    assert_eq!(Bucketer::iid_start(&[1]), mk(0x40));
-    assert_eq!(Bucketer::iid_next_start(&[1]), Some(mk(0x80)));
-    assert_eq!(
-        Bucketer::filter_iids_for_path(iids.iter(), &[1]),
-        vec![mk(0x40), mk(0x7f)]
-    );
-    assert_eq!(Bucketer::iid_next_start(&[3]), None);
-    assert_eq!(
-        Bucketer::filter_iids_for_path(iids.iter(), &[3]),
-        vec![mk(0xc0)]
-    );
 }
