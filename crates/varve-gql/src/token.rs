@@ -32,6 +32,43 @@ pub enum Keyword {
     Timestamp,
     Date,
     Detach,
+    Not,
+    Or,
+    Xor,
+    Is,
+    Case,
+    When,
+    Then,
+    Else,
+    End,
+    Exists,
+    Cast,
+    In,
+    Starts,
+    Ends,
+    With,
+    Contains,
+    Optional,
+    Filter,
+    Let,
+    Set,
+    Remove,
+    Erase,
+    Union,
+    Distinct,
+    Order,
+    By,
+    Asc,
+    Ascending,
+    Desc,
+    Descending,
+    Skip,
+    Limit,
+    Offset,
+    Create,
+    Drop,
+    Graph,
+    Use,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -49,13 +86,23 @@ pub enum TokenKind {
     Comma,
     Dot,
     Eq,
+    Neq,
     Dollar,
+    Plus,
     Minus,
     Lt,
+    Lte,
     Gt,
+    Gte,
     LBracket,
     RBracket,
     Star,
+    Slash,
+    Percent,
+    Amp,
+    Pipe,
+    Bang,
+    Semicolon,
     Eof,
 }
 
@@ -65,8 +112,8 @@ pub struct Token {
     pub offset: usize,
 }
 
-fn keyword(word: &str) -> Option<Keyword> {
-    match word.to_ascii_uppercase().as_str() {
+fn keyword(upper: &str) -> Option<Keyword> {
+    match upper {
         "INSERT" => Some(Keyword::Insert),
         "MATCH" => Some(Keyword::Match),
         "WHERE" => Some(Keyword::Where),
@@ -89,6 +136,43 @@ fn keyword(word: &str) -> Option<Keyword> {
         "TIMESTAMP" => Some(Keyword::Timestamp),
         "DATE" => Some(Keyword::Date),
         "DETACH" => Some(Keyword::Detach),
+        "NOT" => Some(Keyword::Not),
+        "OR" => Some(Keyword::Or),
+        "XOR" => Some(Keyword::Xor),
+        "IS" => Some(Keyword::Is),
+        "CASE" => Some(Keyword::Case),
+        "WHEN" => Some(Keyword::When),
+        "THEN" => Some(Keyword::Then),
+        "ELSE" => Some(Keyword::Else),
+        "END" => Some(Keyword::End),
+        "EXISTS" => Some(Keyword::Exists),
+        "CAST" => Some(Keyword::Cast),
+        "IN" => Some(Keyword::In),
+        "STARTS" => Some(Keyword::Starts),
+        "ENDS" => Some(Keyword::Ends),
+        "WITH" => Some(Keyword::With),
+        "CONTAINS" => Some(Keyword::Contains),
+        "OPTIONAL" => Some(Keyword::Optional),
+        "FILTER" => Some(Keyword::Filter),
+        "LET" => Some(Keyword::Let),
+        "SET" => Some(Keyword::Set),
+        "REMOVE" => Some(Keyword::Remove),
+        "ERASE" => Some(Keyword::Erase),
+        "UNION" => Some(Keyword::Union),
+        "DISTINCT" => Some(Keyword::Distinct),
+        "ORDER" => Some(Keyword::Order),
+        "BY" => Some(Keyword::By),
+        "ASC" => Some(Keyword::Asc),
+        "ASCENDING" => Some(Keyword::Ascending),
+        "DESC" => Some(Keyword::Desc),
+        "DESCENDING" => Some(Keyword::Descending),
+        "SKIP" => Some(Keyword::Skip),
+        "LIMIT" => Some(Keyword::Limit),
+        "OFFSET" => Some(Keyword::Offset),
+        "CREATE" => Some(Keyword::Create),
+        "DROP" => Some(Keyword::Drop),
+        "GRAPH" => Some(Keyword::Graph),
+        "USE" => Some(Keyword::Use),
         _ => None,
     }
 }
@@ -139,6 +223,10 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, GqlError> {
                 i += 1;
                 TokenKind::Eq
             }
+            '+' => {
+                i += 1;
+                TokenKind::Plus
+            }
             '$' => {
                 i += 1;
                 TokenKind::Dollar
@@ -148,12 +236,25 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, GqlError> {
                 TokenKind::Minus
             }
             '<' => {
-                i += 1;
-                TokenKind::Lt
+                if bytes.get(i + 1) == Some(&b'>') {
+                    i += 2;
+                    TokenKind::Neq
+                } else if bytes.get(i + 1) == Some(&b'=') {
+                    i += 2;
+                    TokenKind::Lte
+                } else {
+                    i += 1;
+                    TokenKind::Lt
+                }
             }
             '>' => {
-                i += 1;
-                TokenKind::Gt
+                if bytes.get(i + 1) == Some(&b'=') {
+                    i += 2;
+                    TokenKind::Gte
+                } else {
+                    i += 1;
+                    TokenKind::Gt
+                }
             }
             '[' => {
                 i += 1;
@@ -167,29 +268,54 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, GqlError> {
                 i += 1;
                 TokenKind::Star
             }
+            '/' => {
+                i += 1;
+                TokenKind::Slash
+            }
+            '%' => {
+                i += 1;
+                TokenKind::Percent
+            }
+            '&' => {
+                i += 1;
+                TokenKind::Amp
+            }
+            '|' => {
+                i += 1;
+                TokenKind::Pipe
+            }
+            '!' => {
+                i += 1;
+                TokenKind::Bang
+            }
+            ';' => {
+                i += 1;
+                TokenKind::Semicolon
+            }
             '\'' => {
                 i += 1;
                 let mut s = String::new();
                 loop {
-                    match bytes.get(i) {
-                        Some(b'\'') if bytes.get(i + 1) == Some(&b'\'') => {
-                            s.push('\'');
-                            i += 2;
-                        }
-                        Some(b'\'') => {
-                            i += 1;
-                            break;
-                        }
-                        Some(&b) => {
-                            s.push(b as char);
-                            i += 1;
-                        }
-                        None => {
-                            return Err(GqlError::Lex {
-                                offset,
-                                msg: "unterminated string".into(),
-                            })
-                        }
+                    let Some(rest) = src.get(i..) else {
+                        return Err(GqlError::Lex {
+                            offset,
+                            msg: "invalid UTF-8 string boundary".into(),
+                        });
+                    };
+                    if rest.starts_with("''") {
+                        s.push('\'');
+                        i += 2;
+                    } else if rest.starts_with('\'') {
+                        i += 1;
+                        break;
+                    } else if let Some(ch) = rest.chars().next() {
+                        s.push(ch);
+                        i += ch.len_utf8();
+                    } else {
+                        return Err(GqlError::Lex {
+                            offset,
+                            msg: "unterminated string".into(),
+                        });
                     }
                 }
                 TokenKind::Str(s)
@@ -230,7 +356,8 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, GqlError> {
                     i += 1;
                 }
                 let word = &src[start..i];
-                match keyword(word) {
+                let upper = word.to_ascii_uppercase();
+                match keyword(&upper) {
                     Some(kw) => TokenKind::Kw(kw),
                     None => TokenKind::Ident(word.to_string()),
                 }
@@ -379,6 +506,78 @@ mod tests {
                 Kw(Valid),
                 Kw(Delete),
                 Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_comparison_and_arithmetic_operators() {
+        use TokenKind::*;
+
+        assert_eq!(
+            kinds("= <> < <= > >= + - * / %"),
+            vec![Eq, Neq, Lt, Lte, Gt, Gte, Plus, Minus, Star, Slash, Percent, Eof]
+        );
+    }
+
+    #[test]
+    fn lexes_semicolon_and_pipe() {
+        use TokenKind::*;
+
+        assert_eq!(kinds("; |"), vec![Semicolon, Pipe, Eof]);
+    }
+
+    #[test]
+    fn keywords_are_case_insensitive_including_new_ones() {
+        use Keyword::*;
+        use TokenKind::*;
+
+        assert_eq!(
+            kinds(
+                "not OR xor is case when then else end exists cast in starts ends \
+                 with contains optional filter let set remove erase union distinct \
+                 order by asc ascending desc descending skip limit offset create \
+                 drop graph use"
+            ),
+            vec![
+                Kw(Not),
+                Kw(Or),
+                Kw(Xor),
+                Kw(Is),
+                Kw(Case),
+                Kw(When),
+                Kw(Then),
+                Kw(Else),
+                Kw(End),
+                Kw(Exists),
+                Kw(Cast),
+                Kw(In),
+                Kw(Starts),
+                Kw(Ends),
+                Kw(With),
+                Kw(Contains),
+                Kw(Optional),
+                Kw(Filter),
+                Kw(Let),
+                Kw(Set),
+                Kw(Remove),
+                Kw(Erase),
+                Kw(Union),
+                Kw(Distinct),
+                Kw(Order),
+                Kw(By),
+                Kw(Asc),
+                Kw(Ascending),
+                Kw(Desc),
+                Kw(Descending),
+                Kw(Skip),
+                Kw(Limit),
+                Kw(Offset),
+                Kw(Create),
+                Kw(Drop),
+                Kw(Graph),
+                Kw(Use),
+                Eof,
             ]
         );
     }

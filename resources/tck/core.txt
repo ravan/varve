@@ -1,0 +1,74 @@
+# Curated core scenarios that must pass.
+# Dedicated Aggregation feature scenarios do not pass today; aggregation is covered via Return6/ReturnOrderBy6.
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #1
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #10
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #11
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #12
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #13
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #14
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #15
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #16
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #17
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #18
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #19
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #2
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #20
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #3
+Create1 - Creating nodes::[14] Fail when creating a node with properties that is already bound
+Create1 - Creating nodes::[17] Fail when adding new label predicate on a node that is already bound 3
+Create1 - Creating nodes::[18] Fail when adding new label predicate on a node that is already bound 4
+Create1 - Creating nodes::[19] Fail when adding new label predicate on a node that is already bound 5
+Create1 - Creating nodes::[20] Fail when creating a node using undefined variable in pattern
+Create1 - Creating nodes::[3] Create a single node with a label
+Create1 - Creating nodes::[4] Create two nodes with same label
+Create1 - Creating nodes::[5] Create a single node with multiple labels
+Create1 - Creating nodes::[6] Create three nodes with multiple labels
+Create1 - Creating nodes::[7] Create a single node with a property
+Return2 - Return single expression (correctly projecting an expression)::[11] RETURN does not lose precision on large integers
+Return4 - Column renaming::[10] Fail when returning multiple columns with same name
+Return6 - Implicit grouping with aggregates::[14] Aggregates in aggregates
+Return6 - Implicit grouping with aggregates::[15] Using `rand()` in aggregations
+Return6 - Implicit grouping with aggregates::[20] Fail if not returned variables are used inside an expression which contains an aggregation expression
+Return6 - Implicit grouping with aggregates::[21] Fail if more complex expressions, even if returned, are used inside expression which contains an aggregation expression
+Return7 - Return all variables::[2] Fail when using RETURN * without variables in scope
+ReturnOrderBy6 - Aggregation expressions in order by::[4] Fail if not returned variables are used inside an order by item which contains an aggregation expression
+ReturnOrderBy6 - Aggregation expressions in order by::[5] Fail if more complex expressions, even if returned, are used inside an order by item which contains an aggregation expression
+ReturnSkipLimit1 - Skip::[10] Fail when using non-constants in SKIP
+ReturnSkipLimit1 - Skip::[11] Fail when using negative value in SKIP
+ReturnSkipLimit1 - Skip::[4] Accept skip zero
+Delete1 - Deleting nodes::[8] Failing when deleting a label
+Delete2 - Deleting relationships::[5] Failing when deleting a relationship type
+Delete5 - Delete clause interoperation with built-in data types::[8] Failing when using undefined variable in DELETE
+Delete5 - Delete clause interoperation with built-in data types::[9] Failing when deleting an integer expression
+Comparison1 - Equality::[10] Handling inlined equality of large integer
+Comparison1 - Equality::[11] Handling explicit equality of large integer
+Comparison1 - Equality::[12] Handling inlined equality of large integer, non-equal values
+Comparison1 - Equality::[13] Handling explicit equality of large integer, non-equal values
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #1
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #10
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #11
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #12
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #13
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #14
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #15
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #16
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #17
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #18
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #19
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #2
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #20
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #21
+Null1 - IS NULL validation::[6] IS NULL is case insensitive
+Null2 - IS NOT NULL validation::[6] IS NOT NULL is case insensitive
+Literals2 - Decimal integer::[10] Fail on a too small integer
+Literals2 - Decimal integer::[11] Fail on an integer containing a alphabetic character
+Literals2 - Decimal integer::[12] Fail on an integer containing a invalid symbol character
+Literals2 - Decimal integer::[9] Fail on a too large integer
+Literals3 - Hexadecimal integer::[12] Fail on an incomplete hexadecimal integer
+Literals3 - Hexadecimal integer::[13] Fail on an hexadecimal literal containing a lower case invalid alphanumeric character
+Literals3 - Hexadecimal integer::[14] Fail on an hexadecimal literal containing a upper case invalid alphanumeric character
+Literals3 - Hexadecimal integer::[16] Fail on a too large hexadecimal integer
+Literals3 - Hexadecimal integer::[17] Fail on a too small hexadecimal integer
+Literals4 - Octal integer::[10] Fail on a too small octal integer
+Literals4 - Octal integer::[9] Fail on a too large octal integer
+Literals5 - Float::[27] Fail when float value is too large

@@ -10,10 +10,24 @@ pub enum Literal {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum LabelSpec {
+    All(Vec<String>),
+    Any(Vec<String>),
+}
+
+impl LabelSpec {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            LabelSpec::All(labels) | LabelSpec::Any(labels) => labels.is_empty(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct NodePattern {
     pub var: Option<String>,
-    pub labels: Vec<String>,
-    pub props: Vec<(String, Literal)>,
+    pub labels: LabelSpec,
+    pub props: Vec<(String, Expr)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,8 +36,8 @@ pub enum Direction {
     In,  // (a)<-[..]-(b)
 }
 
-/// `{n}` ⇒ min=n, max=Some(n); `{m,n}` ⇒ (m, Some(n)); `{m,}` ⇒ (m, None);
-/// `*` ⇒ (0, None). `None` max is capped to `max_path_depth` at lowering.
+/// `{n}` => min=n, max=Some(n); `{m,n}` => (m, Some(n)); `{m,}` => (m, None);
+/// `*` => (0, None). `None` max capped to `max_path_depth` at lowering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Quantifier {
     pub min: u32,
@@ -34,7 +48,7 @@ pub struct Quantifier {
 pub struct EdgePattern {
     pub var: Option<String>,
     pub label: String, // required in v1 (decision 15)
-    pub props: Vec<(String, Literal)>,
+    pub props: Vec<(String, Expr)>,
     pub direction: Direction,
     pub quantifier: Option<Quantifier>,
 }
@@ -49,8 +63,7 @@ pub struct PathPattern {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchPart {
-    /// v1: single-node patterns only (paths in mutation reads: slice 7).
-    pub patterns: Vec<NodePattern>,
+    pub paths: Vec<PathPattern>,
     pub where_clause: Option<Expr>,
 }
 
@@ -58,82 +71,309 @@ pub struct MatchPart {
 pub struct InsertStmt {
     pub match_part: Option<MatchPart>,
     pub paths: Vec<PathPattern>,
-    /// `INSERT … VALID FROM <dt> [TO <dt>]` / `VALID TO <dt>` — applies to
-    /// every node in the statement. `None` defers to the engine's default
-    /// (valid_from = system time, valid_to = end of time).
+    /// `INSERT VALID FROM <dt> [TO <dt>]` / `VALID TO <dt>` applies to every
+    /// node in the statement. `None` defers to the engine default.
     pub valid_from: Option<Instant>,
     pub valid_to: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum UnaryOp {
+    Not,
+    Neg,
+    IsNull,
+    IsNotNull,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    Neq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    And,
+    Or,
+    Xor,
+    In,
+    StartsWith,
+    EndsWith,
+    Contains,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CastType {
+    Int,
+    Float,
+    Str,
+    Bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    PropEq {
+    Literal(Literal),
+    Param(String),
+    Prop {
         var: String,
         prop: String,
-        value: Literal,
+    },
+    Var(String),
+    Star,
+    List(Vec<Expr>),
+    Unary {
+        op: UnaryOp,
+        expr: Box<Expr>,
+    },
+    Binary {
+        op: BinaryOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
+    Case {
+        operand: Option<Box<Expr>>,
+        whens: Vec<(Expr, Expr)>,
+        otherwise: Option<Box<Expr>>,
+    },
+    FnCall {
+        name: String,
+        args: Vec<Expr>,
+        distinct: bool,
+    },
+    Cast {
+        expr: Box<Expr>,
+        ty: CastType,
+    },
+    Exists {
+        paths: Vec<PathPattern>,
+        where_clause: Option<Box<Expr>>,
     },
 }
 
-/// `FOR VALID_TIME …` / `FOR SYSTEM_TIME …` clauses, either at query level
-/// (before the first `MATCH`) or per-`MATCH` (immediately after the pattern).
+impl Expr {
+    pub fn conjuncts(&self) -> Vec<&Expr> {
+        let mut out = Vec::new();
+        self.push_conjuncts(&mut out);
+        out
+    }
+
+    fn push_conjuncts<'a>(&'a self, out: &mut Vec<&'a Expr>) {
+        match self {
+            Expr::Binary {
+                op: BinaryOp::And,
+                lhs,
+                rhs,
+            } => {
+                lhs.push_conjuncts(out);
+                rhs.push_conjuncts(out);
+            }
+            other => out.push(other),
+        }
+    }
+
+    pub fn as_prop_eq(&self) -> Option<(&str, &str, &Expr)> {
+        match self {
+            Expr::Binary {
+                op: BinaryOp::Eq,
+                lhs,
+                rhs,
+            } => match (lhs.as_ref(), rhs.as_ref()) {
+                (Expr::Prop { var, prop }, expr) | (expr, Expr::Prop { var, prop }) => {
+                    Some((var, prop, expr))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+pub fn display_expr(expr: &Expr) -> String {
+    match expr {
+        Expr::Literal(literal) => display_literal(literal),
+        Expr::Param(name) => format!("${name}"),
+        Expr::Prop { var, prop } => format!("{var}.{prop}"),
+        Expr::Var(var) => var.clone(),
+        Expr::Star => "*".to_string(),
+        Expr::List(items) => {
+            let items = items
+                .iter()
+                .map(display_expr)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{items}]")
+        }
+        Expr::Unary { op, expr } => match op {
+            UnaryOp::Not => format!("NOT {}", display_expr(expr)),
+            UnaryOp::Neg => format!("-{}", display_expr(expr)),
+            UnaryOp::IsNull => format!("{} IS NULL", display_expr(expr)),
+            UnaryOp::IsNotNull => format!("{} IS NOT NULL", display_expr(expr)),
+        },
+        Expr::Binary { op, lhs, rhs } => {
+            format!(
+                "{} {} {}",
+                display_expr(lhs),
+                binary_op_str(op),
+                display_expr(rhs)
+            )
+        }
+        Expr::Case {
+            operand,
+            whens,
+            otherwise,
+        } => {
+            let mut out = String::from("CASE");
+            if let Some(operand) = operand {
+                out.push(' ');
+                out.push_str(&display_expr(operand));
+            }
+            for (when_expr, then_expr) in whens {
+                out.push_str(" WHEN ");
+                out.push_str(&display_expr(when_expr));
+                out.push_str(" THEN ");
+                out.push_str(&display_expr(then_expr));
+            }
+            if let Some(otherwise) = otherwise {
+                out.push_str(" ELSE ");
+                out.push_str(&display_expr(otherwise));
+            }
+            out.push_str(" END");
+            out
+        }
+        Expr::FnCall {
+            name,
+            args,
+            distinct,
+        } => {
+            let args = args.iter().map(display_expr).collect::<Vec<_>>().join(", ");
+            if *distinct {
+                format!("{name}(DISTINCT {args})")
+            } else {
+                format!("{name}({args})")
+            }
+        }
+        Expr::Cast { expr, ty } => format!("CAST({} AS {})", display_expr(expr), cast_type_str(ty)),
+        Expr::Exists { .. } => "EXISTS { ... }".to_string(),
+    }
+}
+
+fn display_literal(literal: &Literal) -> String {
+    match literal {
+        Literal::Int(value) => value.to_string(),
+        Literal::Float(value) => value.to_string(),
+        Literal::Str(value) => format!("'{}'", value.replace('\'', "''")),
+        Literal::Bool(value) => value.to_string(),
+        Literal::Null => "NULL".to_string(),
+    }
+}
+
+fn binary_op_str(op: &BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Add => "+",
+        BinaryOp::Sub => "-",
+        BinaryOp::Mul => "*",
+        BinaryOp::Div => "/",
+        BinaryOp::Mod => "%",
+        BinaryOp::Eq => "=",
+        BinaryOp::Neq => "<>",
+        BinaryOp::Lt => "<",
+        BinaryOp::Lte => "<=",
+        BinaryOp::Gt => ">",
+        BinaryOp::Gte => ">=",
+        BinaryOp::And => "AND",
+        BinaryOp::Or => "OR",
+        BinaryOp::Xor => "XOR",
+        BinaryOp::In => "IN",
+        BinaryOp::StartsWith => "STARTS WITH",
+        BinaryOp::EndsWith => "ENDS WITH",
+        BinaryOp::Contains => "CONTAINS",
+    }
+}
+
+fn cast_type_str(ty: &CastType) -> &'static str {
+    match ty {
+        CastType::Int => "INT",
+        CastType::Float => "FLOAT",
+        CastType::Str => "STRING",
+        CastType::Bool => "BOOL",
+    }
+}
+
+/// `FOR VALID_TIME ...` / `FOR SYSTEM_TIME ...` clauses.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct TemporalClauses {
     pub valid: Option<TemporalDimension>,
     pub system: Option<TemporalDimension>,
 }
 
-/// History-access functions usable in `RETURN`: `valid_from(x)`, `valid_to(x)`,
-/// `system_from(x)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TemporalFnKind {
-    ValidFrom,
-    ValidTo,
-    SystemFrom,
+#[derive(Debug, Clone, PartialEq)]
+pub enum Clause {
+    Match {
+        optional: bool,
+        paths: Vec<PathPattern>,
+        temporal: TemporalClauses,
+        where_clause: Option<Expr>,
+    },
+    Filter(Expr),
+    Let(Vec<(String, Expr)>),
+    For {
+        var: String,
+        list: Expr,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum ReturnItem {
-    Prop {
-        var: String,
-        prop: String,
-        alias: Option<String>,
-    },
-    /// `valid_from(x)` / `valid_to(x)` / `system_from(x)`.
-    TemporalFn {
-        func: TemporalFnKind,
-        var: String,
-        alias: Option<String>,
-    },
-    /// Bare `RETURN p` for a path variable.
-    Var { var: String, alias: Option<String> },
+pub struct SortItem {
+    pub expr: Expr,
+    pub asc: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct DeleteStmt {
-    pub pattern: NodePattern,
-    pub where_clause: Option<Expr>,
-    /// The identifier named after `DELETE`; must equal `pattern.var`.
-    pub target: String,
-    pub detach: bool,
+pub struct ReturnClause {
+    pub distinct: bool,
+    pub items: Vec<(Expr, Option<String>)>,
+    pub order_by: Vec<SortItem>,
+    pub skip: Option<u64>,
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryBody {
+    pub temporal: TemporalClauses,
+    pub clauses: Vec<Clause>,
+    pub ret: ReturnClause,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum UnionKind {
+    Distinct,
+    All,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryStmt {
-    /// Query-level `FOR VALID_TIME`/`FOR SYSTEM_TIME` clauses, given before
-    /// the (first) `MATCH`.
-    pub temporal: TemporalClauses,
-    pub paths: Vec<PathPattern>,
-    /// Per-`MATCH` `FOR VALID_TIME`/`FOR SYSTEM_TIME` clauses, given right
-    /// after the pattern; these override the query-level clauses.
-    pub match_temporal: TemporalClauses,
-    pub where_clause: Option<Expr>,
-    pub return_items: Vec<ReturnItem>,
+    pub first: QueryBody,
+    pub unions: Vec<(UnionKind, QueryBody)>,
 }
 
 impl QueryStmt {
-    /// v1 helper: the single node of a hop-free, single-path, unnamed MATCH.
+    /// v1 helper: first-clause, single-node, hop-free, unnamed MATCH.
     pub fn single_node(&self) -> Option<&NodePattern> {
-        match self.paths.as_slice() {
+        let [Clause::Match {
+            optional: false,
+            paths,
+            temporal: _,
+            where_clause: _,
+        }] = self.first.clauses.as_slice()
+        else {
+            return None;
+        };
+        match paths.as_slice() {
             [p] if p.hops.is_empty() && p.var.is_none() => Some(&p.start),
             _ => None,
         }
@@ -141,8 +381,68 @@ impl QueryStmt {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum MutKind {
+    Delete,
+    Erase,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MutateStmt {
+    pub match_part: MatchPart,
+    pub kind: MutKind,
+    pub target: String,
+    pub detach: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SetItem {
+    Prop {
+        var: String,
+        prop: String,
+        value: Expr,
+    },
+    Label {
+        var: String,
+        label: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RemoveItem {
+    Prop { var: String, prop: String },
+    Label { var: String, label: String },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetStmt {
+    pub match_part: MatchPart,
+    pub items: Vec<SetItem>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoveStmt {
+    pub match_part: MatchPart,
+    pub items: Vec<RemoveItem>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GraphStmt {
+    Create(String),
+    Drop(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Program {
+    pub use_graph: Option<String>,
+    pub statements: Vec<Statement>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     Insert(InsertStmt),
     Query(Box<QueryStmt>),
-    Delete(DeleteStmt),
+    Mutate(MutateStmt),
+    Set(SetStmt),
+    Remove(RemoveStmt),
+    Graph(GraphStmt),
 }

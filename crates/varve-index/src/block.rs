@@ -314,7 +314,7 @@ mod tests {
     use crate::codec::decode_events;
     use crate::event::{Event, Op};
     use crate::live::LiveTable;
-    use crate::scan::snapshot_entities;
+    use crate::scan::{snapshot_entities, LabelFilter};
     use std::collections::BTreeMap;
     use varve_types::{Doc, Iid, Instant, TemporalBounds, TemporalDimension, Value};
 
@@ -593,8 +593,18 @@ mod tests {
         // Output equivalence: [old] alone == [old, newer] under these bounds.
         let pruned_events = [old.clone()];
         let full_events = [old.clone(), newer.clone()];
-        let pruned = snapshot_entities(vec![(iid(1), &pruned_events[..])], "P", &bounds).unwrap();
-        let full = snapshot_entities(vec![(iid(1), &full_events[..])], "P", &bounds).unwrap();
+        let pruned = snapshot_entities(
+            vec![(iid(1), &pruned_events[..])],
+            LabelFilter::Single("P"),
+            &bounds,
+        )
+        .unwrap();
+        let full = snapshot_entities(
+            vec![(iid(1), &full_events[..])],
+            LabelFilter::Single("P"),
+            &bounds,
+        )
+        .unwrap();
         assert_eq!(pruned, full);
         assert!(pruned.is_some());
     }
@@ -635,9 +645,13 @@ mod tests {
         // ...because with it, the visible row's _valid_to is clipped to 20:
         use arrow::array::TimestampMicrosecondArray;
         let events = [base, correction];
-        let batch = snapshot_entities(vec![(iid(1), &events[..])], "P", &bounds)
-            .unwrap()
-            .unwrap();
+        let batch = snapshot_entities(
+            vec![(iid(1), &events[..])],
+            LabelFilter::Single("P"),
+            &bounds,
+        )
+        .unwrap()
+        .unwrap();
         let vt: &TimestampMicrosecondArray = batch
             .column_by_name("_valid_to")
             .unwrap()

@@ -1,0 +1,1 @@
+CREATE GRAPH people; USE people; MATCH (n:Person) RETURN n; DROP GRAPH people

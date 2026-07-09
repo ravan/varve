@@ -27,7 +27,7 @@ use datafusion::common::{
     DFSchema, DFSchemaRef, DataFusionError, Result as DfResult, TableReference,
 };
 use datafusion::execution::context::{QueryPlanner, TaskContext};
-use datafusion::execution::{SessionState, SessionStateBuilder};
+use datafusion::execution::SessionState;
 use datafusion::logical_expr::{
     Expr, LogicalPlan, UserDefinedLogicalNode, UserDefinedLogicalNodeCore,
 };
@@ -39,7 +39,6 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream,
 };
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
-use datafusion::prelude::SessionContext;
 use futures::StreamExt;
 
 use crate::PlanError;
@@ -117,6 +116,163 @@ pub fn expand_paths(
     out
 }
 
+/// Per-output-batch safety budget for production path expansion.
+///
+/// `WALK` semantics allow repeated nodes/edges, so cyclic graphs can produce
+/// exponentially many paths even when the graph itself is small. The engine
+/// must fail deterministically before materializing an unbounded result.
+const MAX_PATH_EXPAND_ROWS_PER_BATCH: usize = 100_000;
+const MAX_PATH_EXPAND_HOPS: u32 = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PathExpandLimits {
+    pub row_limit: usize,
+    pub frontier_limit: usize,
+    pub hop_limit: u32,
+}
+
+impl PathExpandLimits {
+    pub const fn new(row_limit: usize, frontier_limit: usize, hop_limit: u32) -> Self {
+        Self {
+            row_limit,
+            frontier_limit,
+            hop_limit,
+        }
+    }
+}
+
+impl Default for PathExpandLimits {
+    fn default() -> Self {
+        DEFAULT_PATH_EXPAND_LIMITS
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueryLimits {
+    pub path_output_batch_rows: usize,
+    pub path_expand: PathExpandLimits,
+    pub traversal_node_budget: usize,
+    pub traversal_adjacency_budget: usize,
+}
+
+impl Default for QueryLimits {
+    fn default() -> Self {
+        Self {
+            path_output_batch_rows: 8_192,
+            path_expand: DEFAULT_PATH_EXPAND_LIMITS,
+            traversal_node_budget: 100_000,
+            traversal_adjacency_budget: 250_000,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PathExpandBatchOptions {
+    start_idx: usize,
+    min: u32,
+    max: u32,
+    has_path: bool,
+    limits: PathExpandLimits,
+}
+
+const DEFAULT_PATH_EXPAND_LIMITS: PathExpandLimits = PathExpandLimits {
+    row_limit: MAX_PATH_EXPAND_ROWS_PER_BATCH,
+    frontier_limit: MAX_PATH_EXPAND_ROWS_PER_BATCH,
+    hop_limit: MAX_PATH_EXPAND_HOPS,
+};
+
+#[cfg(test)]
+fn expand_paths_limited(
+    adjacency: &EdgeAdjacency,
+    start: Iid,
+    min: u32,
+    max: u32,
+    row_limit: usize,
+) -> DfResult<Vec<(Iid, Vec<Iid>)>> {
+    expand_paths_with_limits(
+        adjacency,
+        start,
+        min,
+        max,
+        PathExpandLimits {
+            row_limit,
+            frontier_limit: row_limit,
+            hop_limit: MAX_PATH_EXPAND_HOPS,
+        },
+    )
+}
+
+fn expand_paths_with_limits(
+    adjacency: &EdgeAdjacency,
+    start: Iid,
+    min: u32,
+    max: u32,
+    limits: PathExpandLimits,
+) -> DfResult<Vec<(Iid, Vec<Iid>)>> {
+    validate_path_expand_hops(max, limits.hop_limit)?;
+    let mut out = Vec::new();
+    let mut frontier: Vec<(Iid, Vec<Iid>)> = vec![(start, vec![start])];
+    if min == 0 {
+        push_limited(&mut out, limits.row_limit, (start, vec![start]))?;
+    }
+    for depth in 1..=max {
+        let mut next = Vec::new();
+        for (node, path) in &frontier {
+            for adj in adjacency.neighbors(node) {
+                let mut p = path.clone();
+                p.push(adj.edge);
+                p.push(adj.neighbor);
+                if depth >= min {
+                    push_limited(&mut out, limits.row_limit, (adj.neighbor, p.clone()))?;
+                }
+                push_frontier_limited(&mut next, limits.frontier_limit, (adj.neighbor, p))?;
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    Ok(out)
+}
+
+fn validate_path_expand_hops(max: u32, hop_limit: u32) -> DfResult<()> {
+    if max > hop_limit {
+        return Err(DataFusionError::ResourcesExhausted(format!(
+            "PathExpand hop limit {hop_limit} exceeded by query bound {max}; reduce the path bound"
+        )));
+    }
+    Ok(())
+}
+
+fn push_limited(
+    out: &mut Vec<(Iid, Vec<Iid>)>,
+    row_limit: usize,
+    row: (Iid, Vec<Iid>),
+) -> DfResult<()> {
+    if out.len() >= row_limit {
+        return Err(DataFusionError::ResourcesExhausted(format!(
+            "PathExpand row limit {row_limit} exceeded; reduce the path bound or make the query more selective"
+        )));
+    }
+    out.push(row);
+    Ok(())
+}
+
+fn push_frontier_limited(
+    frontier: &mut Vec<(Iid, Vec<Iid>)>,
+    row_limit: usize,
+    row: (Iid, Vec<Iid>),
+) -> DfResult<()> {
+    if frontier.len() >= row_limit {
+        return Err(DataFusionError::ResourcesExhausted(format!(
+            "PathExpand frontier limit {row_limit} exceeded; reduce the path bound or make the query more selective"
+        )));
+    }
+    frontier.push(row);
+    Ok(())
+}
+
 // ---- DataFusion custom operator ---------------------------------------------
 
 /// Output schema of a `PathExpand`: the input's fields, then `end_col`
@@ -174,6 +330,7 @@ pub struct PathExpandNode {
     path_col: Option<String>,
     min: u32,
     max: u32,
+    limits: PathExpandLimits,
     schema: DFSchemaRef,
 }
 
@@ -190,6 +347,29 @@ impl PathExpandNode {
         min: u32,
         max: u32,
     ) -> Result<Self, PlanError> {
+        Self::try_new_with_limits(
+            input,
+            adjacency,
+            start_col,
+            end_col,
+            path_col,
+            min,
+            max,
+            PathExpandLimits::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_limits(
+        input: LogicalPlan,
+        adjacency: Arc<EdgeAdjacency>,
+        start_col: String,
+        end_col: String,
+        path_col: Option<String>,
+        min: u32,
+        max: u32,
+        limits: PathExpandLimits,
+    ) -> Result<Self, PlanError> {
         let schema = path_expand_schema(&input, &end_col, path_col.as_deref())?;
         Ok(Self {
             input,
@@ -199,6 +379,7 @@ impl PathExpandNode {
             path_col,
             min,
             max,
+            limits,
             schema,
         })
     }
@@ -215,6 +396,7 @@ impl PartialEq for PathExpandNode {
             && self.path_col == other.path_col
             && self.min == other.min
             && self.max == other.max
+            && self.limits == other.limits
             && self.input == other.input
             && Arc::ptr_eq(&self.adjacency, &other.adjacency)
     }
@@ -227,18 +409,27 @@ impl std::hash::Hash for PathExpandNode {
         self.path_col.hash(state);
         self.min.hash(state);
         self.max.hash(state);
+        self.limits.hash(state);
         self.input.hash(state);
         // adjacency intentionally excluded (see impl PartialEq above).
     }
 }
 impl PartialOrd for PathExpandNode {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        (&self.start_col, &self.end_col, self.min, self.max).partial_cmp(&(
-            &other.start_col,
-            &other.end_col,
-            other.min,
-            other.max,
-        ))
+        (
+            &self.start_col,
+            &self.end_col,
+            self.min,
+            self.max,
+            self.limits,
+        )
+            .partial_cmp(&(
+                &other.start_col,
+                &other.end_col,
+                other.min,
+                other.max,
+                other.limits,
+            ))
     }
 }
 
@@ -288,6 +479,7 @@ impl UserDefinedLogicalNodeCore for PathExpandNode {
             path_col: self.path_col.clone(),
             min: self.min,
             max: self.max,
+            limits: self.limits,
             schema,
         })
     }
@@ -297,17 +489,14 @@ impl UserDefinedLogicalNodeCore for PathExpandNode {
 /// each input row is repeated once per produced path (via `take`), with
 /// `end_col` and optional `path_col` appended. A zero-total-paths batch yields
 /// an empty batch with the output schema.
-fn expand_batch(
+fn expand_batch_limited(
     batch: &RecordBatch,
     schema: &SchemaRef,
     adjacency: &EdgeAdjacency,
-    start_idx: usize,
-    min: u32,
-    max: u32,
-    has_path: bool,
+    options: PathExpandBatchOptions,
 ) -> DfResult<RecordBatch> {
     let start = batch
-        .column(start_idx)
+        .column(options.start_idx)
         .as_any()
         .downcast_ref::<FixedSizeBinaryArray>()
         .ok_or_else(|| {
@@ -323,12 +512,32 @@ fn expand_batch(
             DataFusionError::Internal("PathExpand start iid is not 16 bytes".into())
         })?;
         let start_iid = Iid::from_bytes(bytes);
-        for (end, path) in expand_paths(adjacency, start_iid, min, max) {
+        let remaining_rows =
+            options
+                .limits
+                .row_limit
+                .checked_sub(indices.len())
+                .ok_or_else(|| {
+                    DataFusionError::ResourcesExhausted(format!(
+                        "PathExpand row limit {} exceeded; reduce the path bound or make the query more selective",
+                        options.limits.row_limit
+                    ))
+                })?;
+        for (end, path) in expand_paths_with_limits(
+            adjacency,
+            start_iid,
+            options.min,
+            options.max,
+            PathExpandLimits {
+                row_limit: remaining_rows,
+                ..options.limits
+            },
+        )? {
             let idx = u32::try_from(row)
                 .map_err(|_| DataFusionError::Internal("PathExpand row index overflow".into()))?;
             indices.push(idx);
             ends.append_value(end.as_bytes())?;
-            if has_path {
+            if options.has_path {
                 for iid in &path {
                     paths.values().append_value(iid.as_bytes())?;
                 }
@@ -347,7 +556,7 @@ fn expand_batch(
         columns.push(take(col, &idx_array, None)?);
     }
     columns.push(Arc::new(ends.finish()));
-    if has_path {
+    if options.has_path {
         columns.push(Arc::new(paths.finish()));
     }
     Ok(RecordBatch::try_new(Arc::clone(schema), columns)?)
@@ -363,6 +572,7 @@ pub(crate) struct PathExpandExec {
     min: u32,
     max: u32,
     has_path: bool,
+    limits: PathExpandLimits,
     cache: Arc<PlanProperties>,
 }
 
@@ -389,6 +599,7 @@ impl PathExpandExec {
             min: node.min,
             max: node.max,
             has_path: node.path_col.is_some(),
+            limits: node.limits,
             cache,
         })
     }
@@ -449,6 +660,7 @@ impl ExecutionPlan for PathExpandExec {
             min: self.min,
             max: self.max,
             has_path: self.has_path,
+            limits: self.limits,
             cache: Arc::clone(&self.cache),
         }))
     }
@@ -461,10 +673,27 @@ impl ExecutionPlan for PathExpandExec {
         let stream = self.input.execute(partition, context)?;
         let schema = Arc::clone(&self.schema);
         let adjacency = Arc::clone(&self.adjacency);
-        let (start_idx, min, max, has_path) = (self.start_idx, self.min, self.max, self.has_path);
+        let (start_idx, min, max, has_path, limits) = (
+            self.start_idx,
+            self.min,
+            self.max,
+            self.has_path,
+            self.limits,
+        );
         let out = stream.map(move |batch| {
             let batch = batch?;
-            expand_batch(&batch, &schema, &adjacency, start_idx, min, max, has_path)
+            expand_batch_limited(
+                &batch,
+                &schema,
+                &adjacency,
+                PathExpandBatchOptions {
+                    start_idx,
+                    min,
+                    max,
+                    has_path,
+                    limits,
+                },
+            )
         });
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             Arc::clone(&self.schema),
@@ -503,7 +732,7 @@ impl ExtensionPlanner for PathExpandPlanner {
 /// Query planner that installs [`PathExpandPlanner`] on top of the default
 /// physical planner; non-PathExpand nodes fall through to the default.
 #[derive(Debug)]
-struct VarveQueryPlanner;
+pub(crate) struct VarveQueryPlanner;
 
 #[async_trait::async_trait]
 impl QueryPlanner for VarveQueryPlanner {
@@ -518,17 +747,6 @@ impl QueryPlanner for VarveQueryPlanner {
             .create_physical_plan(logical_plan, session_state)
             .await
     }
-}
-
-/// A [`SessionContext`] with the Varve planner installed. ALL varve-plan query
-/// execution goes through this so a `PathExpand` extension node can lower to
-/// [`PathExpandExec`].
-pub fn session_context() -> SessionContext {
-    let state = SessionStateBuilder::new()
-        .with_default_features()
-        .with_query_planner(Arc::new(VarveQueryPlanner))
-        .build();
-    SessionContext::new_with_state(state)
 }
 
 #[cfg(test)]
@@ -568,6 +786,21 @@ mod tests {
                 },
             ),
         ])
+    }
+
+    fn start_batch(starts: &[Iid]) -> (RecordBatch, SchemaRef) {
+        let schema = Arc::new(datafusion::arrow::datatypes::Schema::new(vec![Field::new(
+            "start",
+            DataType::FixedSizeBinary(16),
+            false,
+        )]));
+        let mut builder = FixedSizeBinaryBuilder::new(16);
+        for start in starts {
+            builder.append_value(start.as_bytes()).unwrap();
+        }
+        let batch =
+            RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(builder.finish())]).unwrap();
+        (batch, schema)
     }
 
     #[test]
@@ -612,5 +845,156 @@ mod tests {
     #[test]
     fn min_beyond_reachability_is_empty() {
         assert!(expand_paths(&line(), n(4), 1, 3).is_empty());
+    }
+
+    #[test]
+    fn limited_batch_row_budget_is_shared_across_input_rows() {
+        let adj = EdgeAdjacency::from_entries([
+            (
+                n(1),
+                AdjEdge {
+                    neighbor: n(2),
+                    edge: e(1),
+                },
+            ),
+            (
+                n(1),
+                AdjEdge {
+                    neighbor: n(3),
+                    edge: e(2),
+                },
+            ),
+            (
+                n(4),
+                AdjEdge {
+                    neighbor: n(5),
+                    edge: e(3),
+                },
+            ),
+            (
+                n(4),
+                AdjEdge {
+                    neighbor: n(6),
+                    edge: e(4),
+                },
+            ),
+        ]);
+        let (batch, schema) = start_batch(&[n(1), n(4)]);
+
+        let err = expand_batch_limited(
+            &batch,
+            &schema,
+            &adj,
+            PathExpandBatchOptions {
+                start_idx: 0,
+                min: 1,
+                max: 1,
+                has_path: false,
+                limits: PathExpandLimits {
+                    row_limit: 3,
+                    frontier_limit: 10,
+                    hop_limit: 4,
+                },
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, DataFusionError::ResourcesExhausted(_)));
+        assert!(err.to_string().contains("PathExpand row limit"));
+    }
+
+    #[test]
+    fn limited_expansion_rejects_path_bounds_above_hop_budget() {
+        let err = expand_paths_with_limits(
+            &line(),
+            n(1),
+            1,
+            65,
+            PathExpandLimits {
+                row_limit: 10,
+                frontier_limit: 10,
+                hop_limit: 64,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, DataFusionError::ResourcesExhausted(_)));
+        assert!(err.to_string().contains("PathExpand hop limit"));
+    }
+
+    #[test]
+    fn limited_expansion_errors_before_materializing_unbounded_walks() {
+        let adj = EdgeAdjacency::from_entries([
+            (
+                n(1),
+                AdjEdge {
+                    neighbor: n(1),
+                    edge: e(1),
+                },
+            ),
+            (
+                n(1),
+                AdjEdge {
+                    neighbor: n(2),
+                    edge: e(2),
+                },
+            ),
+            (
+                n(2),
+                AdjEdge {
+                    neighbor: n(1),
+                    edge: e(3),
+                },
+            ),
+            (
+                n(2),
+                AdjEdge {
+                    neighbor: n(2),
+                    edge: e(4),
+                },
+            ),
+        ]);
+
+        let err = expand_paths_limited(&adj, n(1), 1, 8, 10).unwrap_err();
+        assert!(matches!(err, DataFusionError::ResourcesExhausted(_)));
+        assert!(err.to_string().contains("PathExpand row limit"));
+    }
+
+    #[test]
+    fn limited_expansion_errors_before_frontier_grows_unbounded() {
+        let adj = EdgeAdjacency::from_entries([
+            (
+                n(1),
+                AdjEdge {
+                    neighbor: n(1),
+                    edge: e(1),
+                },
+            ),
+            (
+                n(1),
+                AdjEdge {
+                    neighbor: n(2),
+                    edge: e(2),
+                },
+            ),
+            (
+                n(2),
+                AdjEdge {
+                    neighbor: n(1),
+                    edge: e(3),
+                },
+            ),
+            (
+                n(2),
+                AdjEdge {
+                    neighbor: n(2),
+                    edge: e(4),
+                },
+            ),
+        ]);
+
+        let err = expand_paths_limited(&adj, n(1), 8, 8, 10).unwrap_err();
+        assert!(matches!(err, DataFusionError::ResourcesExhausted(_)));
+        assert!(err.to_string().contains("PathExpand frontier limit"));
     }
 }

@@ -108,7 +108,7 @@ async fn single_hop_join() {
     let db = Db::memory();
     seed_triangle(&db).await;
     let rows = db
-        .query("MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.name = 'Ada' RETURN b.name")
+        .query("MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.name = 'Ada' RETURN b.name AS name")
         .await
         .unwrap();
     assert_eq!(
@@ -122,7 +122,7 @@ async fn two_hop_friend_of_friend() {
     let db = Db::memory();
     seed_triangle(&db).await;
     let rows = db
-        .query("MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) WHERE a.name = 'Ada' RETURN c.name")
+        .query("MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) WHERE a.name = 'Ada' RETURN c.name AS name")
         .await
         .unwrap();
     assert_eq!(names(&rows, "name"), vec!["Cy".to_string()]);
@@ -139,11 +139,11 @@ async fn two_hop_anchored_id_takes_fast_path_result_identical() {
     let db = Db::memory();
     seed_triangle(&db).await;
     let fast = db
-        .query("MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) WHERE a._id = 1 RETURN c.name")
+        .query("MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) WHERE a._id = 1 RETURN c.name AS name")
         .await
         .unwrap();
     let full = db
-        .query("MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) WHERE a.name = 'Ada' RETURN c.name")
+        .query("MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) WHERE a.name = 'Ada' RETURN c.name AS name")
         .await
         .unwrap();
     assert_eq!(names(&fast, "name"), vec!["Cy".to_string()]);
@@ -155,7 +155,7 @@ async fn reverse_direction_and_edge_props() {
     let db = Db::memory();
     seed_triangle(&db).await;
     let rows = db
-        .query("MATCH (b:Person)<-[:KNOWS {since: 2020}]-(a:Person) RETURN b.name")
+        .query("MATCH (b:Person)<-[:KNOWS {since: 2020}]-(a:Person) RETURN b.name AS name")
         .await
         .unwrap();
     assert_eq!(names(&rows, "name"), vec!["Bob".to_string()]);
@@ -321,7 +321,7 @@ async fn two_hop_traversal_survives_flush_and_restart() {
     }
     let db = Db::local(dir.path()).await.unwrap();
     let rows = db
-        .query("MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) WHERE a.name = 'Ada' RETURN c.name")
+        .query("MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) WHERE a.name = 'Ada' RETURN c.name AS name")
         .await
         .unwrap();
     assert_eq!(names(&rows, "name"), vec!["Cy".to_string()]);
@@ -342,7 +342,7 @@ async fn quantified_hop_one_to_three() {
         .unwrap();
     }
     let rows = db
-        .query("MATCH (a:P)-[:K]->{1,3}(b:P) WHERE a.name = 'n1' RETURN b.name")
+        .query("MATCH (a:P)-[:K]->{1,3}(b:P) WHERE a.name = 'n1' RETURN b.name AS name")
         .await
         .unwrap();
     assert_eq!(
@@ -358,7 +358,7 @@ async fn star_is_zero_to_cap_and_zero_length_binds_start() {
         .await
         .unwrap();
     let rows = db
-        .query("MATCH (a:P)-[:K]->*(b:P) WHERE a.name = 'solo' RETURN b.name")
+        .query("MATCH (a:P)-[:K]->*(b:P) WHERE a.name = 'solo' RETURN b.name AS name")
         .await
         .unwrap();
     assert_eq!(names(&rows, "name"), vec!["solo".to_string()]); // zero hops: b = a
@@ -382,7 +382,7 @@ async fn cycles_terminate_at_depth_cap() {
         .await
         .unwrap();
     let rows = db
-        .query("MATCH (a:P)-[:K]->{1,3}(b:P) RETURN b.name")
+        .query("MATCH (a:P)-[:K]->{1,3}(b:P) RETURN b.name AS name")
         .await
         .unwrap();
     assert_eq!(rows.iter().map(|b| b.num_rows()).sum::<usize>(), 3); // one WALK per depth
@@ -391,6 +391,118 @@ async fn cycles_terminate_at_depth_cap() {
     assert_eq!(
         names(&rows, "name"),
         vec!["x".to_string(), "x".to_string(), "x".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn configured_path_row_budget_limits_path_expand() {
+    let db = Db::open(
+        Config::from_toml_str(
+            r#"
+            [query]
+            max_path_depth = 4
+            path_row_budget = 3
+            path_frontier_budget = 100
+            "#,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    db.execute("INSERT (:P {_id: 1}), (:P {_id: 2}), (:P {_id: 3})")
+        .await
+        .unwrap();
+    db.execute("MATCH (a:P {_id: 1}), (b:P {_id: 2}) INSERT (a)-[:K]->(b)")
+        .await
+        .unwrap();
+    db.execute("MATCH (a:P {_id: 1}), (b:P {_id: 3}) INSERT (a)-[:K]->(b)")
+        .await
+        .unwrap();
+    db.execute("MATCH (a:P {_id: 2}), (b:P {_id: 1}) INSERT (a)-[:K]->(b)")
+        .await
+        .unwrap();
+    db.execute("MATCH (a:P {_id: 3}), (b:P {_id: 1}) INSERT (a)-[:K]->(b)")
+        .await
+        .unwrap();
+
+    let err = db
+        .query("MATCH (a:P)-[:K]->{1,2}(b:P) WHERE a._id = 1 RETURN b._id AS id")
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("PathExpand row limit 3"), "{err}");
+}
+
+#[tokio::test]
+async fn configured_traversal_node_budget_limits_anchored_reachable_bfs() {
+    let db = Db::open(
+        Config::from_toml_str(
+            r#"
+[query]
+max_path_depth = 4
+path_row_budget = 1000
+path_frontier_budget = 1000
+traversal_node_budget = 1
+traversal_adjacency_budget = 1000
+"#,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    db.execute("INSERT (:P {_id: 1}), (:P {_id: 2}), (:P {_id: 3})")
+        .await
+        .unwrap();
+    db.execute("MATCH (a:P {_id: 1}), (b:P {_id: 2}) INSERT (a)-[:K]->(b)")
+        .await
+        .unwrap();
+    db.execute("MATCH (a:P {_id: 2}), (b:P {_id: 3}) INSERT (a)-[:K]->(b)")
+        .await
+        .unwrap();
+
+    let err = db
+        .query("MATCH (a:P)-[:K]->{1,2}(b:P) WHERE a._id = 1 RETURN b._id AS id")
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("traversal node budget 1"), "{err}");
+}
+
+#[tokio::test]
+async fn configured_traversal_adjacency_budget_limits_unanchored_materialization() {
+    let db = Db::open(
+        Config::from_toml_str(
+            r#"
+[query]
+max_path_depth = 4
+path_row_budget = 1000
+path_frontier_budget = 1000
+traversal_node_budget = 1000
+traversal_adjacency_budget = 1
+"#,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    db.execute("INSERT (:P {_id: 1}), (:P {_id: 2}), (:P {_id: 3})")
+        .await
+        .unwrap();
+    db.execute("MATCH (a:P {_id: 1}), (b:P {_id: 2}) INSERT (a)-[:K]->(b)")
+        .await
+        .unwrap();
+    db.execute("MATCH (a:P {_id: 2}), (b:P {_id: 3}) INSERT (a)-[:K]->(b)")
+        .await
+        .unwrap();
+
+    let err = db
+        .query("MATCH (a:P)-[:K]->{1,1}(b:P) RETURN b._id AS id")
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string().contains("traversal adjacency budget 1"),
+        "{err}"
     );
 }
 
@@ -412,7 +524,7 @@ async fn props_on_quantified_hop_restrict_traversal() {
         .await
         .unwrap();
     let rows = db
-        .query("MATCH (a:P)-[:K {w: 1}]->{1,2}(b:P) WHERE a._id = 1 RETURN b.name")
+        .query("MATCH (a:P)-[:K {w: 1}]->{1,2}(b:P) WHERE a._id = 1 RETURN b.name AS name")
         .await
         .unwrap();
     // `b` has no outgoing `:K` edge, so depth 2 yields nothing; only the
@@ -470,7 +582,7 @@ async fn quantified_traversal_respects_as_of_time() {
         .unwrap();
     assert_eq!(rows.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
     let rows = db
-        .query("FOR VALID_TIME AS OF TIMESTAMP '2031-01-01T00:00:00Z' MATCH (a:P)-[:K]->{1,2}(b:P) WHERE a._id = 1 RETURN b.name")
+        .query("FOR VALID_TIME AS OF TIMESTAMP '2031-01-01T00:00:00Z' MATCH (a:P)-[:K]->{1,2}(b:P) WHERE a._id = 1 RETURN b.name AS name")
         .await
         .unwrap();
     assert_eq!(names(&rows, "name"), vec!["b".to_string()]);

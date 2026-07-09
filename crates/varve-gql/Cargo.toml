@@ -8,5 +8,8 @@ license.workspace = true
 thiserror = { workspace = true }
 varve-types = { path = "../varve-types" }
 
+[dev-dependencies]
+proptest = { workspace = true }
+
 [lints]
 workspace = true

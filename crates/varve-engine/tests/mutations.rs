@@ -1,4 +1,5 @@
-use varve_engine::Db;
+use varve_engine::{Db, EngineError};
+use varve_plan::PlanError;
 use varve_types::Instant;
 
 fn rows(batches: Vec<varve_engine::RecordBatch>) -> usize {
@@ -102,4 +103,25 @@ async fn delete_with_filtered_to_zero_matches_is_an_empty_tx() {
         .await
         .unwrap();
     assert!(receipt.tx_id > 0);
+}
+
+#[tokio::test]
+async fn delete_with_unmatched_where_variable_errors_and_deletes_nothing() {
+    let db = Db::memory();
+    db.execute("INSERT (:Person {_id: 1, age: 36})")
+        .await
+        .unwrap();
+
+    let err = db
+        .execute("MATCH (p:Person) WHERE q.age = 36 DELETE p")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::Plan(PlanError::UnknownVariable(ref var)) if var == "q"),
+        "{err:?}"
+    );
+    assert_eq!(
+        rows(db.query("MATCH (p:Person) RETURN p.age").await.unwrap()),
+        1
+    );
 }

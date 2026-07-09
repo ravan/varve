@@ -9,6 +9,8 @@ pub struct TableEffects {
     pub table: String,
     #[prost(bytes = "vec", tag = "2")]
     pub arrow_ipc: Vec<u8>,
+    #[prost(string, tag = "3")]
+    pub graph: String,
 }
 
 /// One transaction's log record — the spec §6 protobuf envelope
@@ -53,6 +55,7 @@ mod tests {
             effects: vec![TableEffects {
                 table: "nodes".into(),
                 arrow_ipc: vec![0xAA],
+                graph: String::new(),
             }],
         }
     }
@@ -88,5 +91,37 @@ mod tests {
             LogRecord::from_wire(&[0xFF, 0xFF, 0xFF]),
             Err(LogError::Decode(_))
         ));
+    }
+
+    #[test]
+    fn table_effects_graph_roundtrip_and_empty_is_default() {
+        let old_wire = sample().to_wire();
+        assert_eq!(
+            old_wire,
+            vec![
+                0x08, 0x01, // field 1 varint: tx_id = 1
+                0x10, 0x02, // field 2 varint: system_time_us = 2
+                // field 3 (user) omitted: proto3 default (empty string)
+                0x22, 0x0A, // field 4, length-delimited, 10 bytes
+                0x0A, 0x05, b'n', b'o', b'd', b'e', b's', // effects.table
+                0x12, 0x01, 0xAA, // effects.arrow_ipc
+            ],
+            "adding graph tag 3 must not change existing default wire bytes"
+        );
+        let decoded = LogRecord::from_wire(&old_wire).unwrap();
+        assert_eq!(decoded.effects[0].graph, "");
+
+        let rec = LogRecord {
+            tx_id: 7,
+            system_time_us: 8,
+            user: String::new(),
+            effects: vec![TableEffects {
+                table: "nodes".into(),
+                arrow_ipc: vec![0xBB],
+                graph: "tenant_a".into(),
+            }],
+        };
+        let decoded = LogRecord::from_wire(&rec.to_wire()).unwrap();
+        assert_eq!(decoded.effects[0].graph, "tenant_a");
     }
 }

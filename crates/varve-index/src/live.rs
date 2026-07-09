@@ -85,7 +85,7 @@ impl LiveTable {
             self.events
                 .iter()
                 .map(|(iid, events)| (*iid, events.as_slice())),
-            label,
+            crate::scan::LabelFilter::Single(label),
             bounds,
         )
     }

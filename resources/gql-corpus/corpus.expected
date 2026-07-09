@@ -1,0 +1,14 @@
+resources/gql-corpus/basic-match.gql	ACCEPT
+resources/gql-corpus/dangling-return.gql	REJECT
+resources/gql-corpus/detach-delete-person.gql	ACCEPT
+resources/gql-corpus/erase-person.ext.gql	ACCEPT
+resources/gql-corpus/graph-program.ext.gql	ACCEPT
+resources/gql-corpus/insert-person.gql	ACCEPT
+resources/gql-corpus/match-insert-edge.gql	ACCEPT
+resources/gql-corpus/program.ext.gql	ACCEPT
+resources/gql-corpus/query-pipeline.gql	ACCEPT
+resources/gql-corpus/query_pipeline.gql	ACCEPT
+resources/gql-corpus/set-person.gql	ACCEPT
+resources/gql-corpus/temporal-insert.ext.gql	ACCEPT
+resources/gql-corpus/temporal-window.ext.gql	ACCEPT
+resources/gql-corpus/valid-time-query.ext.gql	ACCEPT

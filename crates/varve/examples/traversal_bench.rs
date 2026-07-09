@@ -10,7 +10,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 use varve::{Config, Db};
-use varve_testkit::fixture::social_graph;
+use varve_testkit::fixture::{social_graph, EDGE_PROGRAM_BATCH};
 
 const PEOPLE: usize = 10_000;
 const FRIENDSHIPS: usize = 60_000;
@@ -29,10 +29,10 @@ fn config(dir: &Path) -> Result<Config, Box<dyn std::error::Error>> {
     Ok(Config::from_toml_str(&format!(
         // group_commit_window_ms = 1 (mirrors tests/blocks.rs's blocks_config
         // helper): ingest here is a single sequential writer awaiting each
-        // tx's ack in turn, so there is never a second commit in flight to
+        // program's ack in turn, so there is never a second commit in flight to
         // batch with — every default 15ms window would be paid in full, per
-        // tx, for nothing. A tiny window keeps the "one tx per edge" v1
-        // write path honest without that artificial latency floor.
+        // program, for nothing. A tiny window keeps the write path honest
+        // without that artificial latency floor.
         "[log]\nbackend = \"local\"\ngroup_commit_window_ms = 1\n\
          [log.local]\ndir = {log_dir}\n\
          [storage]\nbackend = \"local\"\nmax_block_rows = {MAX_BLOCK_ROWS}\n\
@@ -95,8 +95,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let g = social_graph(PEOPLE, FRIENDSHIPS, SEED);
     let node_stmts = g.node_statements(NODE_BATCH);
-    let edge_stmts = g.edge_statements();
-    let total_stmts = node_stmts.len() + edge_stmts.len();
+    let edge_programs = g.edge_programs(EDGE_PROGRAM_BATCH);
+    let total_programs = node_stmts.len() + edge_programs.len();
 
     // Phase 1: ingest the full fixture (timed), then drop — acked txs are
     // durable (log) or flushed (blocks).
@@ -106,14 +106,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for stmt in &node_stmts {
             db.execute(stmt).await?;
         }
-        for stmt in &edge_stmts {
-            db.execute(stmt).await?;
+        for program in &edge_programs {
+            db.execute(program).await?;
         }
     }
     let ingest = ingest_started.elapsed();
-    let tx_per_sec = total_stmts as f64 / ingest.as_secs_f64();
+    let programs_per_sec = total_programs as f64 / ingest.as_secs_f64();
     println!(
-        "ingest {total_stmts} stmts ({} nodes, {} edges) in {ingest:.2?} ({tx_per_sec:.0} tx/s)",
+        "ingest {total_programs} programs ({} nodes, {} edges) in {ingest:.2?} ({programs_per_sec:.0} programs/s)",
         g.people,
         g.edges.len()
     );
@@ -143,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let q13_warm_p50 = p50(q13_warm);
 
     println!(
-        "ingest {:.2}s · {tx_per_sec:.0} tx/s · \
+        "ingest {:.2}s · {programs_per_sec:.0} programs/s · \
          2-hop ({two_hop_rows} rows) cold {two_hop_cold:.2?} warm avg {two_hop_warm_avg:.2?} p50 {two_hop_warm_p50:.2?} · \
          {{1,3}} ({q13_rows} rows) cold {q13_cold:.2?} warm avg {q13_warm_avg:.2?} p50 {q13_warm_p50:.2?}",
         ingest.as_secs_f64(),

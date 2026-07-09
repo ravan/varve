@@ -1,0 +1,1 @@
+MATCH (n:Person) WHERE n._id = 1 SET n.name = 'Ada', n:Employee; MATCH (n:Person) WHERE n._id = 1 DETACH ERASE n

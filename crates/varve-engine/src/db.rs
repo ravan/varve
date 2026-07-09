@@ -1,26 +1,29 @@
 use crate::clock::{Clock, MonotonicClock};
+use crate::const_eval::const_value;
 use crate::registries::Registries;
 use crate::scan::merged_snapshot;
 use crate::state::{
-    PersistedTrie, TableCore, TableKind, TableState, DEFAULT_GRAPH, EDGES_TABLE, NODES_TABLE,
+    GraphsState, PersistedTrie, TableKind, TableState, DEFAULT_GRAPH, EDGES_TABLE, META_GRAPH,
+    NODES_TABLE,
 };
 use crate::writer::{spawn_writer, Submission, WriterConfig, WriterState};
 use datafusion::arrow::record_batch::RecordBatch;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use varve_config::{BuildContext, Config, ConfigError, ConfigSection, RegistryError};
-use varve_gql::ast::Statement;
+use varve_gql::ast::{Expr, LabelSpec, QueryBody, Statement};
 use varve_gql::token::GqlError;
-use varve_index::{decode_events, IndexError, LiveTable};
+use varve_index::{decode_events, Event, IndexError, LabelFilter, LiveTable, Op};
 use varve_log::{LocalLog, Log, LogError, MemoryLog, DEFAULT_SEGMENT_MAX_BYTES};
 use varve_plan::PlanError;
 use varve_storage::{
     memory_store, CachedStore, MemoryCache, ObjectStore, ProbeReport, StorageError,
 };
-use varve_types::{Instant, LogPosition, TypeError};
+use varve_types::{Instant, LogPosition, TemporalBounds, TypeError, Value};
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -52,6 +55,10 @@ pub enum EngineError {
     Config(#[from] ConfigError),
     #[error("log record references unknown table '{0}'")]
     UnknownTable(String),
+    #[error("unknown graph '{0}'")]
+    UnknownGraph(String),
+    #[error("graph already exists '{0}'")]
+    GraphExists(String),
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(
@@ -67,8 +74,27 @@ pub enum EngineError {
     UnboundVariable(String),
     #[error("INSERT re-binds already-bound variable '{0}' (a reference must be a bare `(x)` — no labels or properties)")]
     AlreadyBoundVariable(String),
-    #[error("cannot DELETE node(s) with {0} still-connected edge(s); use DETACH DELETE")]
+    #[error(
+        "cannot DELETE/ERASE node(s) with {0} still-connected edge(s); use DETACH DELETE/ERASE"
+    )]
     StillConnected(usize),
+}
+
+fn label_filter(labels: &LabelSpec) -> LabelFilter<'_> {
+    match labels {
+        LabelSpec::All(labels) if labels.len() == 1 => LabelFilter::Single(labels[0].as_str()),
+        LabelSpec::All(labels) => LabelFilter::All(labels),
+        LabelSpec::Any(labels) => LabelFilter::Any(labels),
+    }
+}
+
+pub(crate) fn validate_user_graph_name(graph: &str) -> Result<(), EngineError> {
+    if graph.starts_with("__") {
+        return Err(EngineError::Unsupported(format!(
+            "graph names starting with '__' are reserved: {graph}"
+        )));
+    }
+    Ok(())
 }
 
 /// Group-commit tuning read from `[log]` (spec §6): a batch flushes when its
@@ -115,10 +141,104 @@ fn default_flush_interval_ms() -> u64 {
 struct QueryTuning {
     #[serde(default = "default_max_path_depth")]
     max_path_depth: u32,
+    #[serde(default = "default_path_output_batch_rows")]
+    path_output_batch_rows: usize,
+    #[serde(default = "default_path_row_budget")]
+    path_row_budget: usize,
+    #[serde(default = "default_path_frontier_budget")]
+    path_frontier_budget: usize,
+    #[serde(default = "default_traversal_node_budget")]
+    traversal_node_budget: usize,
+    #[serde(default = "default_traversal_adjacency_budget")]
+    traversal_adjacency_budget: usize,
 }
 
 fn default_max_path_depth() -> u32 {
     10
+}
+
+fn default_path_output_batch_rows() -> usize {
+    8_192
+}
+
+fn default_path_row_budget() -> usize {
+    100_000
+}
+
+fn default_path_frontier_budget() -> usize {
+    100_000
+}
+
+fn default_traversal_node_budget() -> usize {
+    100_000
+}
+
+fn default_traversal_adjacency_budget() -> usize {
+    250_000
+}
+
+impl QueryTuning {
+    fn limits(&self) -> varve_plan::QueryLimits {
+        varve_plan::QueryLimits {
+            path_output_batch_rows: self.path_output_batch_rows,
+            path_expand: varve_plan::PathExpandLimits::new(
+                self.path_row_budget,
+                self.path_frontier_budget,
+                self.max_path_depth,
+            ),
+            traversal_node_budget: self.traversal_node_budget,
+            traversal_adjacency_budget: self.traversal_adjacency_budget,
+        }
+    }
+}
+
+impl Default for QueryTuning {
+    fn default() -> Self {
+        Self {
+            max_path_depth: default_max_path_depth(),
+            path_output_batch_rows: default_path_output_batch_rows(),
+            path_row_budget: default_path_row_budget(),
+            path_frontier_budget: default_path_frontier_budget(),
+            traversal_node_budget: default_traversal_node_budget(),
+            traversal_adjacency_budget: default_traversal_adjacency_budget(),
+        }
+    }
+}
+
+fn match_bounds(
+    query_temporal: &varve_gql::ast::TemporalClauses,
+    match_temporal: &varve_gql::ast::TemporalClauses,
+    now: Instant,
+) -> varve_types::TemporalBounds {
+    varve_types::TemporalBounds {
+        valid: match_temporal
+            .valid
+            .or(query_temporal.valid)
+            .unwrap_or_else(|| varve_types::TemporalDimension::at(now)),
+        system: match_temporal
+            .system
+            .or(query_temporal.system)
+            .unwrap_or_else(|| varve_types::TemporalDimension::at(now)),
+    }
+}
+
+pub(crate) fn bounds_per_clause(body: &QueryBody, now: Instant) -> Vec<TemporalBounds> {
+    let mut bounds = Vec::new();
+    let mut active_match_temporal = varve_gql::ast::TemporalClauses::default();
+    for clause in &body.clauses {
+        let varve_gql::ast::Clause::Match { temporal, .. } = clause else {
+            if let varve_gql::ast::Clause::Filter(expr) = clause {
+                let (exists, _) = varve_plan::split_conjuncts(Some(expr));
+                if !exists.is_empty() {
+                    bounds.push(match_bounds(&body.temporal, &active_match_temporal, now));
+                }
+            }
+            continue;
+        };
+        active_match_temporal = *temporal;
+        bounds.push(match_bounds(&body.temporal, temporal, now));
+    }
+    bounds
 }
 
 /// `[cache]` (spec §4/§9): named tiers composed OUTERMOST-FIRST —
@@ -134,10 +254,29 @@ fn default_cache_tiers() -> Vec<String> {
     vec!["memory".to_string()]
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SideEffects {
+    pub nodes_created: usize,
+    pub nodes_deleted: usize,
+    pub relationships_created: usize,
+    pub relationships_deleted: usize,
+    pub properties_set: usize,
+    pub properties_removed: usize,
+    pub labels_added: usize,
+    pub labels_removed: usize,
+}
+
+impl SideEffects {
+    pub fn is_empty(self) -> bool {
+        self == SideEffects::default()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct TxReceipt {
     pub tx_id: u64,
     pub system_time: Instant,
+    pub side_effects: SideEffects,
 }
 
 /// Default in-memory cache budget for `Db::memory()`/`Db::local()`, which
@@ -151,15 +290,17 @@ const DEFAULT_CACHE_MEMORY_BYTES: usize = 512 * 1024 * 1024;
 /// acked — so concurrent `execute()` calls are fully supported, and an
 /// acked transaction is both durable and visible.
 pub struct Db {
-    state: Arc<RwLock<TableState>>,
+    state: Arc<RwLock<GraphsState>>,
     store: Arc<dyn ObjectStore>,
     clock: Arc<dyn Clock>,
     submit: mpsc::Sender<Submission>,
+    functions: Arc<varve_plan::FunctionRegistry>,
     /// Cap on quantified-hop expansion length (spec §10, `[query]
     /// max_path_depth`); an unbounded `*`/`{m,}` quantifier is lowered to this
     /// depth. Task 9 consumes it during expansion; Task 8 already validates
     /// `scan_specs` quantifier bounds against it.
     max_path_depth: u32,
+    query_limits: varve_plan::QueryLimits,
 }
 
 fn cached(store: Arc<dyn ObjectStore>) -> Arc<dyn ObjectStore> {
@@ -182,7 +323,7 @@ impl std::fmt::Debug for Db {
 /// [`Db::plan_fast_path`] when the query's shape is provably coverable. It is a
 /// pruned-but-complete drop-in for the full-scan input, never a replacement:
 /// when `plan_fast_path` returns `None`, `query` uses the full scan verbatim.
-enum FastPath {
+pub(crate) enum FastPath {
     /// Fixed homogeneous path (all hops `Edge`, one label + direction, no
     /// inline edge props, no edge var referenced): the shared reachable-edge
     /// batch (or `None` when nothing is reachable) fed to EVERY `Edge` spec.
@@ -191,12 +332,253 @@ enum FastPath {
     QuantifiedAdjacency(Arc<varve_plan::EdgeAdjacency>),
 }
 
+fn const_props(
+    props: &[(String, Expr)],
+    params: &BTreeMap<String, Value>,
+) -> Result<Vec<(String, Value)>, EngineError> {
+    props
+        .iter()
+        .map(|(k, v)| const_value(v, params).map(|value| (k.clone(), value)))
+        .collect()
+}
+
+#[derive(Default)]
+pub(crate) struct Overlay {
+    pub nodes: LiveTable,
+    pub edges: LiveTable,
+}
+
+impl Overlay {
+    pub(crate) fn table(&self, kind: TableKind) -> &LiveTable {
+        match kind {
+            TableKind::Nodes => &self.nodes,
+            TableKind::Edges => &self.edges,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn scan_inputs_for(
+    state: &Arc<RwLock<GraphsState>>,
+    store: &Arc<dyn ObjectStore>,
+    graph: &str,
+    clause_specs: &[varve_plan::ClauseSpecs],
+    bounds_per_clause: &[TemporalBounds],
+    params: &BTreeMap<String, Value>,
+    query_limits: varve_plan::QueryLimits,
+    fast_paths: Option<&[Option<FastPath>]>,
+    overlay: Option<&Overlay>,
+) -> Result<Vec<Vec<varve_plan::ScanInput>>, EngineError> {
+    scan_inputs_for_impl(
+        state,
+        store,
+        graph,
+        clause_specs,
+        bounds_per_clause,
+        params,
+        query_limits,
+        fast_paths,
+        overlay,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn scan_inputs_for_impl(
+    state: &Arc<RwLock<GraphsState>>,
+    store: &Arc<dyn ObjectStore>,
+    graph: &str,
+    clause_specs: &[varve_plan::ClauseSpecs],
+    bounds_per_clause: &[TemporalBounds],
+    params: &BTreeMap<String, Value>,
+    query_limits: varve_plan::QueryLimits,
+    fast_paths: Option<&[Option<FastPath>]>,
+    overlay: Option<&Overlay>,
+) -> Result<Vec<Vec<varve_plan::ScanInput>>, EngineError> {
+    if clause_specs.len() != bounds_per_clause.len() {
+        return Err(EngineError::Unsupported(
+            "internal: clause specs/bounds length mismatch".into(),
+        ));
+    }
+    if fast_paths.is_some_and(|paths| paths.len() != clause_specs.len()) {
+        return Err(EngineError::Unsupported(
+            "internal: clause specs/fast paths length mismatch".into(),
+        ));
+    }
+
+    let mut inputs = Vec::with_capacity(clause_specs.len());
+    for (idx, (clause_spec, bounds)) in clause_specs.iter().zip(bounds_per_clause).enumerate() {
+        let fast_path = fast_paths
+            .and_then(|paths| paths.get(idx))
+            .and_then(Option::as_ref);
+        inputs.push(
+            scan_inputs_for_clause(
+                state,
+                store,
+                graph,
+                clause_spec,
+                params,
+                bounds,
+                query_limits,
+                fast_path,
+                overlay,
+            )
+            .await?,
+        );
+    }
+    Ok(inputs)
+}
+
+// Keeps graph, bounds, fast-path, and overlay explicit across recursive EXISTS scans.
+#[allow(clippy::too_many_arguments)]
+async fn scan_inputs_for_clause(
+    state: &Arc<RwLock<GraphsState>>,
+    store: &Arc<dyn ObjectStore>,
+    graph: &str,
+    clause_spec: &varve_plan::ClauseSpecs,
+    params: &BTreeMap<String, Value>,
+    bounds: &TemporalBounds,
+    query_limits: varve_plan::QueryLimits,
+    fast_path: Option<&FastPath>,
+    overlay: Option<&Overlay>,
+) -> Result<Vec<varve_plan::ScanInput>, EngineError> {
+    let mut clause_inputs = Vec::with_capacity(
+        clause_spec.specs.len()
+            + clause_spec
+                .exists
+                .iter()
+                .map(|exists| exists.specs.len())
+                .sum::<usize>(),
+    );
+    for spec in &clause_spec.specs {
+        clause_inputs.push(
+            scan_input_for(
+                state,
+                store,
+                graph,
+                spec,
+                params,
+                bounds,
+                query_limits,
+                fast_path,
+                overlay,
+            )
+            .await?,
+        );
+    }
+    for exists in &clause_spec.exists {
+        for spec in &exists.specs {
+            clause_inputs.push(
+                scan_input_for(
+                    state,
+                    store,
+                    graph,
+                    spec,
+                    params,
+                    bounds,
+                    query_limits,
+                    None,
+                    overlay,
+                )
+                .await?,
+            );
+        }
+    }
+    Ok(clause_inputs)
+}
+
+// One conversion point from planner scan specs to executable scan inputs.
+#[allow(clippy::too_many_arguments)]
+async fn scan_input_for(
+    state: &Arc<RwLock<GraphsState>>,
+    store: &Arc<dyn ObjectStore>,
+    graph: &str,
+    spec: &varve_plan::ScanSpec,
+    params: &BTreeMap<String, Value>,
+    bounds: &TemporalBounds,
+    query_limits: varve_plan::QueryLimits,
+    fast_path: Option<&FastPath>,
+    overlay: Option<&Overlay>,
+) -> Result<varve_plan::ScanInput, EngineError> {
+    Ok(match &spec.kind {
+        varve_plan::SpecKind::Node { labels, iid_point } => varve_plan::ScanInput::Batch(
+            merged_snapshot(
+                state,
+                store,
+                graph,
+                TableKind::Nodes,
+                label_filter(labels),
+                bounds,
+                *iid_point,
+                overlay,
+            )
+            .await?,
+        ),
+        varve_plan::SpecKind::Edge { label, .. } => match fast_path {
+            Some(FastPath::FixedEdges(batch)) => varve_plan::ScanInput::Batch(batch.clone()),
+            _ => varve_plan::ScanInput::Batch(
+                merged_snapshot(
+                    state,
+                    store,
+                    graph,
+                    TableKind::Edges,
+                    LabelFilter::Single(label),
+                    bounds,
+                    None,
+                    overlay,
+                )
+                .await?,
+            ),
+        },
+        varve_plan::SpecKind::Expand {
+            label,
+            direction,
+            props,
+            ..
+        } => match fast_path {
+            Some(FastPath::QuantifiedAdjacency(adjacency)) => {
+                varve_plan::ScanInput::Adjacency(Arc::clone(adjacency))
+            }
+            _ => {
+                let adj_direction = match direction {
+                    varve_gql::ast::Direction::Out => crate::scan::AdjDirection::Out,
+                    varve_gql::ast::Direction::In => crate::scan::AdjDirection::In,
+                };
+                let entries = crate::scan::edge_adjacency(
+                    state,
+                    store,
+                    graph,
+                    label,
+                    &const_props(props, params)?,
+                    adj_direction,
+                    None,
+                    bounds,
+                    Some(query_limits.traversal_adjacency_budget),
+                    overlay,
+                )
+                .await?;
+                let adjacency =
+                    varve_plan::EdgeAdjacency::from_entries(entries.into_iter().map(|e| {
+                        (
+                            e.node,
+                            varve_plan::AdjEdge {
+                                neighbor: e.neighbor,
+                                edge: e.edge,
+                            },
+                        )
+                    }));
+                varve_plan::ScanInput::Adjacency(Arc::new(adjacency))
+            }
+        },
+    })
+}
+
 impl Db {
     /// Volatile database: memory log, zero group-commit window (there is no
     /// fsync to amortize — decision 11). Requires a Tokio runtime.
     pub fn memory() -> Db {
         Db::assemble(
-            TableState::new(),
+            GraphsState::new(),
             Arc::new(MemoryLog::new()),
             cached(memory_store()),
             Arc::new(MonotonicClock::new()),
@@ -208,12 +590,13 @@ impl Db {
             0,
             LogPosition::ZERO,
             default_max_path_depth(),
+            QueryTuning::default().limits(),
         )
     }
 
     #[allow(clippy::too_many_arguments)]
     fn assemble(
-        table_state: TableState,
+        graphs_state: GraphsState,
         log: Arc<dyn varve_log::Log>,
         store: Arc<dyn ObjectStore>,
         clock: Arc<dyn Clock>,
@@ -222,12 +605,17 @@ impl Db {
         next_block_id: u64,
         durable_watermark: LogPosition,
         max_path_depth: u32,
+        query_limits: varve_plan::QueryLimits,
     ) -> Db {
-        let state = Arc::new(RwLock::new(table_state));
+        let state = Arc::new(RwLock::new(graphs_state));
+        let functions = Arc::new(varve_plan::FunctionRegistry::with_builtins());
         let writer_state = WriterState {
             state: Arc::clone(&state),
             store: Arc::clone(&store),
             clock: Arc::clone(&clock),
+            functions: Arc::clone(&functions),
+            max_path_depth,
+            query_limits,
             log,
             next_tx_id,
             next_block_id,
@@ -239,7 +627,9 @@ impl Db {
             store,
             clock,
             submit,
+            functions,
             max_path_depth,
+            query_limits,
         }
     }
 
@@ -317,6 +707,7 @@ impl Db {
             recovered.next_block_id,
             recovered.watermark,
             query_tuning.max_path_depth,
+            query_tuning.limits(),
         ))
     }
 
@@ -341,6 +732,7 @@ impl Db {
             recovered.next_block_id,
             recovered.watermark,
             default_max_path_depth(),
+            QueryTuning::default().limits(),
         ))
     }
 
@@ -348,13 +740,36 @@ impl Db {
     /// resolves and commits inside the writer loop, and returns once the tx
     /// is durable AND visible.
     pub async fn execute(&self, gql: &str) -> Result<TxReceipt, EngineError> {
-        let stmt = varve_gql::parse(gql)?;
-        if matches!(stmt, Statement::Query(_)) {
+        let params = BTreeMap::new();
+        self.execute_with(gql, &params).await
+    }
+
+    pub async fn execute_with(
+        &self,
+        gql: &str,
+        params: &BTreeMap<String, Value>,
+    ) -> Result<TxReceipt, EngineError> {
+        let program = varve_gql::parse_program(gql)?;
+        let graph = program
+            .use_graph
+            .unwrap_or_else(|| DEFAULT_GRAPH.to_string());
+        validate_user_graph_name(&graph)?;
+        if program.statements.is_empty()
+            || program
+                .statements
+                .iter()
+                .any(|stmt| matches!(stmt, Statement::Query(_)))
+        {
             return Err(EngineError::NotAMutation);
         }
         let (ack, rx) = oneshot::channel();
         self.submit
-            .send(Submission { stmt, ack })
+            .send(Submission {
+                statements: program.statements,
+                params: params.clone(),
+                graph,
+                ack,
+            })
             .await
             .map_err(|_| EngineError::WriterUnavailable)?;
         rx.await.map_err(|_| EngineError::WriterUnavailable)?
@@ -362,104 +777,131 @@ impl Db {
 
     /// Executes a read query, returning Arrow batches.
     pub async fn query(&self, gql: &str) -> Result<Vec<RecordBatch>, EngineError> {
-        let Statement::Query(q) = varve_gql::parse(gql)? else {
+        let params = BTreeMap::new();
+        self.query_with(gql, &params).await
+    }
+
+    pub async fn query_with(
+        &self,
+        gql: &str,
+        params: &BTreeMap<String, Value>,
+    ) -> Result<Vec<RecordBatch>, EngineError> {
+        let program = varve_gql::parse_program(gql)?;
+        let graph = program
+            .use_graph
+            .unwrap_or_else(|| DEFAULT_GRAPH.to_string());
+        validate_user_graph_name(&graph)?;
+        if !self
+            .state
+            .read()
+            .map_err(|_| EngineError::Poisoned)?
+            .graphs
+            .contains_key(&graph)
+        {
+            return Err(EngineError::UnknownGraph(graph));
+        }
+        if program.statements.len() != 1 {
+            return Err(EngineError::NotAQuery);
+        }
+        let mut statements = program.statements;
+        let Statement::Query(q) = statements.remove(0) else {
             return Err(EngineError::NotAQuery);
         };
         let now = self.clock.watermark();
-        let bounds = varve_plan::effective_bounds(&q, now);
-        // Lower the MATCH pattern to one scan spec per element (task 8): a
-        // single-node MATCH is the zero-hop, zero-join case; multi-element
-        // MATCH becomes a left-deep chain of hash joins in `execute_pattern`.
-        // The query's temporal bounds flow into every element's snapshot.
-        let specs = varve_plan::scan_specs(&q, DEFAULT_GRAPH, self.max_path_depth)?;
-        // Task 12: anchor-reachable edge pruning. When the linear path's start
-        // node is point-anchored and the shape is one the bounded BFS provably
-        // covers with a SUPERSET of the reachable edges, build that pruned
-        // input once here; otherwise `plan_fast_path` returns `None` and every
-        // arm below falls back to the unchanged full-scan input verbatim.
-        let fast_path = self.plan_fast_path(&q, &specs, &bounds).await?;
-        let mut inputs = Vec::with_capacity(specs.len());
-        for spec in &specs {
-            let input = match &spec.kind {
-                varve_plan::SpecKind::Node { label, iid_point } => varve_plan::ScanInput::Batch(
-                    merged_snapshot(
-                        &self.state,
-                        &self.store,
-                        TableKind::Nodes,
-                        label.as_deref().unwrap_or(""),
-                        &bounds,
-                        *iid_point,
-                    )
-                    .await?,
-                ),
-                // Fast path: every fixed `Edge` element shares the one
-                // reachable-edge batch (a superset; the join keys +
-                // `apply_element_predicates` select each element's rows).
-                // Fallback: the full label-filtered edge snapshot, as before.
-                varve_plan::SpecKind::Edge { label, .. } => match &fast_path {
-                    Some(FastPath::FixedEdges(batch)) => {
-                        varve_plan::ScanInput::Batch(batch.clone())
-                    }
-                    _ => varve_plan::ScanInput::Batch(
-                        merged_snapshot(
-                            &self.state,
-                            &self.store,
-                            TableKind::Edges,
-                            label,
-                            &bounds,
-                            None,
-                        )
-                        .await?,
-                    ),
-                },
-                // Quantified hops (task 9): resolve the label-filtered edge
-                // adjacency AT THE QUERY'S TEMPORAL BOUNDS (so AS-OF-time
-                // quantified traversal is correct — an edge invisible at the
-                // bounds never appears), oriented per the hop's direction, and
-                // hand the walk-semantics core the ready-made adjacency. The
-                // fast path (task 12) hands the SAME kind of adjacency, pruned
-                // to nodes reachable from the anchor within `max` hops.
-                varve_plan::SpecKind::Expand {
-                    label,
-                    direction,
-                    props,
-                    ..
-                } => match &fast_path {
-                    Some(FastPath::QuantifiedAdjacency(adj)) => {
-                        varve_plan::ScanInput::Adjacency(adj.clone())
-                    }
-                    _ => {
-                        let adj_direction = match direction {
-                            varve_gql::ast::Direction::Out => crate::scan::AdjDirection::Out,
-                            varve_gql::ast::Direction::In => crate::scan::AdjDirection::In,
-                        };
-                        let entries = crate::scan::edge_adjacency(
-                            &self.state,
-                            &self.store,
-                            label,
-                            props,
-                            adj_direction,
-                            None,
-                            &bounds,
-                        )
-                        .await?;
-                        let adjacency =
-                            varve_plan::EdgeAdjacency::from_entries(entries.into_iter().map(|e| {
-                                (
-                                    e.node,
-                                    varve_plan::AdjEdge {
-                                        neighbor: e.neighbor,
-                                        edge: e.edge,
-                                    },
-                                )
-                            }));
-                        varve_plan::ScanInput::Adjacency(Arc::new(adjacency))
-                    }
-                },
-            };
-            inputs.push(input);
+        if !q.unions.is_empty() {
+            let first = self
+                .query_body_batches(&graph, &q.first, params, now)
+                .await?;
+            let mut unions = Vec::with_capacity(q.unions.len());
+            for (kind, body) in &q.unions {
+                unions.push((
+                    kind.clone(),
+                    self.query_body_batches(&graph, body, params, now).await?,
+                ));
+            }
+            return Ok(
+                varve_plan::union_query_results(first, unions, self.functions.as_ref()).await?,
+            );
         }
-        Ok(varve_plan::execute_pattern(&q, &specs, inputs).await?)
+        let clause_specs =
+            varve_plan::scan_specs_with_params(&q.first, &graph, self.max_path_depth, params)?;
+        let bounds = bounds_per_clause(&q.first, now);
+        let fast_path = if q.first.clauses.len() == 1
+            && clause_specs.len() == 1
+            && matches!(
+                &q.first.clauses[0],
+                varve_gql::ast::Clause::Match {
+                    optional: false,
+                    paths,
+                    ..
+                } if paths.len() == 1
+            ) {
+            self.plan_fast_path(&graph, &q, &clause_specs[0].specs, params, &bounds[0])
+                .await?
+        } else {
+            None
+        };
+        let fast_paths = fast_path.map(|fast_path| {
+            let mut paths: Vec<Option<FastPath>> = std::iter::repeat_with(|| None)
+                .take(clause_specs.len())
+                .collect();
+            paths[0] = Some(fast_path);
+            paths
+        });
+        let inputs = scan_inputs_for(
+            &self.state,
+            &self.store,
+            &graph,
+            &clause_specs,
+            &bounds,
+            params,
+            self.query_limits,
+            fast_paths.as_deref(),
+            None,
+        )
+        .await?;
+        Ok(varve_plan::execute_body_with_limits(
+            &q.first,
+            &clause_specs,
+            inputs,
+            self.functions.as_ref(),
+            self.query_limits.path_expand,
+            params,
+        )
+        .await?)
+    }
+
+    async fn query_body_batches(
+        &self,
+        graph: &str,
+        body: &QueryBody,
+        params: &BTreeMap<String, Value>,
+        now: Instant,
+    ) -> Result<Vec<RecordBatch>, EngineError> {
+        let clause_specs =
+            varve_plan::scan_specs_with_params(body, graph, self.max_path_depth, params)?;
+        let bounds = bounds_per_clause(body, now);
+        let inputs = scan_inputs_for(
+            &self.state,
+            &self.store,
+            graph,
+            &clause_specs,
+            &bounds,
+            params,
+            self.query_limits,
+            None,
+            None,
+        )
+        .await?;
+        Ok(varve_plan::execute_body_with_limits(
+            body,
+            &clause_specs,
+            inputs,
+            self.functions.as_ref(),
+            self.query_limits.path_expand,
+            params,
+        )
+        .await?)
     }
 
     /// Task 12 fast-path selection: decide whether this query's shape is one
@@ -473,8 +915,10 @@ impl Db {
     /// scan, never a replacement, so an unsure verdict simply falls back.
     async fn plan_fast_path(
         &self,
+        graph: &str,
         q: &varve_gql::ast::QueryStmt,
         specs: &[varve_plan::ScanSpec],
+        params: &BTreeMap<String, Value>,
         bounds: &varve_types::TemporalBounds,
     ) -> Result<Option<FastPath>, EngineError> {
         use varve_gql::ast::Direction;
@@ -490,8 +934,9 @@ impl Db {
         else {
             return Ok(None);
         };
+        let query = varve_plan::exec::degenerate_query(q)?;
         let anchor = *anchor;
-        let Some(path) = q.paths.first() else {
+        let Some(path) = query.paths.first() else {
             return Ok(None);
         };
         if path.hops.is_empty() {
@@ -518,19 +963,24 @@ impl Db {
                 ..
             } = &specs[1].kind
             {
+                let props = const_props(props, params)?;
                 let hop = crate::scan::HopSpec {
                     label,
-                    props,
+                    props: &props,
                     direction: dir_to_adj(*direction),
                 };
                 let hops = vec![hop; *max as usize];
                 let reachable = crate::scan::reachable_edges(
                     &self.state,
                     &self.store,
+                    graph,
                     anchor,
                     &hops,
                     None,
                     bounds,
+                    self.query_limits.traversal_node_budget,
+                    self.query_limits.traversal_adjacency_budget,
+                    None,
                 )
                 .await?;
                 let adjacency = varve_plan::EdgeAdjacency::from_entries(
@@ -579,19 +1029,37 @@ impl Db {
             return Ok(None);
         }
         let references_edge_var = |var: &str| edge_specs.iter().any(|(v, _, _)| *v == var);
-        if let Some(varve_gql::ast::Expr::PropEq { var, .. }) = &q.where_clause {
-            if references_edge_var(var) {
-                return Ok(None);
+        if let Some(where_clause) = query.where_clause {
+            for expr in where_clause.conjuncts() {
+                let Some((var, _, _)) = expr.as_prop_eq() else {
+                    return Ok(None);
+                };
+                if references_edge_var(var) {
+                    return Ok(None);
+                }
             }
         }
-        for item in &q.return_items {
-            let referenced = match item {
-                varve_gql::ast::ReturnItem::Prop { var, .. }
-                | varve_gql::ast::ReturnItem::TemporalFn { var, .. }
-                | varve_gql::ast::ReturnItem::Var { var, .. } => var.as_str(),
-            };
-            if references_edge_var(referenced) {
-                return Ok(None);
+        for (expr, _alias) in &query.ret.items {
+            match expr {
+                varve_gql::ast::Expr::Prop { var, .. } | varve_gql::ast::Expr::Var(var) => {
+                    if references_edge_var(var) {
+                        return Ok(None);
+                    }
+                }
+                varve_gql::ast::Expr::FnCall { args, .. } => {
+                    for arg in args {
+                        match arg {
+                            varve_gql::ast::Expr::Var(var)
+                            | varve_gql::ast::Expr::Prop { var, .. } => {
+                                if references_edge_var(var) {
+                                    return Ok(None);
+                                }
+                            }
+                            _ => return Ok(None),
+                        }
+                    }
+                }
+                _ => return Ok(None),
             }
         }
 
@@ -610,10 +1078,14 @@ impl Db {
         let reachable = crate::scan::reachable_edges(
             &self.state,
             &self.store,
+            graph,
             anchor,
             &hops,
             Some(first_label),
             bounds,
+            self.query_limits.traversal_node_budget,
+            self.query_limits.traversal_adjacency_budget,
+            None,
         )
         .await?;
         Ok(Some(FastPath::FixedEdges(reachable.batch)))
@@ -638,7 +1110,7 @@ impl Db {
 /// The result of [`recover`]: the reconstructed table state (live tail +
 /// persisted-trie inventory) plus the floors the writer must resume above.
 struct Recovered {
-    state: TableState,
+    state: GraphsState,
     next_tx_id: u64,
     next_block_id: u64,
     watermark: LogPosition,
@@ -670,25 +1142,20 @@ async fn recover(
     store: &Arc<dyn ObjectStore>,
 ) -> Result<Recovered, EngineError> {
     let manifest = varve_storage::latest_manifest(store.as_ref()).await?;
-    let mut nodes_tries = Vec::new();
-    let mut edges_tries = Vec::new();
-    let mut adj_out_tries = Vec::new();
-    let mut adj_in_tries = Vec::new();
+    let mut state = GraphsState::new();
+    let mut catalog_iids: BTreeMap<varve_types::Iid, String> = BTreeMap::new();
     let (mut next_tx_id, next_block_id, mut watermark, mut max_system) = match &manifest {
         Some(m) => {
             for table in &m.tables {
-                // v1 (table, family): default/nodes and default/edges primary
-                // (family ""), plus the two edge adjacency families (spec §5.1,
-                // slice 6). An empty family means the primary key namespace.
-                let dest = match (
-                    table.graph.as_str(),
-                    table.table.as_str(),
-                    table.family.as_str(),
-                ) {
-                    (DEFAULT_GRAPH, NODES_TABLE, "") => &mut nodes_tries,
-                    (DEFAULT_GRAPH, EDGES_TABLE, "") => &mut edges_tries,
-                    (DEFAULT_GRAPH, EDGES_TABLE, varve_storage::ADJ_OUT) => &mut adj_out_tries,
-                    (DEFAULT_GRAPH, EDGES_TABLE, varve_storage::ADJ_IN) => &mut adj_in_tries,
+                let table_state = state
+                    .graphs
+                    .entry(table.graph.clone())
+                    .or_insert_with(TableState::new);
+                let dest = match (table.table.as_str(), table.family.as_str()) {
+                    (NODES_TABLE, "") => &mut table_state.nodes.tries,
+                    (EDGES_TABLE, "") => &mut table_state.edges.tries,
+                    (EDGES_TABLE, varve_storage::ADJ_OUT) => &mut table_state.adj_out,
+                    (EDGES_TABLE, varve_storage::ADJ_IN) => &mut table_state.adj_in,
                     _ => {
                         return Err(EngineError::UnknownTable(format!(
                             "{}/{}/{}",
@@ -708,9 +1175,10 @@ async fn recover(
                         )
                     };
                     let meta = store.get(&meta_key).await?;
+                    let pages = varve_index::block::decode_meta(&meta)?;
                     dest.push(PersistedTrie {
                         entry: entry.clone(),
-                        pages: Arc::new(varve_index::block::decode_meta(&meta)?),
+                        pages: Arc::new(pages),
                     });
                 }
             }
@@ -723,19 +1191,32 @@ async fn recover(
         }
         None => (0, 0, LogPosition::ZERO, None),
     };
+    apply_persisted_catalog_entries(&mut state, &mut catalog_iids, store).await?;
 
-    let mut nodes_live = LiveTable::new();
-    let mut edges_live = LiveTable::new();
     for (position, record) in log.tail(watermark).await? {
         for effect in &record.effects {
-            // The table check precedes `decode_events` so an unknown table
-            // hard-fails before we ever touch (possibly bad) effect bytes.
-            let live = match effect.table.as_str() {
-                NODES_TABLE => &mut nodes_live,
-                EDGES_TABLE => &mut edges_live,
-                _ => return Err(EngineError::UnknownTable(effect.table.clone())),
+            let graph = if effect.graph.is_empty() {
+                DEFAULT_GRAPH
+            } else {
+                effect.graph.as_str()
             };
+            match effect.table.as_str() {
+                NODES_TABLE | EDGES_TABLE => {}
+                _ => return Err(EngineError::UnknownTable(effect.table.clone())),
+            }
             for event in decode_events(&effect.arrow_ipc)? {
+                if graph == META_GRAPH && effect.table == NODES_TABLE {
+                    apply_catalog_replay_event(&mut state, &mut catalog_iids, &event);
+                }
+                let table_state = state
+                    .graphs
+                    .entry(graph.to_string())
+                    .or_insert_with(TableState::new);
+                let live = match effect.table.as_str() {
+                    NODES_TABLE => &mut table_state.nodes.live,
+                    EDGES_TABLE => &mut table_state.edges.live,
+                    _ => return Err(EngineError::UnknownTable(effect.table.clone())),
+                };
                 live.append(event)?;
             }
         }
@@ -744,26 +1225,69 @@ async fn recover(
         max_system = Some(max_system.map_or(system, |m| m.max(system)));
         watermark = watermark.max(position.advance(1)?);
     }
+
     if let Some(floor) = max_system {
         clock.advance_to(floor);
     }
+
     Ok(Recovered {
-        state: TableState {
-            nodes: TableCore {
-                live: nodes_live,
-                tries: nodes_tries,
-            },
-            edges: TableCore {
-                live: edges_live,
-                tries: edges_tries,
-            },
-            adj_out: adj_out_tries,
-            adj_in: adj_in_tries,
-        },
+        state,
         next_tx_id,
         next_block_id,
         watermark,
     })
+}
+
+async fn apply_persisted_catalog_entries(
+    state: &mut GraphsState,
+    catalog_iids: &mut BTreeMap<varve_types::Iid, String>,
+    store: &Arc<dyn ObjectStore>,
+) -> Result<(), EngineError> {
+    let Some(meta) = state.graph(META_GRAPH) else {
+        return Ok(());
+    };
+    let tries = meta.nodes.tries.clone();
+    for trie in tries {
+        let data_key = varve_storage::keys::data_key(META_GRAPH, NODES_TABLE, &trie.entry.trie_key);
+        for page in trie.pages.iter() {
+            let bytes = store
+                .get_range(&data_key, page.offset..page.offset + page.len)
+                .await?;
+            for event in decode_events(&bytes)? {
+                apply_catalog_replay_event(state, catalog_iids, &event);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_catalog_replay_event(
+    state: &mut GraphsState,
+    catalog_iids: &mut BTreeMap<varve_types::Iid, String>,
+    event: &Event,
+) {
+    match &event.op {
+        Op::Put { labels, doc } if labels.iter().any(|label| label == "Graph") => {
+            let Some(Value::Str(name)) = doc.get("_id") else {
+                return;
+            };
+            if name == DEFAULT_GRAPH || name == META_GRAPH {
+                return;
+            }
+            catalog_iids.insert(event.iid, name.clone());
+            state
+                .graphs
+                .entry(name.clone())
+                .or_insert_with(TableState::new);
+        }
+        Op::Delete | Op::Erase => {
+            let Some(name) = catalog_iids.remove(&event.iid) else {
+                return;
+            };
+            state.graphs.remove(&name);
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -773,6 +1297,53 @@ mod tests {
     use varve_log::{LogRecord, TableEffects};
     use varve_types::{Iid, TemporalBounds, TemporalDimension, Value};
 
+    static QUERY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn query_tuning_parses_budget_fields() {
+        let _guard = QUERY_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("VARVE__QUERY__PATH_ROW_BUDGET");
+        std::env::remove_var("VARVE__QUERY__TRAVERSAL_ADJACENCY_BUDGET");
+        let cfg = Config::from_toml_str(
+            r#"
+            [query]
+            max_path_depth = 7
+            path_output_batch_rows = 16
+            path_row_budget = 17
+            path_frontier_budget = 18
+            traversal_node_budget = 19
+            traversal_adjacency_budget = 20
+            "#,
+        )
+        .unwrap();
+        let tuning: QueryTuning = cfg.section("query").unwrap().get().unwrap();
+
+        assert_eq!(tuning.max_path_depth, 7);
+        assert_eq!(tuning.path_output_batch_rows, 16);
+        assert_eq!(tuning.path_row_budget, 17);
+        assert_eq!(tuning.path_frontier_budget, 18);
+        assert_eq!(tuning.traversal_node_budget, 19);
+        assert_eq!(tuning.traversal_adjacency_budget, 20);
+    }
+
+    #[test]
+    fn query_tuning_env_overrides_budget_fields() {
+        let _guard = QUERY_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("VARVE__QUERY__PATH_ROW_BUDGET");
+        std::env::remove_var("VARVE__QUERY__TRAVERSAL_ADJACENCY_BUDGET");
+        std::env::set_var("VARVE__QUERY__PATH_ROW_BUDGET", "33");
+        std::env::set_var("VARVE__QUERY__TRAVERSAL_ADJACENCY_BUDGET", "44");
+
+        let cfg = Config::from_toml_str("").unwrap();
+        let tuning: QueryTuning = cfg.section("query").unwrap().get().unwrap();
+
+        assert_eq!(tuning.path_row_budget, 33);
+        assert_eq!(tuning.traversal_adjacency_budget, 44);
+
+        std::env::remove_var("VARVE__QUERY__PATH_ROW_BUDGET");
+        std::env::remove_var("VARVE__QUERY__TRAVERSAL_ADJACENCY_BUDGET");
+    }
+
     #[tokio::test]
     async fn insert_edge_with_inline_nodes_populates_edges_live() {
         let db = Db::memory();
@@ -780,10 +1351,16 @@ mod tests {
             .await
             .unwrap();
         let s = db.state.read().unwrap();
-        assert_eq!(s.nodes.live.event_count(), 2);
-        assert_eq!(s.edges.live.event_count(), 1);
+        assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().nodes.live.event_count(), 2);
+        assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(), 1);
         let ada = Iid::derive("default", "nodes", &Value::Int(1).id_bytes().unwrap());
-        let out: Vec<_> = s.edges.live.out_edges(&ada).collect();
+        let out: Vec<_> = s
+            .graph(DEFAULT_GRAPH)
+            .unwrap()
+            .edges
+            .live
+            .out_edges(&ada)
+            .collect();
         assert_eq!(out.len(), 1);
     }
 
@@ -794,8 +1371,8 @@ mod tests {
             .await
             .unwrap();
         let s = db.state.read().unwrap();
-        assert_eq!(s.nodes.live.event_count(), 2);
-        assert_eq!(s.edges.live.event_count(), 1);
+        assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().nodes.live.event_count(), 2);
+        assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(), 1);
     }
 
     #[tokio::test]
@@ -818,8 +1395,8 @@ mod tests {
         // Atomicity: both statements failed at resolve, so NOTHING was applied —
         // not even the syntactically fine (:P {_id: 9}) / (x:P {_id: 3}) parts.
         let s = db.state.read().unwrap();
-        assert_eq!(s.nodes.live.event_count(), 0);
-        assert_eq!(s.edges.live.event_count(), 0);
+        assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().nodes.live.event_count(), 0);
+        assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(), 0);
     }
 
     #[tokio::test]
@@ -835,7 +1412,57 @@ mod tests {
         .unwrap();
         let s = db.state.read().unwrap();
         // 1 Ada × 2 Bobs = 2 edges.
-        assert_eq!(s.edges.live.event_count(), 2);
+        assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn match_insert_complex_where_filters_candidates() {
+        let db = Db::memory();
+        db.execute("INSERT (:A {_id: 1, x: 1, y: 3}), (:A {_id: 2, x: 1, y: 1})")
+            .await
+            .unwrap();
+        db.execute("MATCH (a:A) WHERE a.x = 1 AND a.y > 2 INSERT (a)-[:K]->(:B {_id: 'b'})")
+            .await
+            .unwrap();
+
+        let s = db.state.read().unwrap();
+        assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().nodes.live.event_count(), 3);
+        assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn match_insert_applies_all_conjuncts() {
+        let db = Db::memory();
+        db.execute("INSERT (:A {_id: 1, x: 1, y: 2})")
+            .await
+            .unwrap();
+
+        db.execute("MATCH (a:A) WHERE a.x = 1 AND a.y = 2 INSERT (a)-[:K]->(:B {_id: 1})")
+            .await
+            .unwrap();
+
+        let s = db.state.read().unwrap();
+        assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().nodes.live.event_count(), 2);
+        assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn match_insert_rejects_unmatched_where_variable_without_partial_insert() {
+        let db = Db::memory();
+        db.execute("INSERT (:A {_id: 1, x: 1})").await.unwrap();
+
+        let err = db
+            .execute("MATCH (a:A) WHERE b.x = 1 INSERT (a)-[:K]->(:B {_id: 1})")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, EngineError::Plan(PlanError::UnknownVariable(ref var)) if var == "b"),
+            "{err:?}"
+        );
+
+        let s = db.state.read().unwrap();
+        assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().nodes.live.event_count(), 1);
+        assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(), 0);
     }
 
     #[tokio::test]
@@ -849,8 +1476,14 @@ mod tests {
             .unwrap();
         let s = db.state.read().unwrap();
         let user = Iid::derive("default", "edges", &Value::Int(7).id_bytes().unwrap());
-        assert!(s.edges.live.events_for(&user).is_some());
-        assert_eq!(s.edges.live.event_count(), 2);
+        assert!(s
+            .graph(DEFAULT_GRAPH)
+            .unwrap()
+            .edges
+            .live
+            .events_for(&user)
+            .is_some());
+        assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(), 2);
     }
 
     /// log + storage both `local` under `dir`, `max_block_rows` low so any
@@ -879,7 +1512,9 @@ mod tests {
         for _ in 0..200 {
             {
                 let s = db.state.read().unwrap();
-                if !s.edges.tries.is_empty() && !s.nodes.tries.is_empty() {
+                if !s.graph(DEFAULT_GRAPH).unwrap().edges.tries.is_empty()
+                    && !s.graph(DEFAULT_GRAPH).unwrap().nodes.tries.is_empty()
+                {
                     return;
                 }
             }
@@ -911,7 +1546,7 @@ mod tests {
             .unwrap();
         let s = db.state.read().unwrap();
         // Two edge events now exist for the edge (Put flushed + Delete live).
-        assert_eq!(s.edges.live.event_count(), 1);
+        assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(), 1);
     }
 
     #[tokio::test]
@@ -933,7 +1568,7 @@ mod tests {
             {
                 let s = db.state.read().unwrap();
                 assert_eq!(
-                    s.edges.live.event_count(),
+                    s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(),
                     1,
                     "log replay must restore edges"
                 );
@@ -943,9 +1578,13 @@ mod tests {
         {
             let db = Db::local(dir.path()).await.unwrap();
             let s = db.state.read().unwrap();
-            assert_eq!(s.edges.live.event_count(), 0, "flushed");
             assert_eq!(
-                s.edges.tries.len(),
+                s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(),
+                0,
+                "flushed"
+            );
+            assert_eq!(
+                s.graph(DEFAULT_GRAPH).unwrap().edges.tries.len(),
                 1,
                 "edges primary trie recovered from manifest"
             );
@@ -978,7 +1617,9 @@ mod tests {
             for _ in 0..200 {
                 {
                     let s = db.state.read().unwrap();
-                    if s.nodes.tries.len() == 1 && s.edges.tries.len() == 1 {
+                    if s.graph(DEFAULT_GRAPH).unwrap().nodes.tries.len() == 1
+                        && s.graph(DEFAULT_GRAPH).unwrap().edges.tries.len() == 1
+                    {
                         break;
                     }
                 }
@@ -986,10 +1627,18 @@ mod tests {
             }
             {
                 let s = db.state.read().unwrap();
-                assert_eq!(s.nodes.tries.len(), 1, "block 0: nodes trie landed");
-                assert_eq!(s.edges.tries.len(), 1, "block 0: edges trie landed");
                 assert_eq!(
-                    s.edges.live.event_count(),
+                    s.graph(DEFAULT_GRAPH).unwrap().nodes.tries.len(),
+                    1,
+                    "block 0: nodes trie landed"
+                );
+                assert_eq!(
+                    s.graph(DEFAULT_GRAPH).unwrap().edges.tries.len(),
+                    1,
+                    "block 0: edges trie landed"
+                );
+                assert_eq!(
+                    s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(),
                     0,
                     "block 0's flush reset edges' live tail"
                 );
@@ -1003,14 +1652,21 @@ mod tests {
             for _ in 0..200 {
                 {
                     let s = db.state.read().unwrap();
-                    if s.nodes.tries.len() == 2 {
+                    if s.graph(DEFAULT_GRAPH).unwrap().nodes.tries.len() == 2 {
                         break;
                     }
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
             assert_eq!(
-                db.state.read().unwrap().nodes.tries.len(),
+                db.state
+                    .read()
+                    .unwrap()
+                    .graph(DEFAULT_GRAPH)
+                    .unwrap()
+                    .nodes
+                    .tries
+                    .len(),
                 2,
                 "block 1: node-only flush landed as its own block"
             );
@@ -1026,11 +1682,15 @@ mod tests {
             let db = Db::local(dir.path()).await.unwrap();
             let s = db.state.read().unwrap();
             assert_eq!(
-                s.edges.tries.len(),
+                s.graph(DEFAULT_GRAPH).unwrap().edges.tries.len(),
                 1,
                 "edges' block-0 trie must survive block 1's node-only manifest write"
             );
-            assert_eq!(s.nodes.tries.len(), 2, "both node tries also recovered");
+            assert_eq!(
+                s.graph(DEFAULT_GRAPH).unwrap().nodes.tries.len(),
+                2,
+                "both node tries also recovered"
+            );
         }
     }
 
@@ -1051,6 +1711,7 @@ mod tests {
             effects: vec![TableEffects {
                 table: "widgets".to_string(),
                 arrow_ipc: vec![0xAA], // never decoded: table check happens first
+                graph: String::new(),
             }],
         }])
         .await
@@ -1098,6 +1759,7 @@ mod tests {
             effects: vec![TableEffects {
                 table: EDGES_TABLE.to_string(),
                 arrow_ipc: encode_events(std::slice::from_ref(&edge)).unwrap(),
+                graph: String::new(),
             }],
         }])
         .await
@@ -1106,8 +1768,26 @@ mod tests {
         let clock = MonotonicClock::new();
         let store = memory_store();
         let recovered = recover(&log, &clock, &store).await.unwrap();
-        assert_eq!(recovered.state.edges.live.event_count(), 1);
-        assert_eq!(recovered.state.nodes.live.event_count(), 0);
+        assert_eq!(
+            recovered
+                .state
+                .graph(DEFAULT_GRAPH)
+                .unwrap()
+                .edges
+                .live
+                .event_count(),
+            1
+        );
+        assert_eq!(
+            recovered
+                .state
+                .graph(DEFAULT_GRAPH)
+                .unwrap()
+                .nodes
+                .live
+                .event_count(),
+            0
+        );
     }
 
     /// Replay starts AT the manifest watermark: records below it (still in
@@ -1144,6 +1824,7 @@ mod tests {
                 effects: vec![TableEffects {
                     table: NODES_TABLE.to_string(),
                     arrow_ipc: encode_events(std::slice::from_ref(e)).unwrap(),
+                    graph: String::new(),
                 }],
             }
         }
@@ -1199,11 +1880,26 @@ mod tests {
         let clock = MonotonicClock::new();
         let recovered = recover(&log, &clock, &store).await.unwrap();
         assert_eq!(
-            recovered.state.nodes.live.event_count(),
+            recovered
+                .state
+                .graph(DEFAULT_GRAPH)
+                .unwrap()
+                .nodes
+                .live
+                .event_count(),
             1,
             "only the post-watermark record replays"
         );
-        assert_eq!(recovered.state.nodes.tries.len(), 1);
+        assert_eq!(
+            recovered
+                .state
+                .graph(DEFAULT_GRAPH)
+                .unwrap()
+                .nodes
+                .tries
+                .len(),
+            1
+        );
         assert_eq!(recovered.next_tx_id, 3);
         assert_eq!(recovered.next_block_id, 1);
         assert_eq!(recovered.watermark.as_u64(), 3);
@@ -1262,11 +1958,14 @@ mod tests {
             let out = edge_adjacency(
                 &db.state,
                 &db.store,
+                DEFAULT_GRAPH,
                 "KNOWS",
                 &[],
                 AdjDirection::Out,
                 Some(ada),
                 &bounds,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -1275,11 +1974,14 @@ mod tests {
             let all = edge_adjacency(
                 &db.state,
                 &db.store,
+                DEFAULT_GRAPH,
                 "KNOWS",
                 &[],
                 AdjDirection::Out,
                 None,
                 &bounds,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -1292,11 +1994,14 @@ mod tests {
             let out_cyd = edge_adjacency(
                 &db.state,
                 &db.store,
+                DEFAULT_GRAPH,
                 "KNOWS",
                 &[],
                 AdjDirection::Out,
                 Some(cyd),
                 &bounds,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -1314,11 +2019,14 @@ mod tests {
             let in_bob = edge_adjacency(
                 &db.state,
                 &db.store,
+                DEFAULT_GRAPH,
                 "KNOWS",
                 &[],
                 AdjDirection::In,
                 Some(bob),
                 &bounds,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -1326,11 +2034,14 @@ mod tests {
             let all_in = edge_adjacency(
                 &db.state,
                 &db.store,
+                DEFAULT_GRAPH,
                 "KNOWS",
                 &[],
                 AdjDirection::In,
                 None,
                 &bounds,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -1343,10 +2054,16 @@ mod tests {
             let db = Db::local(dir.path()).await.unwrap();
             {
                 let s = db.state.read().unwrap();
-                assert_eq!(s.adj_out.len(), s.edges.tries.len());
-                assert_eq!(s.adj_in.len(), s.edges.tries.len());
+                assert_eq!(
+                    s.graph(DEFAULT_GRAPH).unwrap().adj_out.len(),
+                    s.graph(DEFAULT_GRAPH).unwrap().edges.tries.len()
+                );
+                assert_eq!(
+                    s.graph(DEFAULT_GRAPH).unwrap().adj_in.len(),
+                    s.graph(DEFAULT_GRAPH).unwrap().edges.tries.len()
+                );
                 assert!(
-                    !s.edges.tries.is_empty(),
+                    !s.graph(DEFAULT_GRAPH).unwrap().edges.tries.is_empty(),
                     "at least one edges block flushed"
                 );
             }
@@ -1363,11 +2080,14 @@ mod tests {
             let out = edge_adjacency(
                 &db.state,
                 &db.store,
+                DEFAULT_GRAPH,
                 "KNOWS",
                 &[],
                 AdjDirection::Out,
                 Some(ada),
                 &bounds,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -1378,11 +2098,14 @@ mod tests {
             let all = edge_adjacency(
                 &db.state,
                 &db.store,
+                DEFAULT_GRAPH,
                 "KNOWS",
                 &[],
                 AdjDirection::Out,
                 None,
                 &bounds,
+                None,
+                None,
             )
             .await
             .unwrap();

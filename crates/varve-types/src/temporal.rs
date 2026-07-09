@@ -24,6 +24,11 @@ impl Instant {
     pub fn parse_rfc3339(s: &str) -> Result<Self, TypeError> {
         chrono::DateTime::parse_from_rfc3339(s)
             .map(|dt| Instant(dt.with_timezone(&chrono::Utc).timestamp_micros()))
+            .or_else(|err| {
+                chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.fZ")
+                    .map(|dt| Instant(dt.and_utc().timestamp_micros()))
+                    .map_err(|_| err)
+            })
             .map_err(|e| TypeError::InvalidTimestamp(format!("{s}: {e}")))
     }
 

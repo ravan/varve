@@ -20,6 +20,9 @@ use varve_types::{Doc, Iid, Instant};
 
 use crate::oracle::{edge_iid, node_iid, GraphOracle};
 
+/// Default number of edge INSERT statements per semicolon-separated program.
+pub const EDGE_PROGRAM_BATCH: usize = 100;
+
 /// Deterministic social graph: `people` Person nodes (`_id` `0..people`) and
 /// `friendships` KNOWS edges from a seeded LCG (no self-loops, duplicates
 /// allowed — they're distinct edges). Same seed ⇒ same graph, every run.
@@ -61,6 +64,13 @@ pub fn social_graph(people: usize, friendships: usize, seed: u64) -> SocialGraph
 }
 
 impl SocialGraph {
+    fn edge_statement(s: i64, d: i64) -> String {
+        format!(
+            "MATCH (a:Person {{_id: {s}}}), (b:Person {{_id: {d}}}) \
+             INSERT (a)-[:KNOWS]->(b)"
+        )
+    }
+
     /// `batch` nodes per multi-node INSERT statement (fewer, larger
     /// transactions than one-node-per-tx — mirrors `block_bench.rs`'s
     /// `insert_statement`). `people` need not be a multiple of `batch`; the
@@ -86,11 +96,22 @@ impl SocialGraph {
     pub fn edge_statements(&self) -> Vec<String> {
         self.edges
             .iter()
-            .map(|(s, d)| {
-                format!(
-                    "MATCH (a:Person {{_id: {s}}}), (b:Person {{_id: {d}}}) \
-                     INSERT (a)-[:KNOWS]->(b)"
-                )
+            .map(|(s, d)| Self::edge_statement(*s, *d))
+            .collect()
+    }
+
+    /// Edge ingest programs, each containing up to `batch` edge INSERT
+    /// statements separated by semicolons. `batch` must be non-zero.
+    pub fn edge_programs(&self, batch: usize) -> Vec<String> {
+        assert!(batch > 0, "edge program batch must be non-zero");
+        self.edges
+            .chunks(batch)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .map(|(s, d)| Self::edge_statement(*s, *d))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             })
             .collect()
     }
@@ -166,5 +187,31 @@ mod tests {
         assert_ne!(social_graph(10_000, 60_000, 43).edges, a.edges);
         assert_eq!(a.node_statements(1000).len(), 10);
         assert_eq!(a.edge_statements().len(), 60_000);
+        assert_eq!(a.edge_programs(EDGE_PROGRAM_BATCH).len(), 600);
+    }
+
+    #[test]
+    fn edge_programs_batch_edges_into_semicolon_programs() {
+        let graph = social_graph(10, 205, 42);
+
+        let programs = graph.edge_programs(100);
+
+        assert_eq!(programs.len(), 3);
+        assert_eq!(
+            programs
+                .iter()
+                .map(|program| program
+                    .split(';')
+                    .filter(|statement| !statement.trim().is_empty())
+                    .count())
+                .collect::<Vec<_>>(),
+            vec![100, 100, 5]
+        );
+        assert!(programs
+            .iter()
+            .all(|program| program.split(';').all(|statement| {
+                let statement = statement.trim();
+                statement.is_empty() || statement.contains(" INSERT ")
+            })));
     }
 }

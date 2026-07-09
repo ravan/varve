@@ -1,0 +1,446 @@
+# Every scenario passing in the current adapted harness.
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #1
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #10
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #11
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #12
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #13
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #14
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #15
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #16
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #17
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #18
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #19
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #2
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #20
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #21
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #22
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #23
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #3
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #4
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #5
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #6
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #7
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #8
+Boolean1 - And logical operations::[8] Fail on conjunction of at least one non-booleans #9
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #1
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #10
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #11
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #12
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #13
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #14
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #15
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #16
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #17
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #18
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #19
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #2
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #20
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #21
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #22
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #23
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #3
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #4
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #5
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #6
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #7
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #8
+Boolean2 - OR logical operations::[8] Fail on disjunction of at least one non-booleans #9
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #1
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #10
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #11
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #12
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #13
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #14
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #15
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #16
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #17
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #18
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #19
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #2
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #20
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #21
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #22
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #23
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #3
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #4
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #5
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #6
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #7
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #8
+Boolean3 - XOR logical operations::[8] Fail on exclusive disjunction of at least one non-booleans #9
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #1
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #10
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #11
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #12
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #13
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #14
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #15
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #16
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #17
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #18
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #19
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #2
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #20
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #21
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #22
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #23
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #24
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #25
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #26
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #27
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #28
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #29
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #3
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #30
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #31
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #32
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #33
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #34
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #35
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #36
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #37
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #38
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #39
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #4
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #40
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #41
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #42
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #43
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #44
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #45
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #46
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #47
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #48
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #49
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #5
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #6
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #7
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #8
+Boolean4 - NOT logical operations::[4] Fail when using NOT on a non-boolean literal #9
+Comparison1 - Equality::[10] Handling inlined equality of large integer
+Comparison1 - Equality::[11] Handling explicit equality of large integer
+Comparison1 - Equality::[12] Handling inlined equality of large integer, non-equal values
+Comparison1 - Equality::[13] Handling explicit equality of large integer, non-equal values
+Create1 - Creating nodes::[14] Fail when creating a node with properties that is already bound
+Create1 - Creating nodes::[17] Fail when adding new label predicate on a node that is already bound 3
+Create1 - Creating nodes::[18] Fail when adding new label predicate on a node that is already bound 4
+Create1 - Creating nodes::[19] Fail when adding new label predicate on a node that is already bound 5
+Create1 - Creating nodes::[20] Fail when creating a node using undefined variable in pattern
+Create1 - Creating nodes::[3] Create a single node with a label
+Create1 - Creating nodes::[4] Create two nodes with same label
+Create1 - Creating nodes::[5] Create a single node with multiple labels
+Create1 - Creating nodes::[6] Create three nodes with multiple labels
+Create1 - Creating nodes::[7] Create a single node with a property
+Create1 - Creating nodes::[9] Create a single node with two properties
+Create2 - Creating relationships::[10] Create a single self loop on an existing node
+Create2 - Creating relationships::[13] Create a single relationship with a property
+Create2 - Creating relationships::[15] Create a single relationship with two properties
+Create2 - Creating relationships::[18] Fail when creating a relationship without a type
+Create2 - Creating relationships::[19] Fail when creating a relationship without a direction
+Create2 - Creating relationships::[1] Create two nodes and a single relationship in a single pattern
+Create2 - Creating relationships::[20] Fail when creating a relationship with two directions
+Create2 - Creating relationships::[22] Fail when creating a variable-length relationship
+Create2 - Creating relationships::[23] Fail when creating a relationship that is already bound
+Create2 - Creating relationships::[24] Fail when creating a relationship using undefined variable in pattern
+Create2 - Creating relationships::[4] Create two nodes and a single relationship in the reverse direction
+Create5 - Multiple hops create patterns::[1] Create a pattern with multiple hops
+Create5 - Multiple hops create patterns::[3] Create a pattern with multiple hops in varying directions
+Delete1 - Deleting nodes::[8] Failing when deleting a label
+Delete2 - Deleting relationships::[5] Failing when deleting a relationship type
+Delete5 - Delete clause interoperation with built-in data types::[8] Failing when using undefined variable in DELETE
+Delete5 - Delete clause interoperation with built-in data types::[9] Failing when deleting an integer expression
+ExistentialSubquery1 - Simple existential subquery::[3] Simple subquery without WHERE clause, not existing pattern
+ExistentialSubquery2 - Full existential subquery::[3] Full existential subquery with update clause should fail
+Graph9 - Retrieve all properties as a property map::[5] `properties()` failing on an integer literal
+Graph9 - Retrieve all properties as a property map::[6] `properties()` failing on a string literal
+Graph9 - Retrieve all properties as a property map::[7] `properties()` failing on a list of booleans
+List12 - List Comprehension::[7] Fail when using aggregation in list comprehension
+List5 - List Membership Validation - IN Operator::[42] Failing when using IN on a non-list literal #1
+List5 - List Membership Validation - IN Operator::[42] Failing when using IN on a non-list literal #2
+List5 - List Membership Validation - IN Operator::[42] Failing when using IN on a non-list literal #3
+List5 - List Membership Validation - IN Operator::[42] Failing when using IN on a non-list literal #4
+List5 - List Membership Validation - IN Operator::[42] Failing when using IN on a non-list literal #5
+List6 - List size::[5] Fail for `size()` on paths
+List6 - List size::[6] Fail for `size()` on pattern predicates #1
+List6 - List size::[6] Fail for `size()` on pattern predicates #2
+List6 - List size::[6] Fail for `size()` on pattern predicates #3
+List6 - List size::[6] Fail for `size()` on pattern predicates #4
+List6 - List size::[6] Fail for `size()` on pattern predicates #5
+List6 - List size::[6] Fail for `size()` on pattern predicates #6
+List6 - List size::[6] Fail for `size()` on pattern predicates #7
+List6 - List size::[6] Fail for `size()` on pattern predicates #8
+Literals2 - Decimal integer::[10] Fail on a too small integer
+Literals2 - Decimal integer::[11] Fail on an integer containing a alphabetic character
+Literals2 - Decimal integer::[12] Fail on an integer containing a invalid symbol character
+Literals2 - Decimal integer::[9] Fail on a too large integer
+Literals3 - Hexadecimal integer::[12] Fail on an incomplete hexadecimal integer
+Literals3 - Hexadecimal integer::[13] Fail on an hexadecimal literal containing a lower case invalid alphanumeric character
+Literals3 - Hexadecimal integer::[14] Fail on an hexadecimal literal containing a upper case invalid alphanumeric character
+Literals3 - Hexadecimal integer::[16] Fail on a too large hexadecimal integer
+Literals3 - Hexadecimal integer::[17] Fail on a too small hexadecimal integer
+Literals4 - Octal integer::[10] Fail on a too small octal integer
+Literals4 - Octal integer::[9] Fail on a too large octal integer
+Literals5 - Float::[27] Fail when float value is too large
+Literals6 - String::[13] Failing on incorrect unicode literal
+Literals7 - List::[19] Fail on a list containing only a comma
+Literals7 - List::[20] Fail on a nested list with non-matching brackets
+Literals7 - List::[21] Fail on a nested list with missing commas
+Literals8 - Maps::[19] Fail on a map containing key starting with a number
+Literals8 - Maps::[20] Fail on a map containing key with symbol
+Literals8 - Maps::[21] Fail on a map containing key with dot
+Literals8 - Maps::[22] Fail on a map containing unquoted string
+Literals8 - Maps::[23] Fail on a map containing only a comma
+Literals8 - Maps::[24] Fail on a map containing a value without key
+Literals8 - Maps::[25] Fail on a map containing a list without key
+Literals8 - Maps::[26] Fail on a map containing a map without key
+Literals8 - Maps::[27] Fail on a nested map with non-matching braces
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #1
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #10
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #11
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #12
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #13
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #14
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #15
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #16
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #17
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #18
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #19
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #2
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #20
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #3
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #4
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #5
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #6
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #7
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #8
+Match1 - Match nodes::[10] Fail when a path has the same variable in the same pattern #9
+Match1 - Match nodes::[1] Match non-existent nodes returns empty
+Match1 - Match nodes::[6] Fail when using parameter as node predicate in MATCH
+Match1 - Match nodes::[7] Fail when a relationship has the same variable in a preceding MATCH #1
+Match1 - Match nodes::[7] Fail when a relationship has the same variable in a preceding MATCH #10
+Match1 - Match nodes::[7] Fail when a relationship has the same variable in a preceding MATCH #11
+Match1 - Match nodes::[7] Fail when a relationship has the same variable in a preceding MATCH #2
+Match1 - Match nodes::[7] Fail when a relationship has the same variable in a preceding MATCH #3
+Match1 - Match nodes::[7] Fail when a relationship has the same variable in a preceding MATCH #4
+Match1 - Match nodes::[7] Fail when a relationship has the same variable in a preceding MATCH #5
+Match1 - Match nodes::[7] Fail when a relationship has the same variable in a preceding MATCH #6
+Match1 - Match nodes::[7] Fail when a relationship has the same variable in a preceding MATCH #7
+Match1 - Match nodes::[7] Fail when a relationship has the same variable in a preceding MATCH #8
+Match1 - Match nodes::[7] Fail when a relationship has the same variable in a preceding MATCH #9
+Match1 - Match nodes::[8] Fail when a path has the same variable in a preceding MATCH #1
+Match1 - Match nodes::[8] Fail when a path has the same variable in a preceding MATCH #10
+Match1 - Match nodes::[8] Fail when a path has the same variable in a preceding MATCH #11
+Match1 - Match nodes::[8] Fail when a path has the same variable in a preceding MATCH #12
+Match1 - Match nodes::[8] Fail when a path has the same variable in a preceding MATCH #13
+Match1 - Match nodes::[8] Fail when a path has the same variable in a preceding MATCH #14
+Match1 - Match nodes::[8] Fail when a path has the same variable in a preceding MATCH #15
+Match1 - Match nodes::[8] Fail when a path has the same variable in a preceding MATCH #16
+Match1 - Match nodes::[8] Fail when a path has the same variable in a preceding MATCH #2
+Match1 - Match nodes::[8] Fail when a path has the same variable in a preceding MATCH #3
+Match1 - Match nodes::[8] Fail when a path has the same variable in a preceding MATCH #4
+Match1 - Match nodes::[8] Fail when a path has the same variable in a preceding MATCH #5
+Match1 - Match nodes::[8] Fail when a path has the same variable in a preceding MATCH #6
+Match1 - Match nodes::[8] Fail when a path has the same variable in a preceding MATCH #7
+Match1 - Match nodes::[8] Fail when a path has the same variable in a preceding MATCH #8
+Match1 - Match nodes::[8] Fail when a path has the same variable in a preceding MATCH #9
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #1
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #10
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #11
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #12
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #13
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #14
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #15
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #16
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #17
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #18
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #19
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #2
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #20
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #22
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #23
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #24
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #25
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #3
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #4
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #6
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #7
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #8
+Match1 - Match nodes::[9] Fail when a relationship has the same variable in the same pattern #9
+Match2 - Match relationships::[10] Fail when a path has the same variable in a preceding MATCH #1
+Match2 - Match relationships::[10] Fail when a path has the same variable in a preceding MATCH #10
+Match2 - Match relationships::[10] Fail when a path has the same variable in a preceding MATCH #11
+Match2 - Match relationships::[10] Fail when a path has the same variable in a preceding MATCH #12
+Match2 - Match relationships::[10] Fail when a path has the same variable in a preceding MATCH #13
+Match2 - Match relationships::[10] Fail when a path has the same variable in a preceding MATCH #14
+Match2 - Match relationships::[10] Fail when a path has the same variable in a preceding MATCH #16
+Match2 - Match relationships::[10] Fail when a path has the same variable in a preceding MATCH #17
+Match2 - Match relationships::[10] Fail when a path has the same variable in a preceding MATCH #2
+Match2 - Match relationships::[10] Fail when a path has the same variable in a preceding MATCH #3
+Match2 - Match relationships::[10] Fail when a path has the same variable in a preceding MATCH #4
+Match2 - Match relationships::[10] Fail when a path has the same variable in a preceding MATCH #5
+Match2 - Match relationships::[10] Fail when a path has the same variable in a preceding MATCH #6
+Match2 - Match relationships::[11] Fail when a node has the same variable in the same pattern #1
+Match2 - Match relationships::[11] Fail when a node has the same variable in the same pattern #11
+Match2 - Match relationships::[11] Fail when a node has the same variable in the same pattern #12
+Match2 - Match relationships::[11] Fail when a node has the same variable in the same pattern #13
+Match2 - Match relationships::[11] Fail when a node has the same variable in the same pattern #14
+Match2 - Match relationships::[11] Fail when a node has the same variable in the same pattern #15
+Match2 - Match relationships::[11] Fail when a node has the same variable in the same pattern #16
+Match2 - Match relationships::[11] Fail when a node has the same variable in the same pattern #17
+Match2 - Match relationships::[11] Fail when a node has the same variable in the same pattern #2
+Match2 - Match relationships::[11] Fail when a node has the same variable in the same pattern #3
+Match2 - Match relationships::[11] Fail when a node has the same variable in the same pattern #4
+Match2 - Match relationships::[11] Fail when a node has the same variable in the same pattern #5
+Match2 - Match relationships::[11] Fail when a node has the same variable in the same pattern #6
+Match2 - Match relationships::[11] Fail when a node has the same variable in the same pattern #7
+Match2 - Match relationships::[11] Fail when a node has the same variable in the same pattern #8
+Match2 - Match relationships::[12] Fail when a path has the same variable in the same pattern #1
+Match2 - Match relationships::[12] Fail when a path has the same variable in the same pattern #3
+Match2 - Match relationships::[12] Fail when a path has the same variable in the same pattern #7
+Match2 - Match relationships::[8] Fail when using parameter as relationship predicate in MATCH
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #1
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #10
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #11
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #12
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #13
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #14
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #15
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #16
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #17
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #18
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #19
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #2
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #20
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #21
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #22
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #23
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #24
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #25
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #26
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #3
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #4
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #5
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #6
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #7
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #8
+Match2 - Match relationships::[9] Fail when a node has the same variable in a preceding MATCH #9
+Match3 - Match fixed length patterns::[29] Fail when re-using a relationship in the same pattern
+Match6 - Match named paths scenarios::[21] Fail when a node has the same variable in a preceding MATCH #1
+Match6 - Match named paths scenarios::[21] Fail when a node has the same variable in a preceding MATCH #10
+Match6 - Match named paths scenarios::[21] Fail when a node has the same variable in a preceding MATCH #11
+Match6 - Match named paths scenarios::[21] Fail when a node has the same variable in a preceding MATCH #12
+Match6 - Match named paths scenarios::[21] Fail when a node has the same variable in a preceding MATCH #14
+Match6 - Match named paths scenarios::[21] Fail when a node has the same variable in a preceding MATCH #2
+Match6 - Match named paths scenarios::[21] Fail when a node has the same variable in a preceding MATCH #3
+Match6 - Match named paths scenarios::[21] Fail when a node has the same variable in a preceding MATCH #4
+Match6 - Match named paths scenarios::[21] Fail when a node has the same variable in a preceding MATCH #5
+Match6 - Match named paths scenarios::[21] Fail when a node has the same variable in a preceding MATCH #6
+Match6 - Match named paths scenarios::[21] Fail when a node has the same variable in a preceding MATCH #7
+Match6 - Match named paths scenarios::[21] Fail when a node has the same variable in a preceding MATCH #8
+Match6 - Match named paths scenarios::[21] Fail when a node has the same variable in a preceding MATCH #9
+Match6 - Match named paths scenarios::[22] Fail when a relationship has the same variable in a preceding MATCH #1
+Match6 - Match named paths scenarios::[22] Fail when a relationship has the same variable in a preceding MATCH #11
+Match6 - Match named paths scenarios::[22] Fail when a relationship has the same variable in a preceding MATCH #15
+Match6 - Match named paths scenarios::[22] Fail when a relationship has the same variable in a preceding MATCH #2
+Match6 - Match named paths scenarios::[22] Fail when a relationship has the same variable in a preceding MATCH #3
+Match6 - Match named paths scenarios::[22] Fail when a relationship has the same variable in a preceding MATCH #7
+Match6 - Match named paths scenarios::[22] Fail when a relationship has the same variable in a preceding MATCH #9
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #1
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #10
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #11
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #12
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #13
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #14
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #15
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #16
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #17
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #18
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #19
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #2
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #20
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #3
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #4
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #5
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #6
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #7
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #8
+Match6 - Match named paths scenarios::[23] Fail when a node has the same variable in the same pattern #9
+Match6 - Match named paths scenarios::[24] Fail when a relationship has the same variable in the same pattern #1
+Match6 - Match named paths scenarios::[24] Fail when a relationship has the same variable in the same pattern #13
+Match6 - Match named paths scenarios::[24] Fail when a relationship has the same variable in the same pattern #15
+Match6 - Match named paths scenarios::[24] Fail when a relationship has the same variable in the same pattern #17
+Match6 - Match named paths scenarios::[24] Fail when a relationship has the same variable in the same pattern #19
+Match6 - Match named paths scenarios::[24] Fail when a relationship has the same variable in the same pattern #2
+Match6 - Match named paths scenarios::[24] Fail when a relationship has the same variable in the same pattern #3
+Match6 - Match named paths scenarios::[24] Fail when a relationship has the same variable in the same pattern #7
+Match6 - Match named paths scenarios::[24] Fail when a relationship has the same variable in the same pattern #8
+Match6 - Match named paths scenarios::[24] Fail when a relationship has the same variable in the same pattern #9
+MatchWhere1 - Filter single variable::[14] Fail when filtering path with property predicate
+MatchWhere3 - Equi-Joins on variables::[2] Join between node properties of disconnected nodes
+Mathematical3 - Subtraction::[1] Fail for invalid Unicode hyphen in subtraction
+Null1 - IS NULL validation::[6] IS NULL is case insensitive
+Null2 - IS NOT NULL validation::[6] IS NOT NULL is case insensitive
+Path3 - Length of a path::[3] Failing when using `length()` on a relationship
+Pattern1 - Pattern predicate::[10] Fail on introducing unbounded variables in pattern #10
+Pattern1 - Pattern predicate::[10] Fail on introducing unbounded variables in pattern #11
+Pattern1 - Pattern predicate::[10] Fail on introducing unbounded variables in pattern #12
+Pattern1 - Pattern predicate::[10] Fail on introducing unbounded variables in pattern #13
+Pattern1 - Pattern predicate::[10] Fail on introducing unbounded variables in pattern #14
+Pattern1 - Pattern predicate::[10] Fail on introducing unbounded variables in pattern #15
+Pattern1 - Pattern predicate::[10] Fail on introducing unbounded variables in pattern #2
+Pattern1 - Pattern predicate::[10] Fail on introducing unbounded variables in pattern #3
+Pattern1 - Pattern predicate::[10] Fail on introducing unbounded variables in pattern #4
+Pattern1 - Pattern predicate::[10] Fail on introducing unbounded variables in pattern #5
+Pattern1 - Pattern predicate::[10] Fail on introducing unbounded variables in pattern #6
+Pattern1 - Pattern predicate::[10] Fail on introducing unbounded variables in pattern #7
+Pattern1 - Pattern predicate::[10] Fail on introducing unbounded variables in pattern #8
+Pattern1 - Pattern predicate::[10] Fail on introducing unbounded variables in pattern #9
+Pattern1 - Pattern predicate::[22] Fail on using pattern in RETURN projection
+Pattern1 - Pattern predicate::[24] Fail on using pattern in right-hand side of SET
+Quantifier1 - None quantifier::[15] Fail none quantifier on type mismatch between list elements and predicate #1
+Quantifier1 - None quantifier::[15] Fail none quantifier on type mismatch between list elements and predicate #2
+Quantifier1 - None quantifier::[15] Fail none quantifier on type mismatch between list elements and predicate #3
+Quantifier2 - Single quantifier::[16] Fail single quantifier on type mismatch between list elements and predicate #1
+Quantifier2 - Single quantifier::[16] Fail single quantifier on type mismatch between list elements and predicate #2
+Quantifier2 - Single quantifier::[16] Fail single quantifier on type mismatch between list elements and predicate #3
+Quantifier3 - Any quantifier::[15] Fail any quantifier on type mismatch between list elements and predicate #1
+Quantifier3 - Any quantifier::[15] Fail any quantifier on type mismatch between list elements and predicate #2
+Quantifier3 - Any quantifier::[15] Fail any quantifier on type mismatch between list elements and predicate #3
+Quantifier4 - All quantifier::[15] Fail all quantifier on type mismatch between list elements and predicate #1
+Quantifier4 - All quantifier::[15] Fail all quantifier on type mismatch between list elements and predicate #2
+Quantifier4 - All quantifier::[15] Fail all quantifier on type mismatch between list elements and predicate #3
+Return2 - Return single expression (correctly projecting an expression)::[11] RETURN does not lose precision on large integers
+Return4 - Column renaming::[10] Fail when returning multiple columns with same name
+Return6 - Implicit grouping with aggregates::[14] Aggregates in aggregates
+Return6 - Implicit grouping with aggregates::[15] Using `rand()` in aggregations
+Return6 - Implicit grouping with aggregates::[20] Fail if not returned variables are used inside an expression which contains an aggregation expression
+Return6 - Implicit grouping with aggregates::[21] Fail if more complex expressions, even if returned, are used inside expression which contains an aggregation expression
+Return7 - Return all variables::[2] Fail when using RETURN * without variables in scope
+ReturnOrderBy6 - Aggregation expressions in order by::[4] Fail if not returned variables are used inside an order by item which contains an aggregation expression
+ReturnOrderBy6 - Aggregation expressions in order by::[5] Fail if more complex expressions, even if returned, are used inside an order by item which contains an aggregation expression
+ReturnSkipLimit1 - Skip::[10] Fail when using non-constants in SKIP
+ReturnSkipLimit1 - Skip::[11] Fail when using negative value in SKIP
+ReturnSkipLimit1 - Skip::[4] Accept skip zero
+ReturnSkipLimit1 - Skip::[5] SKIP with an expression that depends on variables should fail
+ReturnSkipLimit1 - Skip::[7] Negative SKIP should fail
+ReturnSkipLimit1 - Skip::[9] Floating point SKIP should fail
+ReturnSkipLimit2 - Limit::[12] Fail when using negative value in LIMIT 1
+ReturnSkipLimit2 - Limit::[13] Fail when using negative value in LIMIT 2
+ReturnSkipLimit2 - Limit::[16] Fail when using floating point in LIMIT 1
+ReturnSkipLimit2 - Limit::[17] Fail when using floating point in LIMIT 2
+ReturnSkipLimit2 - Limit::[4] Handle ORDER BY with LIMIT 1
+ReturnSkipLimit2 - Limit::[5] ORDER BY with LIMIT 0 should not generate errors
+ReturnSkipLimit2 - Limit::[9] Fail when using non-constants in LIMIT
+Set1 - Set a Property::[9] Failing when using undefined variable in SET
+String10 - Exact Substring Search::[6] No string contains null
+String10 - Exact Substring Search::[7] No string does not contain null
+String8 - Exact String Prefix Search::[6] No string starts with null
+String8 - Exact String Prefix Search::[7] No string does not start with null
+String9 - Exact String Suffix Search::[6] No string ends with null
+String9 - Exact String Suffix Search::[7] No string does not end with null
+Union1 - Union::[4] Should be able to create text output from union queries
+Union1 - Union::[5] Failing when UNION has different columns
+Union2 - Union All::[4] Should be able to create text output from union all queries
+Union2 - Union All::[5] Failing when UNION ALL has different columns
+Union3 - Union in combination with Union All::[1] Failing when mixing UNION and UNION ALL
+Union3 - Union in combination with Union All::[2] Failing when mixing UNION ALL and UNION

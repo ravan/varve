@@ -157,7 +157,7 @@ async fn delete_with_inline_props_filters_like_where() {
         .await
         .unwrap();
 
-    let batches = db.query("MATCH (p:P) RETURN p.name").await.unwrap();
+    let batches = db.query("MATCH (p:P) RETURN p.name AS name").await.unwrap();
     assert_eq!(rows(&batches), 1, "only the matching node was deleted");
     assert_eq!(strings(&batches, "name"), vec!["keep"]);
 }

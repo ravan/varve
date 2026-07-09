@@ -3,43 +3,37 @@
 //! surviving page, per-entity merge in time order, then a single resolution
 //! pass across sources via `snapshot_entities`.
 
-use crate::db::EngineError;
-use crate::state::{TableKind, TableState, DEFAULT_GRAPH, EDGES_TABLE};
+use crate::db::{EngineError, Overlay};
+use crate::state::{GraphsState, TableKind, EDGES_TABLE};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::error::DataFusionError;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, RwLock};
-use varve_gql::ast::Literal;
-use varve_index::{decode_events, snapshot_entities, Event, Op};
+use varve_index::{decode_events, snapshot_entities, Event, LabelFilter, Op};
 use varve_storage::{keys, ObjectStore};
 use varve_types::{Iid, TemporalBounds, Value};
 
-/// `Literal` → `Value` (crate-private duplicate of the writer's helper — tiny,
-/// and keeps the scan layer independent of the writer). Used to match a
-/// quantified hop's inline edge props against each visible edge version's doc.
-fn literal_to_value(l: &Literal) -> Value {
-    match l {
-        Literal::Int(i) => Value::Int(*i),
-        Literal::Float(f) => Value::Float(*f),
-        Literal::Str(s) => Value::Str(s.clone()),
-        Literal::Bool(b) => Value::Bool(*b),
-        Literal::Null => Value::Null,
-    }
-}
-
+// Public scan primitive keeps graph/table/filter/time/overlay dimensions explicit.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn merged_snapshot(
-    state: &Arc<RwLock<TableState>>,
+    state: &Arc<RwLock<GraphsState>>,
     store: &Arc<dyn ObjectStore>,
+    graph: &str,
     kind: TableKind,
-    label: &str,
+    label: LabelFilter<'_>,
     bounds: &TemporalBounds,
     iid_point: Option<Iid>,
+    overlay: Option<&Overlay>,
 ) -> Result<Option<RecordBatch>, EngineError> {
     // 1. Atomic snapshot under ONE read lock (decision 8). Live events are
     //    cloned — bounded by max_block_rows; a point lookup clones one
     //    entity. The trie inventory is Arc-cheap.
     let (live_events, tries) = {
         let s = state.read().map_err(|_| EngineError::Poisoned)?;
-        let core = s.core(kind);
+        let table = s
+            .graph(graph)
+            .ok_or_else(|| EngineError::UnknownGraph(graph.to_string()))?;
+        let core = table.core(kind);
         let live_events: Vec<(Iid, Vec<Event>)> = match &iid_point {
             Some(iid) => core
                 .live
@@ -54,6 +48,21 @@ pub(crate) async fn merged_snapshot(
         };
         (live_events, core.tries.clone())
     };
+    let overlay_events: Vec<(Iid, Vec<Event>)> = overlay
+        .map(|overlay| {
+            let table = overlay.table(kind);
+            match &iid_point {
+                Some(iid) => table
+                    .events_for(iid)
+                    .map(|events| vec![(*iid, events.to_vec())])
+                    .unwrap_or_default(),
+                None => table
+                    .entities()
+                    .map(|(iid, events)| (*iid, events.to_vec()))
+                    .collect(),
+            }
+        })
+        .unwrap_or_default();
 
     // 2. Persisted events, ascending block order (== time order, decision 9).
     //    An entity's run may span pages within one block, so each trie's
@@ -63,7 +72,7 @@ pub(crate) async fn merged_snapshot(
     //    flush-equivalence property test.
     let mut blocks: Vec<Vec<Event>> = Vec::new();
     for trie in &tries {
-        let data_key = keys::data_key(DEFAULT_GRAPH, kind.name(), &trie.entry.trie_key);
+        let data_key = keys::data_key(graph, kind.name(), &trie.entry.trie_key);
         let mut block_events: Vec<Event> = Vec::new();
         for page in trie
             .pages
@@ -82,9 +91,9 @@ pub(crate) async fn merged_snapshot(
         blocks.push(block_events);
     }
 
-    // 3. Merge persisted blocks with the live tail (live is newest —
-    //    appended after every persisted source).
-    let merged = varve_index::merge_sources(blocks, live_events);
+    // 3. Merge persisted blocks with the committed live tail and then the
+    //    statement overlay, which is newest within a program.
+    let merged = varve_index::merge_sources(blocks, live_events.into_iter().chain(overlay_events));
 
     Ok(snapshot_entities(
         merged.iter().map(|(iid, events)| (*iid, events.as_slice())),
@@ -114,6 +123,14 @@ pub(crate) struct AdjacencyEntry {
     pub edge: Iid,
 }
 
+fn traversal_budget_exhausted(kind: &str, budget: usize) -> EngineError {
+    EngineError::Plan(varve_plan::PlanError::DataFusion(
+        DataFusionError::ResourcesExhausted(format!(
+            "traversal {kind} budget {budget} exceeded; make the query more selective"
+        )),
+    ))
+}
+
 /// Visible-edge adjacency at `bounds` (slice 6, decision 11): the live edge
 /// tail (narrowed by the live adjacency views when `anchor` is `Some`) merged
 /// with the persisted adjacency family, whose pages are pruned by the anchor
@@ -134,20 +151,26 @@ pub(crate) struct AdjacencyEntry {
 /// public wrappers pass `false` so the full-scan callers never pay the clone.
 #[allow(clippy::too_many_arguments)]
 async fn edge_adjacency_impl(
-    state: &Arc<RwLock<TableState>>,
+    state: &Arc<RwLock<GraphsState>>,
     store: &Arc<dyn ObjectStore>,
+    graph: &str,
     label: Option<&str>,
-    props: &[(String, Literal)],
+    props: &[(String, Value)],
     direction: AdjDirection,
     anchor: Option<Iid>,
     bounds: &TemporalBounds,
     collect_events: bool,
+    adjacency_budget: Option<usize>,
+    overlay: Option<&Overlay>,
 ) -> Result<(Vec<AdjacencyEntry>, Vec<(Iid, Vec<Event>)>), EngineError> {
     // 1. One read lock: live edge events (narrowed by the live adjacency
     //    views when anchored) + the persisted family's trie list.
     let (live_events, tries) = {
         let s = state.read().map_err(|_| EngineError::Poisoned)?;
-        let live = &s.edges.live;
+        let table = s
+            .graph(graph)
+            .ok_or_else(|| EngineError::UnknownGraph(graph.to_string()))?;
+        let live = &table.edges.live;
         let live_events: Vec<(Iid, Vec<Event>)> = match anchor {
             Some(node) => {
                 let edge_iids: Vec<Iid> = match direction {
@@ -165,11 +188,32 @@ async fn edge_adjacency_impl(
                 .collect(),
         };
         let tries = match direction {
-            AdjDirection::Out => s.adj_out.clone(),
-            AdjDirection::In => s.adj_in.clone(),
+            AdjDirection::Out => table.adj_out.clone(),
+            AdjDirection::In => table.adj_in.clone(),
         };
         (live_events, tries)
     };
+    let overlay_events: Vec<(Iid, Vec<Event>)> = overlay
+        .map(|overlay| {
+            let live = &overlay.edges;
+            match anchor {
+                Some(node) => {
+                    let edge_iids: Vec<Iid> = match direction {
+                        AdjDirection::Out => live.out_edges(&node).cloned().collect(),
+                        AdjDirection::In => live.in_edges(&node).cloned().collect(),
+                    };
+                    edge_iids
+                        .into_iter()
+                        .filter_map(|e| live.events_for(&e).map(|ev| (e, ev.to_vec())))
+                        .collect()
+                }
+                None => live
+                    .entities()
+                    .map(|(iid, ev)| (*iid, ev.to_vec()))
+                    .collect(),
+            }
+        })
+        .unwrap_or_default();
 
     // 2. Persisted family pages, pruned by the anchor as the sort-key point
     //    (decision 4 — min_iid/max_iid on adj pages record src/dst), then
@@ -180,7 +224,7 @@ async fn edge_adjacency_impl(
     };
     let mut blocks: Vec<Vec<Event>> = Vec::new();
     for trie in &tries {
-        let key = keys::adj_data_key(DEFAULT_GRAPH, EDGES_TABLE, family, &trie.entry.trie_key);
+        let key = keys::adj_data_key(graph, EDGES_TABLE, family, &trie.entry.trie_key);
         let mut block_events = Vec::new();
         for page in trie
             .pages
@@ -205,7 +249,7 @@ async fn edge_adjacency_impl(
 
     // 3. Merge (one Vec per edge iid), resolve per edge, keep edges whose
     //    visible version is a Put carrying `label`, emit sorted entries.
-    let merged = varve_index::merge_sources(blocks, live_events);
+    let merged = varve_index::merge_sources(blocks, live_events.into_iter().chain(overlay_events));
     let mut entries = Vec::new();
     let mut edge_events = Vec::new();
     for (edge, events) in &merged {
@@ -217,9 +261,9 @@ async fn edge_adjacency_impl(
         let matched = visible.iter().any(|v| match &v.event.op {
             Op::Put { labels, doc } => {
                 label.is_none_or(|l| labels.iter().any(|x| x == l))
-                    && props.iter().all(|(k, want)| {
-                        doc.get(k).is_some_and(|got| *got == literal_to_value(want))
-                    })
+                    && props
+                        .iter()
+                        .all(|(k, want)| doc.get(k).is_some_and(|got| got == want))
             }
             _ => false,
         });
@@ -235,6 +279,11 @@ async fn edge_adjacency_impl(
             AdjDirection::Out => (src, dst),
             AdjDirection::In => (dst, src),
         };
+        if let Some(budget) = adjacency_budget {
+            if entries.len() >= budget {
+                return Err(traversal_budget_exhausted("adjacency", budget));
+            }
+        }
         entries.push(AdjacencyEntry {
             node,
             neighbor,
@@ -251,24 +300,31 @@ async fn edge_adjacency_impl(
 /// Label-filtered adjacency lookup: kept alongside `incident_edges` so T8/T9
 /// call sites read clearly. `PathExpand` (task 8) is its first production
 /// consumer; slice 6 ships and tests the lookup itself.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn edge_adjacency(
-    state: &Arc<RwLock<TableState>>,
+    state: &Arc<RwLock<GraphsState>>,
     store: &Arc<dyn ObjectStore>,
+    graph: &str,
     label: &str,
-    props: &[(String, Literal)],
+    props: &[(String, Value)],
     direction: AdjDirection,
     anchor: Option<Iid>,
     bounds: &TemporalBounds,
+    adjacency_budget: Option<usize>,
+    overlay: Option<&Overlay>,
 ) -> Result<Vec<AdjacencyEntry>, EngineError> {
     Ok(edge_adjacency_impl(
         state,
         store,
+        graph,
         Some(label),
         props,
         direction,
         anchor,
         bounds,
         false,
+        adjacency_budget,
+        overlay,
     )
     .await?
     .0)
@@ -280,21 +336,26 @@ pub(crate) async fn edge_adjacency(
 /// edges of ANY label, so they scan through this instead of
 /// `edge_adjacency`'s label filter.
 pub(crate) async fn incident_edges(
-    state: &Arc<RwLock<TableState>>,
+    state: &Arc<RwLock<GraphsState>>,
     store: &Arc<dyn ObjectStore>,
+    graph: &str,
     direction: AdjDirection,
     node: Iid,
     bounds: &TemporalBounds,
+    overlay: Option<&Overlay>,
 ) -> Result<Vec<AdjacencyEntry>, EngineError> {
     Ok(edge_adjacency_impl(
         state,
         store,
+        graph,
         None,
         &[],
         direction,
         Some(node),
         bounds,
         false,
+        None,
+        overlay,
     )
     .await?
     .0)
@@ -307,7 +368,7 @@ pub(crate) async fn incident_edges(
 #[derive(Clone, Copy)]
 pub(crate) struct HopSpec<'a> {
     pub label: &'a str,
-    pub props: &'a [(String, Literal)],
+    pub props: &'a [(String, Value)],
     pub direction: AdjDirection,
 }
 
@@ -342,13 +403,19 @@ pub(crate) struct ReachableEdges {
 /// `Edge` specs share it); pass `None` to skip the batch (a quantified hop
 /// needs only `entries`, and skipping avoids cloning every surviving edge's
 /// event list).
+// Fast-path BFS needs graph, hop, bounds, and optional overlay context together.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn reachable_edges(
-    state: &Arc<RwLock<TableState>>,
+    state: &Arc<RwLock<GraphsState>>,
     store: &Arc<dyn ObjectStore>,
+    graph: &str,
     anchor: Iid,
     hops: &[HopSpec<'_>],
     batch_label: Option<&str>,
     bounds: &TemporalBounds,
+    node_budget: usize,
+    adjacency_budget: usize,
+    overlay: Option<&Overlay>,
 ) -> Result<ReachableEdges, EngineError> {
     let mut frontier: Vec<Iid> = vec![anchor];
     let mut expanded: HashSet<Iid> = HashSet::new();
@@ -368,17 +435,26 @@ pub(crate) async fn reachable_edges(
             if !expanded.insert(node) {
                 continue;
             }
+            if expanded.len() > node_budget {
+                return Err(traversal_budget_exhausted("node", node_budget));
+            }
             let (node_entries, node_edges) = edge_adjacency_impl(
                 state,
                 store,
+                graph,
                 Some(hop.label),
                 hop.props,
                 hop.direction,
                 Some(node),
                 bounds,
                 collect,
+                Some(adjacency_budget),
+                overlay,
             )
             .await?;
+            if entries.len().saturating_add(node_entries.len()) > adjacency_budget {
+                return Err(traversal_budget_exhausted("adjacency", adjacency_budget));
+            }
             for e in &node_entries {
                 if next_seen.insert(e.neighbor) {
                     next_frontier.push(e.neighbor);
@@ -401,7 +477,7 @@ pub(crate) async fn reachable_edges(
             edge_events
                 .iter()
                 .map(|(iid, events)| (*iid, events.as_slice())),
-            label,
+            LabelFilter::Single(label),
             bounds,
         )?,
         None => None,
@@ -459,7 +535,7 @@ mod tests {
     async fn seeded(
         persisted: &[Event],
         live_events: &[Event],
-    ) -> (Arc<RwLock<TableState>>, Arc<dyn ObjectStore>) {
+    ) -> (Arc<RwLock<GraphsState>>, Arc<dyn ObjectStore>) {
         let store = memory_store();
         let mut state = TableState::new();
         if !persisted.is_empty() {
@@ -497,7 +573,11 @@ mod tests {
         for e in live_events {
             state.nodes.live.append(e.clone()).unwrap();
         }
-        (Arc::new(RwLock::new(state)), store)
+        {
+            let mut graphs = GraphsState::new();
+            graphs.graphs.insert(DEFAULT_GRAPH.to_string(), state);
+            (Arc::new(RwLock::new(graphs)), store)
+        }
     }
 
     fn names(batch: &Option<datafusion::arrow::record_batch::RecordBatch>) -> Vec<String> {
@@ -519,9 +599,18 @@ mod tests {
     #[tokio::test]
     async fn persisted_only_events_are_visible() {
         let (state, store) = seeded(&[put(1, 1, "Ada"), put(2, 2, "Bob")], &[]).await;
-        let batch = merged_snapshot(&state, &store, TableKind::Nodes, "P", &at(10), None)
-            .await
-            .unwrap();
+        let batch = merged_snapshot(
+            &state,
+            &store,
+            DEFAULT_GRAPH,
+            TableKind::Nodes,
+            LabelFilter::Single("P"),
+            &at(10),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(names(&batch), vec!["Ada", "Bob"]);
     }
 
@@ -529,14 +618,32 @@ mod tests {
     async fn live_put_supersedes_persisted_version() {
         // Cross-source resolution: the persisted "Ada" must get system_to = 5.
         let (state, store) = seeded(&[put(1, 1, "Ada")], &[put(1, 5, "Adele")]).await;
-        let now = merged_snapshot(&state, &store, TableKind::Nodes, "P", &at(10), None)
-            .await
-            .unwrap();
+        let now = merged_snapshot(
+            &state,
+            &store,
+            DEFAULT_GRAPH,
+            TableKind::Nodes,
+            LabelFilter::Single("P"),
+            &at(10),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(names(&now), vec!["Adele"]);
         // Time travel to before the live correction still sees the old version.
-        let before = merged_snapshot(&state, &store, TableKind::Nodes, "P", &at(3), None)
-            .await
-            .unwrap();
+        let before = merged_snapshot(
+            &state,
+            &store,
+            DEFAULT_GRAPH,
+            TableKind::Nodes,
+            LabelFilter::Single("P"),
+            &at(3),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(names(&before), vec!["Ada"]);
     }
 
@@ -552,13 +659,31 @@ mod tests {
             op: Op::Delete,
         };
         let (state, store) = seeded(&[put(1, 1, "Ada")], std::slice::from_ref(&delete)).await;
-        let now = merged_snapshot(&state, &store, TableKind::Nodes, "P", &at(10), None)
-            .await
-            .unwrap();
+        let now = merged_snapshot(
+            &state,
+            &store,
+            DEFAULT_GRAPH,
+            TableKind::Nodes,
+            LabelFilter::Single("P"),
+            &at(10),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(now.is_none());
-        let before = merged_snapshot(&state, &store, TableKind::Nodes, "P", &at(3), None)
-            .await
-            .unwrap();
+        let before = merged_snapshot(
+            &state,
+            &store,
+            DEFAULT_GRAPH,
+            TableKind::Nodes,
+            LabelFilter::Single("P"),
+            &at(3),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(names(&before), vec!["Ada"]);
     }
 
@@ -575,9 +700,18 @@ mod tests {
         };
         let (state, store) = seeded(&[put(1, 1, "Ada")], std::slice::from_ref(&erase)).await;
         // Even time-traveling BEFORE the erase: gone (slice-2 GDPR semantics).
-        let before = merged_snapshot(&state, &store, TableKind::Nodes, "P", &at(3), None)
-            .await
-            .unwrap();
+        let before = merged_snapshot(
+            &state,
+            &store,
+            DEFAULT_GRAPH,
+            TableKind::Nodes,
+            LabelFilter::Single("P"),
+            &at(3),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(before.is_none());
     }
 
@@ -585,9 +719,18 @@ mod tests {
     async fn iid_point_returns_only_that_entity() {
         let (state, store) =
             seeded(&[put(1, 1, "Ada"), put(2, 2, "Bob"), put(3, 3, "Cyd")], &[]).await;
-        let batch = merged_snapshot(&state, &store, TableKind::Nodes, "P", &at(10), Some(iid(2)))
-            .await
-            .unwrap();
+        let batch = merged_snapshot(
+            &state,
+            &store,
+            DEFAULT_GRAPH,
+            TableKind::Nodes,
+            LabelFilter::Single("P"),
+            &at(10),
+            Some(iid(2)),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(names(&batch), vec!["Bob"]);
     }
 
@@ -605,13 +748,30 @@ mod tests {
         let (all_live, store_a) = seeded(&[], &events).await;
         let (split, store_b) = seeded(&events[..3], &events[3..]).await;
         for bounds in [at(10), at(4), at(2)] {
-            let reference =
-                merged_snapshot(&all_live, &store_a, TableKind::Nodes, "P", &bounds, None)
-                    .await
-                    .unwrap();
-            let merged = merged_snapshot(&split, &store_b, TableKind::Nodes, "P", &bounds, None)
-                .await
-                .unwrap();
+            let reference = merged_snapshot(
+                &all_live,
+                &store_a,
+                DEFAULT_GRAPH,
+                TableKind::Nodes,
+                LabelFilter::Single("P"),
+                &bounds,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            let merged = merged_snapshot(
+                &split,
+                &store_b,
+                DEFAULT_GRAPH,
+                TableKind::Nodes,
+                LabelFilter::Single("P"),
+                &bounds,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
             assert_eq!(reference, merged);
         }
     }

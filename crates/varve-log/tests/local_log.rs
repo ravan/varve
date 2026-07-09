@@ -90,6 +90,7 @@ async fn records_round_trip_effects() {
         effects: vec![varve_log::TableEffects {
             table: "nodes".into(),
             arrow_ipc: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            graph: String::new(),
         }],
     };
     log.append(vec![record.clone()]).await.unwrap();

@@ -1,0 +1,4 @@
+CREATE GRAPH social;
+USE social;
+MATCH (p:Person) RETURN p;
+DROP GRAPH social
