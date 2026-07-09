@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use varve_storage::keys::{self, manifest_block_id, manifest_key};
-use varve_storage::{manifest_history, BlockManifest, ObjectStore, StorageError, PROBE_PREFIX};
+use varve_storage::{
+    manifest_history, BlockManifest, ObjectStore, ScopedTrieKey, StorageError, PROBE_PREFIX,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GcConfig {
@@ -95,25 +97,6 @@ pub(crate) fn plan_gc(
     GcPlan { delete_keys }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct EntryId {
-    graph: String,
-    table: String,
-    family: String,
-    trie_key: String,
-}
-
-impl EntryId {
-    fn from_manifest_entry(entry: varve_storage::manifest::ManifestTrieEntry<'_>) -> EntryId {
-        EntryId {
-            graph: entry.graph.to_string(),
-            table: entry.table.to_string(),
-            family: entry.family.to_string(),
-            trie_key: entry.entry.trie_key.clone(),
-        }
-    }
-}
-
 fn protect_unexpired_garbage(
     manifests: &[&BlockManifest],
     latest_time_us: i64,
@@ -125,11 +108,11 @@ fn protect_unexpired_garbage(
     };
     let latest_entries: BTreeSet<_> = latest
         .trie_entries()
-        .map(EntryId::from_manifest_entry)
+        .map(|entry| entry.scoped_trie_key())
         .collect();
     let mut last_present = BTreeMap::new();
     for (idx, manifest) in manifests.iter().enumerate() {
-        for entry in manifest.trie_entries().map(EntryId::from_manifest_entry) {
+        for entry in manifest.trie_entries().map(|entry| entry.scoped_trie_key()) {
             last_present.insert(entry, idx);
         }
     }
@@ -151,24 +134,14 @@ fn protect_unexpired_garbage(
 }
 
 fn protect_manifest_entries(manifest: &BlockManifest, protected: &mut BTreeSet<String>) {
-    for entry in manifest.trie_entries().map(EntryId::from_manifest_entry) {
+    for entry in manifest.trie_entries().map(|entry| entry.scoped_trie_key()) {
         protect_entry(&entry, protected);
     }
 }
 
-fn protect_entry(entry: &EntryId, protected: &mut BTreeSet<String>) {
-    protected.insert(keys::data_key_for_family(
-        &entry.graph,
-        &entry.table,
-        &entry.family,
-        &entry.trie_key,
-    ));
-    protected.insert(keys::meta_key_for_family(
-        &entry.graph,
-        &entry.table,
-        &entry.family,
-        &entry.trie_key,
-    ));
+fn protect_entry(entry: &ScopedTrieKey, protected: &mut BTreeSet<String>) {
+    protected.insert(entry.data_key());
+    protected.insert(entry.meta_key());
 }
 
 fn should_delete_key(

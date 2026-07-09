@@ -28,6 +28,79 @@ pub const TRIE_BRANCH_FACTOR: u8 = 1 << TRIE_LEVEL_BITS;
 pub const LOG_LIMIT: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TableScope {
+    pub graph: String,
+    pub table: String,
+    pub family: String,
+}
+
+impl TableScope {
+    pub fn new(
+        graph: impl Into<String>,
+        table: impl Into<String>,
+        family: impl Into<String>,
+    ) -> TableScope {
+        TableScope {
+            graph: graph.into(),
+            table: table.into(),
+            family: family.into(),
+        }
+    }
+
+    pub fn data_key(&self, trie_key: &str) -> String {
+        if self.family.is_empty() {
+            data_key(&self.graph, &self.table, trie_key)
+        } else {
+            adj_data_key(&self.graph, &self.table, &self.family, trie_key)
+        }
+    }
+
+    pub fn meta_key(&self, trie_key: &str) -> String {
+        if self.family.is_empty() {
+            meta_key(&self.graph, &self.table, trie_key)
+        } else {
+            adj_meta_key(&self.graph, &self.table, &self.family, trie_key)
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ScopedTrieKey {
+    pub scope: TableScope,
+    pub trie_key: String,
+}
+
+impl ScopedTrieKey {
+    pub fn new(scope: TableScope, trie_key: impl Into<String>) -> ScopedTrieKey {
+        ScopedTrieKey {
+            scope,
+            trie_key: trie_key.into(),
+        }
+    }
+
+    pub fn data_key(&self) -> String {
+        self.scope.data_key(&self.trie_key)
+    }
+
+    pub fn meta_key(&self) -> String {
+        self.scope.meta_key(&self.trie_key)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TrieKeyShard {
+    pub level: u64,
+    pub recency: Recency,
+    pub part: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TrieShard {
+    pub scope: TableScope,
+    pub key_shard: TrieKeyShard,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Recency {
     Current,
     Week { yyyymmdd: u32 },
@@ -63,6 +136,14 @@ impl TrieKey {
             recency: self.recency.clone(),
             part,
             block,
+        }
+    }
+
+    pub fn shard(&self) -> TrieKeyShard {
+        TrieKeyShard {
+            level: self.level,
+            recency: self.recency.clone(),
+            part: self.part.clone(),
         }
     }
 
@@ -234,19 +315,11 @@ pub fn adj_meta_key(graph: &str, table: &str, family: &str, trie_key: &str) -> S
 }
 
 pub fn data_key_for_family(graph: &str, table: &str, family: &str, trie_key: &str) -> String {
-    if family.is_empty() {
-        data_key(graph, table, trie_key)
-    } else {
-        adj_data_key(graph, table, family, trie_key)
-    }
+    TableScope::new(graph, table, family).data_key(trie_key)
 }
 
 pub fn meta_key_for_family(graph: &str, table: &str, family: &str, trie_key: &str) -> String {
-    if family.is_empty() {
-        meta_key(graph, table, trie_key)
-    } else {
-        adj_meta_key(graph, table, family, trie_key)
-    }
+    TableScope::new(graph, table, family).meta_key(trie_key)
 }
 
 pub const MANIFEST_PREFIX: &str = "v1/blocks";

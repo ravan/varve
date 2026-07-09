@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use varve_storage::keys::manifest_key;
 use varve_storage::{
-    manifest_history, memory_store, BlockManifest, TableTries, TrieCatalog, TrieEntry,
+    manifest_history, memory_store, BlockManifest, TableScope, TableTries, TrieCatalog, TrieEntry,
 };
 
 fn entry(key: &str) -> TrieEntry {
@@ -32,14 +32,13 @@ fn keys(entries: Vec<TrieEntry>) -> Vec<String> {
 }
 
 fn live_keys(catalog: &TrieCatalog, graph: &str, table: &str, family: &str) -> Vec<String> {
+    let scope = TableScope::new(graph, table, family);
     keys(
         catalog
             .live_entries()
             .into_iter()
-            .filter(|(entry_graph, entry_table, entry_family, _)| {
-                entry_graph == graph && entry_table == table && entry_family == family
-            })
-            .map(|(_, _, _, entry)| entry)
+            .filter(|entry| entry.scope == scope)
+            .map(|entry| entry.entry)
             .collect(),
     )
 }
