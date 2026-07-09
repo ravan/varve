@@ -12,6 +12,8 @@ pub enum StorageError {
     Io(#[from] std::io::Error),
     #[error("manifest decode failed: {0}")]
     Decode(#[from] prost::DecodeError),
+    #[error("invalid storage key: {0}")]
+    InvalidKey(String),
 }
 
 /// Maps a backend error, preserving the key when it was not found.
@@ -59,8 +61,8 @@ pub trait ConditionalStore: Send + Sync {
 }
 
 /// Varve's object-store interface (spec §4, §9). Sovereignty (spec §1, D7):
-/// nothing beyond plain S3 semantics — put/get/list only; no conditional
-/// PUT, no delete (GC arrives in slice 8). `put` is atomic: readers see the
+/// nothing beyond plain S3 semantics — put/get/list/delete only; no conditional
+/// PUT. `put` is atomic: readers see the
 /// whole object or none (the manifest commit point relies on this).
 #[async_trait::async_trait]
 pub trait ObjectStore: Send + Sync {
@@ -74,6 +76,8 @@ pub trait ObjectStore: Send + Sync {
     /// lexicographically. Prefixes match whole path segments only, so
     /// `"v1/a"` matches `"v1/a/one"` but not `"v1/ab/one"`.
     async fn list(&self, prefix: &str) -> Result<Vec<String>, StorageError>;
+    /// Deletes an object. Missing keys are success so GC can retry safely.
+    async fn delete(&self, key: &str) -> Result<(), StorageError>;
     /// The optional conditional-write surface, if this backend has one.
     /// Default: none — custom embedder stores need change nothing.
     fn conditional(&self) -> Option<&dyn ConditionalStore> {
@@ -123,6 +127,15 @@ impl<T: object_store::ObjectStore> ObjectStore for T {
         let mut keys: Vec<String> = metas.into_iter().map(|m| m.location.to_string()).collect();
         keys.sort();
         Ok(keys)
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), StorageError> {
+        let path = object_store::path::Path::from(key);
+        match object_store::ObjectStoreExt::delete(self, &path).await {
+            Ok(()) => Ok(()),
+            Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(e) => Err(convert(key, e)),
+        }
     }
 
     fn conditional(&self) -> Option<&dyn ConditionalStore> {

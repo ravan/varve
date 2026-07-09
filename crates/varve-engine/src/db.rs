@@ -1,5 +1,10 @@
 use crate::clock::{Clock, MonotonicClock};
+use crate::compact::{
+    select_compaction_jobs, write_compacted_blocks, CompactionConfig, CompactionInputBlock,
+    CompactionReport,
+};
 use crate::const_eval::const_value;
+use crate::gc::{execute_gc, GcConfig, GcReport};
 use crate::registries::Registries;
 use crate::scan::merged_snapshot;
 use crate::state::{
@@ -17,11 +22,12 @@ use tokio::sync::{mpsc, oneshot};
 use varve_config::{BuildContext, Config, ConfigError, ConfigSection, RegistryError};
 use varve_gql::ast::{Expr, LabelSpec, QueryBody, Statement};
 use varve_gql::token::GqlError;
-use varve_index::{decode_events, Event, IndexError, LabelFilter, LiveTable, Op};
+use varve_index::{decode_events, Event, IndexError, LabelFilter, LiveTable, Op, SortOrder};
 use varve_log::{LocalLog, Log, LogError, MemoryLog, DEFAULT_SEGMENT_MAX_BYTES};
 use varve_plan::PlanError;
 use varve_storage::{
-    memory_store, CachedStore, MemoryCache, ObjectStore, ProbeReport, StorageError,
+    keys, manifest_history, memory_store, BlockManifest, CachedStore, MemoryCache, ObjectStore,
+    ProbeReport, StorageError, TableTries, TrieCatalog, TrieEntry,
 };
 use varve_types::{Instant, LogPosition, TemporalBounds, TypeError, Value};
 
@@ -205,6 +211,36 @@ impl Default for QueryTuning {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct GcTuning {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_gc_blocks_to_keep")]
+    blocks_to_keep: u64,
+    #[serde(default = "default_gc_garbage_lifetime_hours")]
+    garbage_lifetime_hours: i64,
+}
+
+fn default_gc_blocks_to_keep() -> u64 {
+    10
+}
+
+fn default_gc_garbage_lifetime_hours() -> i64 {
+    24
+}
+
+impl GcTuning {
+    fn into_config(self) -> GcConfig {
+        GcConfig {
+            enabled: self.enabled,
+            blocks_to_keep: self.blocks_to_keep,
+            garbage_lifetime_us: self
+                .garbage_lifetime_hours
+                .saturating_mul(60 * 60 * 1_000_000),
+        }
+    }
+}
+
 fn match_bounds(
     query_temporal: &varve_gql::ast::TemporalClauses,
     match_temporal: &varve_gql::ast::TemporalClauses,
@@ -295,6 +331,7 @@ pub struct Db {
     clock: Arc<dyn Clock>,
     submit: mpsc::Sender<Submission>,
     functions: Arc<varve_plan::FunctionRegistry>,
+    gc_config: GcConfig,
     /// Cap on quantified-hop expansion length (spec §10, `[query]
     /// max_path_depth`); an unbounded `*`/`{m,}` quantifier is lowered to this
     /// depth. Task 9 consumes it during expansion; Task 8 already validates
@@ -323,6 +360,77 @@ impl std::fmt::Debug for Db {
 /// [`Db::plan_fast_path`] when the query's shape is provably coverable. It is a
 /// pruned-but-complete drop-in for the full-scan input, never a replacement:
 /// when `plan_fast_path` returns `None`, `query` uses the full scan verbatim.
+fn compaction_sort_order(table: &str, family: &str) -> Result<SortOrder, EngineError> {
+    match (table, family) {
+        (NODES_TABLE, "") | (EDGES_TABLE, "") => Ok(SortOrder::ByIid),
+        (EDGES_TABLE, varve_storage::ADJ_OUT) => Ok(SortOrder::BySrc),
+        (EDGES_TABLE, varve_storage::ADJ_IN) => Ok(SortOrder::ByDst),
+        _ => Err(EngineError::UnknownTable(format!("{table}/{family}"))),
+    }
+}
+
+fn compaction_data_key(graph: &str, table: &str, family: &str, trie_key: &str) -> String {
+    if family.is_empty() {
+        keys::data_key(graph, table, trie_key)
+    } else {
+        keys::adj_data_key(graph, table, family, trie_key)
+    }
+}
+
+fn compaction_meta_key(graph: &str, table: &str, family: &str, trie_key: &str) -> String {
+    if family.is_empty() {
+        keys::meta_key(graph, table, trie_key)
+    } else {
+        keys::adj_meta_key(graph, table, family, trie_key)
+    }
+}
+
+fn sort_entries(entries: &mut [TrieEntry]) {
+    entries.sort_by(|a, b| a.trie_key.cmp(&b.trie_key));
+}
+
+fn compacted_manifest(
+    latest: &BlockManifest,
+    job: &crate::compact::CompactionJob,
+    output_entries: Vec<TrieEntry>,
+) -> BlockManifest {
+    let input_keys = job
+        .input_trie_keys
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut tables = latest.tables.clone();
+    let mut replaced = false;
+    for table in &mut tables {
+        if table.graph == job.graph && table.table == job.table && table.family == job.family {
+            table
+                .tries
+                .retain(|entry| !input_keys.contains(&entry.trie_key));
+            table.tries.extend(output_entries.clone());
+            sort_entries(&mut table.tries);
+            replaced = true;
+            break;
+        }
+    }
+    if !replaced && !output_entries.is_empty() {
+        let mut tries = output_entries;
+        sort_entries(&mut tries);
+        tables.push(TableTries {
+            graph: job.graph.clone(),
+            table: job.table.clone(),
+            family: job.family.clone(),
+            tries,
+        });
+    }
+    BlockManifest {
+        block_id: latest.block_id + 1,
+        watermark: latest.watermark,
+        max_tx_id: latest.max_tx_id,
+        max_system_time_us: latest.max_system_time_us,
+        tables,
+    }
+}
+
 pub(crate) enum FastPath {
     /// Fixed homogeneous path (all hops `Edge`, one label + direction, no
     /// inline edge props, no edge var referenced): the shared reachable-edge
@@ -591,6 +699,7 @@ impl Db {
             LogPosition::ZERO,
             default_max_path_depth(),
             QueryTuning::default().limits(),
+            GcConfig::default(),
         )
     }
 
@@ -606,6 +715,7 @@ impl Db {
         durable_watermark: LogPosition,
         max_path_depth: u32,
         query_limits: varve_plan::QueryLimits,
+        gc_config: GcConfig,
     ) -> Db {
         let state = Arc::new(RwLock::new(graphs_state));
         let functions = Arc::new(varve_plan::FunctionRegistry::with_builtins());
@@ -628,6 +738,7 @@ impl Db {
             clock,
             submit,
             functions,
+            gc_config,
             max_path_depth,
             query_limits,
         }
@@ -690,6 +801,8 @@ impl Db {
         let storage_tuning: StorageTuning = storage_section.get()?;
         let query_section = config.section("query").unwrap_or_else(ConfigSection::empty);
         let query_tuning: QueryTuning = query_section.get()?;
+        let gc_section = config.section("gc").unwrap_or_else(ConfigSection::empty);
+        let gc_config = gc_section.get::<GcTuning>()?.into_config();
         let cfg = WriterConfig {
             window: Duration::from_millis(log_tuning.group_commit_window_ms),
             max_bytes: log_tuning.group_commit_max_bytes,
@@ -708,6 +821,7 @@ impl Db {
             recovered.watermark,
             query_tuning.max_path_depth,
             query_tuning.limits(),
+            gc_config,
         ))
     }
 
@@ -733,12 +847,136 @@ impl Db {
             recovered.watermark,
             default_max_path_depth(),
             QueryTuning::default().limits(),
+            GcConfig::default(),
         ))
     }
 
     /// Executes a mutation statement (INSERT, MATCH … DELETE): parses here,
     /// resolves and commits inside the writer loop, and returns once the tx
     /// is durable AND visible.
+    pub async fn compact_once(&self) -> Result<CompactionReport, EngineError> {
+        let history = manifest_history(self.store.as_ref()).await?;
+        let Some(latest) = history.iter().max_by_key(|manifest| manifest.block_id) else {
+            return Ok(CompactionReport::default());
+        };
+        let catalog = TrieCatalog::from_manifests(&history)?;
+        let mut jobs = select_compaction_jobs(&catalog, &CompactionConfig::default())?;
+        let Some(job) = jobs.drain(..).next() else {
+            return Ok(CompactionReport::default());
+        };
+        let order = compaction_sort_order(&job.table, &job.family)?;
+
+        let mut inputs = Vec::with_capacity(job.input_trie_keys.len());
+        for trie_key in &job.input_trie_keys {
+            let data = self
+                .store
+                .get(&compaction_data_key(
+                    &job.graph,
+                    &job.table,
+                    &job.family,
+                    trie_key,
+                ))
+                .await?;
+            let meta = self
+                .store
+                .get(&compaction_meta_key(
+                    &job.graph,
+                    &job.table,
+                    &job.family,
+                    trie_key,
+                ))
+                .await?;
+            inputs.push(CompactionInputBlock {
+                trie_key: trie_key.clone(),
+                data: data.to_vec(),
+                pages: varve_index::decode_meta(&meta)?,
+            });
+        }
+        let input_rows = inputs
+            .iter()
+            .flat_map(|input| &input.pages)
+            .map(|page| page.rows)
+            .sum();
+
+        let compacted = write_compacted_blocks(&job, &inputs, order, crate::flush::PAGE_ROWS)?;
+        let mut output_entries = Vec::with_capacity(compacted.len());
+        let mut persisted = Vec::with_capacity(compacted.len());
+        for output in compacted {
+            let trie_key = output.trie_key.to_key_string();
+            let row_count = output.encoded.pages.iter().map(|page| page.rows).sum();
+            let entry = TrieEntry {
+                trie_key: trie_key.clone(),
+                row_count,
+                data_len: output.encoded.data.len() as u64,
+            };
+            self.store
+                .put(
+                    &compaction_data_key(&job.graph, &job.table, &job.family, &trie_key),
+                    bytes::Bytes::from(output.encoded.data.clone()),
+                )
+                .await?;
+            self.store
+                .put(
+                    &compaction_meta_key(&job.graph, &job.table, &job.family, &trie_key),
+                    bytes::Bytes::from(output.encoded.meta.clone()),
+                )
+                .await?;
+            persisted.push(PersistedTrie {
+                entry: entry.clone(),
+                pages: Arc::new(output.encoded.pages),
+            });
+            output_entries.push(entry);
+        }
+
+        let output_rows = output_entries.iter().map(|entry| entry.row_count).sum();
+        let manifest = compacted_manifest(latest, &job, output_entries.clone());
+        self.store
+            .put(
+                &keys::manifest_key(manifest.block_id),
+                bytes::Bytes::from(manifest.to_wire()),
+            )
+            .await?;
+
+        {
+            let input_keys = job
+                .input_trie_keys
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut state = self.state.write().map_err(|_| EngineError::Poisoned)?;
+            let table = state
+                .graph_mut(&job.graph)
+                .ok_or_else(|| EngineError::UnknownGraph(job.graph.clone()))?;
+            let tries = match (job.table.as_str(), job.family.as_str()) {
+                (NODES_TABLE, "") => &mut table.nodes.tries,
+                (EDGES_TABLE, "") => &mut table.edges.tries,
+                (EDGES_TABLE, varve_storage::ADJ_OUT) => &mut table.adj_out,
+                (EDGES_TABLE, varve_storage::ADJ_IN) => &mut table.adj_in,
+                _ => {
+                    return Err(EngineError::UnknownTable(format!(
+                        "{}/{}/{}",
+                        job.graph, job.table, job.family
+                    )))
+                }
+            };
+            tries.retain(|trie| !input_keys.contains(&trie.entry.trie_key));
+            tries.extend(persisted);
+            tries.sort_by(|a, b| a.entry.trie_key.cmp(&b.entry.trie_key));
+        }
+
+        Ok(CompactionReport {
+            jobs: 1,
+            input_tries: job.input_trie_keys.len(),
+            output_tries: output_entries.len(),
+            input_rows,
+            output_rows,
+        })
+    }
+
+    pub async fn gc_once(&self) -> Result<GcReport, EngineError> {
+        Ok(execute_gc(&self.store, &self.gc_config).await?)
+    }
+
     pub async fn execute(&self, gql: &str) -> Result<TxReceipt, EngineError> {
         let params = BTreeMap::new();
         self.execute_with(gql, &params).await

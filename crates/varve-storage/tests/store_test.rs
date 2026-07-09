@@ -116,6 +116,17 @@ async fn exercise(store: Arc<dyn ObjectStore>) {
         vec!["v1/a/one".to_string(), "v1/a/two".to_string()]
     );
     assert_eq!(store.list("v1/absent").await.unwrap(), Vec::<String>::new());
+
+    store.delete("v1/a/one").await.unwrap();
+    assert!(matches!(
+        store.get("v1/a/one").await,
+        Err(StorageError::NotFound(k)) if k == "v1/a/one"
+    ));
+    store.delete("v1/a/one").await.unwrap();
+    assert_eq!(
+        store.list("v1/a").await.unwrap(),
+        vec!["v1/a/two".to_string()]
+    );
 }
 
 #[tokio::test]

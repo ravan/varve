@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod catalog;
 pub mod disk;
 pub mod keys;
 pub mod local;
@@ -10,10 +11,11 @@ pub mod s3;
 pub mod store;
 
 pub use cache::{CacheKey, CacheTier, CachedStore, MemoryCache, MemoryCacheFactory};
+pub use catalog::{TrieCatalog, TrieState};
 pub use disk::{DiskCache, DiskCacheFactory};
 pub use keys::{adj_data_key, adj_meta_key, ADJ_IN, ADJ_OUT};
 pub use local::{local_store, LocalStoreFactory};
-pub use manifest::{latest_manifest, BlockManifest, TableTries, TrieEntry};
+pub use manifest::{latest_manifest, manifest_history, BlockManifest, TableTries, TrieEntry};
 pub use memory::{memory_store, MemoryStoreFactory};
 pub use probe::{probe_conditional_put, ProbeReport, ProbeVerdict, PROBE_PREFIX};
 #[cfg(feature = "s3")]

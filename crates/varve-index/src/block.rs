@@ -8,8 +8,9 @@ use crate::codec::{downcast, encode_events};
 use crate::event::{Event, Op};
 use crate::live::{IndexError, LiveTable};
 use arrow::array::{
-    ArrayRef, BooleanArray, BooleanBuilder, FixedSizeBinaryArray, FixedSizeBinaryBuilder,
-    TimestampMicrosecondArray, TimestampMicrosecondBuilder, UInt64Array, UInt64Builder,
+    ArrayRef, BinaryArray, BinaryBuilder, BooleanArray, BooleanBuilder, FixedSizeBinaryArray,
+    FixedSizeBinaryBuilder, TimestampMicrosecondArray, TimestampMicrosecondBuilder, UInt64Array,
+    UInt64Builder,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::ipc::reader::StreamReader;
@@ -24,8 +25,9 @@ pub const DEFAULT_PAGE_ROWS: usize = 1024;
 
 /// One page's entry in the meta file: byte range in the data file plus the
 /// stats the scan prunes by.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PageMeta {
+    pub path: Vec<u8>,
     pub offset: u64,
     pub len: u64,
     pub rows: u64,
@@ -55,6 +57,9 @@ impl PageMeta {
     ///   introspection). Valid stats are recorded for slice 8.
     pub fn selected(&self, bounds: &TemporalBounds, iid_point: Option<&Iid>) -> bool {
         if let Some(iid) = iid_point {
+            if !self.path.is_empty() && !varve_storage::keys::Bucketer::contains(&self.path, iid) {
+                return false;
+            }
             if *iid < self.min_iid || *iid > self.max_iid {
                 return false;
             }
@@ -158,10 +163,56 @@ pub fn encode_block_by(
     Ok(EncodedBlock { data, meta, pages })
 }
 
+/// Serializes rows already ordered for a compacted trie output.
+///
+/// `rows` must be sorted by `(sort_key asc, _iid asc, _system_from desc)`.
+/// This helper exists so compaction can preserve deterministic merge order
+/// without rebuilding a `LiveTable`, while still sharing the exact page/meta
+/// codec used by ordinary flushes.
+pub fn encode_sorted_events_by(
+    rows: &[Event],
+    page_rows: usize,
+    order: SortOrder,
+    path: &[u8],
+) -> Result<EncodedBlock, IndexError> {
+    let mut keys = Vec::with_capacity(rows.len());
+    for event in rows {
+        let key = match order {
+            SortOrder::ByIid => event.iid,
+            SortOrder::BySrc => event.src.ok_or_else(|| {
+                IndexError::Codec("edge event missing src endpoint in adjacency encode".into())
+            })?,
+            SortOrder::ByDst => event.dst.ok_or_else(|| {
+                IndexError::Codec("edge event missing dst endpoint in adjacency encode".into())
+            })?,
+        };
+        keys.push(key);
+    }
+
+    let mut data = Vec::new();
+    let mut pages = Vec::new();
+    let chunk = page_rows.max(1);
+    for (i, events) in rows.chunks(chunk).enumerate() {
+        let offset = data.len() as u64;
+        let bytes = encode_events(events)?;
+        data.extend_from_slice(&bytes);
+        let key_chunk = &keys[i * chunk..i * chunk + events.len()];
+        let mut meta = page_meta(events, offset, bytes.len() as u64);
+        meta.path = path.to_vec();
+        meta.min_iid = *key_chunk.iter().min().unwrap_or(&meta.min_iid);
+        meta.max_iid = *key_chunk.iter().max().unwrap_or(&meta.max_iid);
+        pages.push(meta);
+    }
+
+    let meta = encode_meta(&pages)?;
+    Ok(EncodedBlock { data, meta, pages })
+}
+
 /// Stats over one page's events. `chunks()` never yields an empty slice.
 fn page_meta(events: &[Event], offset: u64, len: u64) -> PageMeta {
     let first = &events[0];
     let mut meta = PageMeta {
+        path: Vec::new(),
         offset,
         len,
         rows: events.len() as u64,
@@ -195,6 +246,7 @@ fn meta_schema() -> Arc<Schema> {
         Field::new("offset", DataType::UInt64, false),
         Field::new("len", DataType::UInt64, false),
         Field::new("rows", DataType::UInt64, false),
+        Field::new("path", DataType::Binary, false),
         Field::new("min_iid", DataType::FixedSizeBinary(16), false),
         Field::new("max_iid", DataType::FixedSizeBinary(16), false),
         Field::new("min_system_from", ts(), false),
@@ -215,6 +267,7 @@ fn encode_meta(pages: &[PageMeta]) -> Result<Vec<u8>, IndexError> {
         let mut offset_b = UInt64Builder::new();
         let mut len_b = UInt64Builder::new();
         let mut rows_b = UInt64Builder::new();
+        let mut path_b = BinaryBuilder::new();
         let mut min_iid_b = FixedSizeBinaryBuilder::new(16);
         let mut max_iid_b = FixedSizeBinaryBuilder::new(16);
         let ts_builder = || TimestampMicrosecondBuilder::new().with_timezone("UTC");
@@ -229,6 +282,7 @@ fn encode_meta(pages: &[PageMeta]) -> Result<Vec<u8>, IndexError> {
             offset_b.append_value(p.offset);
             len_b.append_value(p.len);
             rows_b.append_value(p.rows);
+            path_b.append_value(&p.path);
             min_iid_b.append_value(p.min_iid.as_bytes())?;
             max_iid_b.append_value(p.max_iid.as_bytes())?;
             min_sf_b.append_value(p.min_system_from.as_micros());
@@ -243,6 +297,7 @@ fn encode_meta(pages: &[PageMeta]) -> Result<Vec<u8>, IndexError> {
             Arc::new(offset_b.finish()),
             Arc::new(len_b.finish()),
             Arc::new(rows_b.finish()),
+            Arc::new(path_b.finish()),
             Arc::new(min_iid_b.finish()),
             Arc::new(max_iid_b.finish()),
             Arc::new(min_sf_b.finish()),
@@ -272,15 +327,16 @@ pub fn decode_meta(bytes: &[u8]) -> Result<Vec<PageMeta>, IndexError> {
         let offset = downcast::<UInt64Array>(&batch, 0)?;
         let len = downcast::<UInt64Array>(&batch, 1)?;
         let rows = downcast::<UInt64Array>(&batch, 2)?;
-        let min_iid = downcast::<FixedSizeBinaryArray>(&batch, 3)?;
-        let max_iid = downcast::<FixedSizeBinaryArray>(&batch, 4)?;
-        let min_sf = downcast::<TimestampMicrosecondArray>(&batch, 5)?;
-        let max_sf = downcast::<TimestampMicrosecondArray>(&batch, 6)?;
-        let min_vf = downcast::<TimestampMicrosecondArray>(&batch, 7)?;
-        let max_vf = downcast::<TimestampMicrosecondArray>(&batch, 8)?;
-        let min_vt = downcast::<TimestampMicrosecondArray>(&batch, 9)?;
-        let max_vt = downcast::<TimestampMicrosecondArray>(&batch, 10)?;
-        let has_erase = downcast::<BooleanArray>(&batch, 11)?;
+        let path = downcast::<BinaryArray>(&batch, 3)?;
+        let min_iid = downcast::<FixedSizeBinaryArray>(&batch, 4)?;
+        let max_iid = downcast::<FixedSizeBinaryArray>(&batch, 5)?;
+        let min_sf = downcast::<TimestampMicrosecondArray>(&batch, 6)?;
+        let max_sf = downcast::<TimestampMicrosecondArray>(&batch, 7)?;
+        let min_vf = downcast::<TimestampMicrosecondArray>(&batch, 8)?;
+        let max_vf = downcast::<TimestampMicrosecondArray>(&batch, 9)?;
+        let min_vt = downcast::<TimestampMicrosecondArray>(&batch, 10)?;
+        let max_vt = downcast::<TimestampMicrosecondArray>(&batch, 11)?;
+        let has_erase = downcast::<BooleanArray>(&batch, 12)?;
         for row in 0..batch.num_rows() {
             let iid_at = |arr: &FixedSizeBinaryArray, i: usize| -> Result<Iid, IndexError> {
                 let bytes: [u8; 16] = arr
@@ -290,6 +346,7 @@ pub fn decode_meta(bytes: &[u8]) -> Result<Vec<PageMeta>, IndexError> {
                 Ok(Iid::from_bytes(bytes))
             };
             pages.push(PageMeta {
+                path: path.value(row).to_vec(),
                 offset: offset.value(row),
                 len: len.value(row),
                 rows: rows.value(row),
