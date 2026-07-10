@@ -434,6 +434,43 @@ async fn configured_path_row_budget_limits_path_expand() {
 }
 
 #[tokio::test]
+async fn configured_path_row_budget_applies_to_match_where_exists() {
+    let db = Db::open(
+        Config::from_toml_str(
+            r#"
+            [query]
+            max_path_depth = 4
+            path_row_budget = 3
+            path_frontier_budget = 100
+            "#,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    db.execute("INSERT (:P {_id: 1}), (:P {_id: 2}), (:P {_id: 3})")
+        .await
+        .unwrap();
+    for (src, dst) in [(1, 2), (1, 3), (2, 1), (3, 1)] {
+        db.execute(&format!(
+            "MATCH (a:P {{_id: {src}}}), (b:P {{_id: {dst}}}) INSERT (a)-[:K]->(b)"
+        ))
+        .await
+        .unwrap();
+    }
+
+    let err = db
+        .query(
+            "MATCH (a:P) WHERE a._id = 1 AND EXISTS { (a)-[:K]->{1,2}(b:P) } \
+             RETURN a._id AS id",
+        )
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("PathExpand row limit"), "{err}");
+}
+
+#[tokio::test]
 async fn configured_traversal_node_budget_limits_anchored_reachable_bfs() {
     let db = Db::open(
         Config::from_toml_str(

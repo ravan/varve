@@ -63,6 +63,7 @@ pub fn lower_expr(
         Expr::Param(name) => params
             .get(name)
             .map(value_to_df_literal)
+            .transpose()?
             .ok_or_else(|| PlanError::MissingParam(name.clone())),
         Expr::Prop { var, prop } => {
             let Some(cols) = scope.element(var) else {
@@ -185,12 +186,12 @@ fn lower_fn_call(
 ) -> Result<DfExpr, PlanError> {
     if distinct {
         return Err(PlanError::Unsupported(format!(
-            "DISTINCT function call {name} lands in aggregate lowering"
+            "DISTINCT is only supported for aggregate calls in RETURN: {name}"
         )));
     }
     if functions.is_aggregate(name) {
         return Err(PlanError::Unsupported(format!(
-            "aggregate function {name} lands in slice 7 task 8"
+            "aggregate function {name} is only supported in RETURN"
         )));
     }
     let Some(function) = functions.scalar(name) else {
@@ -203,9 +204,13 @@ fn lower_fn_call(
     for arg in args {
         lowered.push(lower_expr(arg, scope, params, functions)?);
     }
+    call_scalar(function, lowered)
+}
+
+fn call_scalar(function: &ScalarFn, args: Vec<DfExpr>) -> Result<DfExpr, PlanError> {
     match function {
-        ScalarFn::Udf(udf) => Ok(udf.call(lowered)),
-        ScalarFn::Builder(builder) => builder(lowered),
+        ScalarFn::Udf(udf) => Ok(udf.call(args)),
+        ScalarFn::Builder(builder) => builder(args),
     }
 }
 
@@ -276,10 +281,21 @@ fn lower_binary(
         BinaryOp::And => Ok(lhs.and(rhs)),
         BinaryOp::Or => Ok(lhs.or(rhs)),
         BinaryOp::Xor => Ok(lhs.not_eq(rhs)),
-        BinaryOp::In => unreachable!("handled before lowering rhs"),
-        BinaryOp::StartsWith | BinaryOp::EndsWith | BinaryOp::Contains => Err(
-            PlanError::Unsupported(format!("binary string operator {op:?}")),
-        ),
+        BinaryOp::In => Err(PlanError::Unsupported(
+            "internal: IN reached ordinary binary lowering".into(),
+        )),
+        BinaryOp::StartsWith | BinaryOp::EndsWith | BinaryOp::Contains => {
+            let name = match op {
+                BinaryOp::StartsWith => "starts_with",
+                BinaryOp::EndsWith => "ends_with",
+                BinaryOp::Contains => "contains",
+                _ => return Err(PlanError::Unsupported("internal: string operator".into())),
+            };
+            let function = functions
+                .scalar(name)
+                .ok_or_else(|| PlanError::UnknownFunction(name.to_string()))?;
+            call_scalar(function, vec![lhs, rhs])
+        }
     }
 }
 
@@ -414,15 +430,19 @@ fn expr_to_iid_value(expr: &Expr, params: &BTreeMap<String, Value>) -> Option<Va
     }
 }
 
-fn value_to_df_literal(value: &Value) -> DfExpr {
-    match value {
+fn value_to_df_literal(value: &Value) -> Result<DfExpr, PlanError> {
+    Ok(match value {
         Value::Null => lit(ScalarValue::Null),
         Value::Bool(b) => lit(*b),
         Value::Int(i) => lit(*i),
         Value::Float(f) => lit(*f),
         Value::Str(s) => lit(s.clone()),
-        Value::Bytes(bytes) => lit(bytes.clone()),
-    }
+        Value::Bytes(_) => {
+            return Err(PlanError::Unsupported(
+                "byte-array parameters are not supported in expressions".into(),
+            ));
+        }
+    })
 }
 
 fn literal_value(lit: &Literal) -> Value {

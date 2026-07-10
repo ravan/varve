@@ -20,7 +20,7 @@ use crate::state::{
 };
 use bytes::Bytes;
 use datafusion::arrow::array::{
-    Array, BinaryArray, BooleanArray, FixedSizeBinaryArray, Float64Array, Int64Array, StringArray,
+    Array, BinaryArray, BooleanArray, Float64Array, Int64Array, StringArray,
 };
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -211,7 +211,7 @@ fn stored_labels(labels: &LabelSpec) -> Result<Vec<String>, EngineError> {
     match labels {
         LabelSpec::All(labels) => Ok(labels.clone()),
         LabelSpec::Any(_) => Err(EngineError::Unsupported(
-            "label alternation execution lands in Task 10".into(),
+            "label alternation is not supported when writing labels".into(),
         )),
     }
 }
@@ -804,11 +804,12 @@ async fn resolve_match_part(
         overlay,
     )
     .await?;
-    let rows = varve_plan::binding_rows(
+    let rows = varve_plan::binding_rows_with_limits(
         &body,
         &clause_specs,
         inputs,
         state.functions.as_ref(),
+        state.query_limits.path_expand,
         params,
         &vars,
     )
@@ -938,30 +939,6 @@ async fn resolve_match_projection(
     Ok((batches, vars, kinds))
 }
 
-fn iid_from_batch(
-    batch: &RecordBatch,
-    var: &str,
-    row_idx: usize,
-) -> Result<Option<Iid>, EngineError> {
-    let (idx, _) = batch
-        .schema()
-        .column_with_name(var)
-        .ok_or_else(|| EngineError::UnboundVariable(var.to_string()))?;
-    let col = batch
-        .column(idx)
-        .as_any()
-        .downcast_ref::<FixedSizeBinaryArray>()
-        .ok_or_else(|| EngineError::Unsupported(format!("binding column {var} not an iid")))?;
-    if col.is_null(row_idx) {
-        return Ok(None);
-    }
-    let bytes: [u8; 16] = col
-        .value(row_idx)
-        .try_into()
-        .map_err(|_| EngineError::Unsupported("binding iid width".into()))?;
-    Ok(Some(Iid::from_bytes(bytes)))
-}
-
 fn row_bindings(
     batch: &RecordBatch,
     vars: &[String],
@@ -969,7 +946,7 @@ fn row_bindings(
 ) -> Result<HashMap<String, Iid>, EngineError> {
     let mut row = HashMap::new();
     for var in vars {
-        if let Some(iid) = iid_from_batch(batch, var, row_idx)? {
+        if let Some(iid) = varve_plan::binding_iid(batch, var, row_idx)? {
             row.insert(var.clone(), iid);
         }
     }
@@ -1435,51 +1412,65 @@ async fn resolve_set(
         system: TemporalDimension::at(system),
     };
     let mut pending = BTreeMap::new();
+    let mut ordered_rows = Vec::new();
 
-    for batch in &batches {
+    for (batch_idx, batch) in batches.iter().enumerate() {
         for row_idx in 0..batch.num_rows() {
-            let row = row_bindings(batch, &vars, row_idx)?;
-            for (idx, item) in set.items.iter().enumerate() {
-                let var = set_item_var(item);
-                let kind = *kinds
-                    .get(var)
-                    .ok_or_else(|| EngineError::UnboundVariable(var.to_string()))?;
-                let Some(iid) = row.get(var).copied() else {
-                    continue;
-                };
-                let (src, dst) = if kind == BindingKind::Edge {
-                    let (src, dst) = edge_endpoints_from_match_row(&set.match_part, var, &row)?;
-                    (Some(src), Some(dst))
-                } else {
-                    (None, None)
-                };
-                if !ensure_pending_entity(
-                    &mut pending,
-                    state,
-                    graph,
-                    kind,
-                    iid,
-                    src,
-                    dst,
-                    &bounds,
-                    overlay,
-                )
-                .await?
-                {
-                    continue;
+            let mut iid_tuple = Vec::with_capacity(vars.len());
+            for var in &vars {
+                let iid = varve_plan::binding_iid(batch, var, row_idx)?.ok_or_else(|| {
+                    EngineError::Unsupported("SET match produced a null binding iid".into())
+                })?;
+                iid_tuple.push(iid);
+            }
+            ordered_rows.push((iid_tuple, batch_idx, row_idx));
+        }
+    }
+    ordered_rows.sort_by(|left, right| left.0.cmp(&right.0));
+
+    for (_, batch_idx, row_idx) in ordered_rows {
+        let batch = &batches[batch_idx];
+        let row = row_bindings(batch, &vars, row_idx)?;
+        for (idx, item) in set.items.iter().enumerate() {
+            let var = set_item_var(item);
+            let kind = *kinds
+                .get(var)
+                .ok_or_else(|| EngineError::UnboundVariable(var.to_string()))?;
+            let Some(iid) = row.get(var).copied() else {
+                continue;
+            };
+            let (src, dst) = if kind == BindingKind::Edge {
+                let (src, dst) = edge_endpoints_from_match_row(&set.match_part, var, &row)?;
+                (Some(src), Some(dst))
+            } else {
+                (None, None)
+            };
+            if !ensure_pending_entity(
+                &mut pending,
+                state,
+                graph,
+                kind,
+                iid,
+                src,
+                dst,
+                &bounds,
+                overlay,
+            )
+            .await?
+            {
+                continue;
+            }
+            let Some(entity) = pending.get_mut(&iid) else {
+                return Err(EngineError::Unsupported(
+                    "pending entity missing after load".into(),
+                ));
+            };
+            match item {
+                SetItem::Prop { prop, .. } => {
+                    let value = value_from_batch(batch, &set_value_alias(idx), row_idx)?;
+                    entity.doc.insert(prop.clone(), value);
                 }
-                let Some(entity) = pending.get_mut(&iid) else {
-                    return Err(EngineError::Unsupported(
-                        "pending entity missing after load".into(),
-                    ));
-                };
-                match item {
-                    SetItem::Prop { prop, .. } => {
-                        let value = value_from_batch(batch, &set_value_alias(idx), row_idx)?;
-                        entity.doc.insert(prop.clone(), value);
-                    }
-                    SetItem::Label { label, .. } => add_label(&mut entity.labels, label),
-                }
+                SetItem::Label { label, .. } => add_label(&mut entity.labels, label),
             }
         }
     }

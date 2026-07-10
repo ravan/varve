@@ -296,7 +296,7 @@ mod pushdown {
     }
 
     #[test]
-    fn return_modifiers_are_rejected_until_pipeline_lowering_lands() {
+    fn return_modifiers_are_rejected_by_degenerate_execution_path() {
         for gql in [
             "MATCH (p:P) RETURN DISTINCT p.x",
             "MATCH (p:P) RETURN p.x ORDER BY p.x",
@@ -308,7 +308,7 @@ mod pushdown {
             let err = scan_specs_for_stmt(&q, "default", 8, &BTreeMap::new()).unwrap_err();
             assert!(
                 err.to_string()
-                    .contains("pipeline lowering lands in Task 6"),
+                    .contains("query shape is not supported by this execution path"),
                 "{gql}: {err}"
             );
         }
@@ -320,7 +320,7 @@ mod pushdown {
         let err = scan_specs_for_stmt(&q, "default", 8, &BTreeMap::new()).unwrap_err();
         assert!(
             err.to_string()
-                .contains("pipeline lowering lands in Task 6"),
+                .contains("query shape is not supported by this execution path"),
             "{err}"
         );
     }

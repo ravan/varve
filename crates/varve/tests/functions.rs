@@ -43,6 +43,31 @@ async fn string_functions_in_where_and_return() {
 }
 
 #[tokio::test]
+async fn string_predicate_operators_in_where() {
+    let db = Db::memory();
+    db.execute("INSERT (:Person {_id: 1, name: 'Ada Lovelace'})")
+        .await
+        .unwrap();
+    db.execute("INSERT (:Person {_id: 2, name: 'Grace Hopper'})")
+        .await
+        .unwrap();
+
+    for (predicate, expected) in [
+        ("n.name STARTS WITH 'Ada'", vec!["Ada Lovelace"]),
+        ("n.name ENDS WITH 'Hopper'", vec!["Grace Hopper"]),
+        ("n.name CONTAINS 'Love'", vec!["Ada Lovelace"]),
+    ] {
+        let batches = db
+            .query(&format!(
+                "MATCH (n:Person) WHERE {predicate} RETURN n.name AS name"
+            ))
+            .await
+            .unwrap();
+        assert_eq!(strings(&batches, "name"), expected);
+    }
+}
+
+#[tokio::test]
 async fn numeric_functions_in_where() {
     let db = Db::memory();
     db.execute("INSERT (:T {_id: 1, name: 'neg', delta: -3})")
