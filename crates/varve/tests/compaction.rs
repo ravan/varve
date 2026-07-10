@@ -50,6 +50,111 @@ async fn compact_once_replaces_input_tries_after_manifest_commit() {
 }
 
 #[tokio::test]
+async fn flush_after_compaction_preserves_manifest_and_full_inventory() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(blocks_config(dir.path(), 1)).await.unwrap();
+
+    for id in 1..=64 {
+        db.execute(&format!("INSERT (:P {{_id: {id}, v: {id}}})"))
+            .await
+            .unwrap();
+        wait_for_manifest_count(dir.path(), id).await;
+    }
+
+    db.compact_once().await.unwrap();
+    wait_for_manifest_count(dir.path(), 65).await;
+    let store = varve_storage::local_store(&dir.path().join("store")).unwrap();
+    let compacted_bytes = store
+        .get(&varve_storage::keys::manifest_key(64))
+        .await
+        .unwrap();
+
+    db.execute("INSERT (:P {_id: 65, v: 65})").await.unwrap();
+    wait_for_manifest_count(dir.path(), 66).await;
+
+    assert_eq!(
+        store
+            .get(&varve_storage::keys::manifest_key(64))
+            .await
+            .unwrap(),
+        compacted_bytes,
+        "the next flush must not overwrite the compaction generation"
+    );
+    let history = varve_storage::manifest_history(store.as_ref())
+        .await
+        .unwrap();
+    let ids = history
+        .iter()
+        .map(|manifest| manifest.block_id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, (0..=65).collect::<Vec<_>>());
+
+    let latest = history.last().unwrap();
+    let tries = latest
+        .tables
+        .iter()
+        .find(|table| table.graph == "default" && table.table == "nodes" && table.family.is_empty())
+        .unwrap()
+        .tries
+        .iter()
+        .map(|entry| entry.trie_key.as_str())
+        .collect::<Vec<_>>();
+    assert!(tries.iter().any(|key| key.starts_with("l01-")));
+    let new_l0 = varve_storage::keys::l0_trie_key(65);
+    assert!(tries.contains(&new_l0.as_str()));
+    assert_eq!(rows(&db.query("MATCH (p:P) RETURN p.v").await.unwrap()), 65);
+}
+
+#[tokio::test]
+async fn concurrent_compaction_and_flush_use_distinct_generations_in_both_queue_orders() {
+    for execute_first in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(blocks_config(dir.path(), 1)).await.unwrap();
+        for id in 1..=64 {
+            db.execute(&format!("INSERT (:P {{_id: {id}, v: {id}}})"))
+                .await
+                .unwrap();
+            wait_for_manifest_count(dir.path(), id).await;
+        }
+
+        if execute_first {
+            let (receipt, report) = tokio::join!(
+                biased;
+                db.execute("INSERT (:P {_id: 65, v: 65})"),
+                db.compact_once(),
+            );
+            receipt.unwrap();
+            assert_eq!(report.unwrap().jobs, 1);
+        } else {
+            let (report, receipt) = tokio::join!(
+                biased;
+                db.compact_once(),
+                db.execute("INSERT (:P {_id: 65, v: 65})"),
+            );
+            assert_eq!(report.unwrap().jobs, 1);
+            receipt.unwrap();
+        }
+        wait_for_manifest_count(dir.path(), 66).await;
+
+        let store = varve_storage::local_store(&dir.path().join("store")).unwrap();
+        let ids = varve_storage::manifest_history(store.as_ref())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|manifest| manifest.block_id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, (0..=65).collect::<Vec<_>>());
+
+        drop(db);
+        let restarted = Db::open(blocks_config(dir.path(), 1)).await.unwrap();
+        assert_eq!(
+            rows(&restarted.query("MATCH (p:P) RETURN p.v").await.unwrap()),
+            65
+        );
+    }
+}
+
+#[tokio::test]
 async fn compact_failure_before_manifest_keeps_inputs_live() {
     let dir = tempfile::tempdir().unwrap();
     let fail_next_manifest_put = Arc::new(AtomicBool::new(false));
@@ -85,11 +190,36 @@ async fn compact_failure_before_manifest_keeps_inputs_live() {
 
     assert_eq!(rows(&db.query("MATCH (p:P) RETURN p.v").await.unwrap()), 64);
 
+    let store = varve_storage::local_store(&dir.path().join("store")).unwrap();
+    let previous_manifest = store
+        .get(&varve_storage::keys::manifest_key(63))
+        .await
+        .unwrap();
+
+    db.execute("INSERT (:P {_id: 65, v: 65})").await.unwrap();
+    wait_for_manifest_count(dir.path(), 65).await;
+    let latest = varve_storage::latest_manifest(store.as_ref())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.block_id, 64, "failed compaction must not consume 64");
+    assert!(latest.tables[0]
+        .tries
+        .iter()
+        .any(|entry| entry.trie_key == varve_storage::keys::l0_trie_key(64)));
+    assert_eq!(
+        store
+            .get(&varve_storage::keys::manifest_key(63))
+            .await
+            .unwrap(),
+        previous_manifest
+    );
+
     drop(db);
     let restarted = Db::open(blocks_config(dir.path(), 1)).await.unwrap();
     assert_eq!(
         rows(&restarted.query("MATCH (p:P) RETURN p.v").await.unwrap()),
-        64
+        65
     );
 }
 
@@ -208,8 +338,7 @@ struct FailingManifestStore {
 impl ObjectStore for FailingManifestStore {
     async fn put(&self, key: &str, bytes: Bytes) -> Result<(), StorageError> {
         if is_manifest_key(key) && self.fail_next_manifest_put.swap(false, Ordering::SeqCst) {
-            return Err(StorageError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(StorageError::Io(std::io::Error::other(
                 "injected manifest put failure",
             )));
         }

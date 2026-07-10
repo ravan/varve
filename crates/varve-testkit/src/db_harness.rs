@@ -22,7 +22,7 @@ pub fn local_blocks_config(root: &Path, max_block_rows: usize) -> Config {
          [storage.local]\n\
          dir = {store_dir}\n"
     ))
-    .expect("local blocks config should parse")
+    .unwrap_or_else(|error| panic!("local blocks config should parse: {error}"))
 }
 
 pub fn local_gc_blocks_config(root: &Path, max_block_rows: usize) -> Config {
@@ -44,7 +44,7 @@ pub fn local_gc_blocks_config(root: &Path, max_block_rows: usize) -> Config {
          blocks_to_keep = 0\n\
          garbage_lifetime_hours = 0\n"
     ))
-    .expect("local gc blocks config should parse")
+    .unwrap_or_else(|error| panic!("local gc blocks config should parse: {error}"))
 }
 
 pub fn row_count(batches: &[RecordBatch]) -> usize {
