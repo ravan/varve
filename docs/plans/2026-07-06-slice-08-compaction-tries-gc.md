@@ -98,15 +98,9 @@ pub struct TrieShard {
 
 pub struct Bucketer;
 impl Bucketer {
-    pub fn bucket(iid: &varve_types::Iid, level: usize) -> u8;
-    pub fn path(iid: &varve_types::Iid, levels: usize) -> Vec<u8>;
-    pub fn iid_start(path: &[u8]) -> varve_types::Iid;
-    pub fn iid_next_start(path: &[u8]) -> Option<varve_types::Iid>;
+    pub fn bucket(iid: &varve_types::Iid, level: usize) -> Option<u8>;
+    pub fn path(iid: &varve_types::Iid, levels: usize) -> Option<Vec<u8>>;
     pub fn contains(path: &[u8], iid: &varve_types::Iid) -> bool;
-    pub fn filter_iids_for_path<'a>(
-        iids: impl IntoIterator<Item = &'a varve_types::Iid>,
-        path: &[u8],
-    ) -> Vec<varve_types::Iid>;
 }
 
 // varve-index/src/block.rs
@@ -271,7 +265,7 @@ pub async fn gc_once(store: &Arc<dyn ObjectStore>, cfg: &GcConfig) -> Result<GcR
 - Add `TrieCatalog::from_manifests`.
 - Catalog fold logic:
   - L0 files are `Live` immediately.
-  - L1 historical files are `Nascent` until a matching or later L1 current file for the same block exists, then become `Live`.
+  - L1 historical files are `Nascent` until an L1 current file in the same scope with the identical block exists, then become `Live`; a later block does not activate them.
   - L2+ partition outputs are `Nascent` until all four sibling buckets for that parent path exist, then become `Live` as a group.
   - Later manifest full inventory supersedes earlier full inventory.
   - Entries in older manifests that are absent from the latest inventory and not protected by retained live/nascent state are `Garbage`.

@@ -23,7 +23,7 @@ pub fn parse_lex_hex(s: &str) -> Option<u64> {
     u64::from_str_radix(body, 16).ok()
 }
 
-pub use varve_types::{Bucketer, PAGE_LIMIT, TRIE_BRANCH_FACTOR, TRIE_LEVEL_BITS};
+pub use varve_types::{Bucketer, MAX_TRIE_LEVELS, PAGE_LIMIT, TRIE_BRANCH_FACTOR, TRIE_LEVEL_BITS};
 
 pub const LOG_LIMIT: usize = 64;
 
@@ -203,6 +203,9 @@ impl TrieKey {
             .and_then(|seg| seg.strip_prefix('l'))
             .and_then(parse_lex_hex)
             .ok_or_else(|| invalid_trie_key(s))?;
+        if level > MAX_TRIE_LEVELS as u64 {
+            return Err(invalid_trie_key(s));
+        }
         let recency = segments
             .next()
             .and_then(|seg| seg.strip_prefix('r'))
@@ -210,7 +213,7 @@ impl TrieKey {
             .and_then(|seg| Recency::parse(seg).ok_or_else(|| invalid_trie_key(s)))?;
         let next = segments.next().ok_or_else(|| invalid_trie_key(s))?;
         let (part, block_segment) = if let Some(part_text) = next.strip_prefix('p') {
-            if part_text.is_empty() {
+            if part_text.is_empty() || part_text.len() > MAX_TRIE_LEVELS {
                 return Err(invalid_trie_key(s));
             }
             let mut part = Vec::with_capacity(part_text.len());

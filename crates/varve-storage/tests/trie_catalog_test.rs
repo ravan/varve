@@ -135,6 +135,16 @@ fn l1_historical_is_nascent_until_matching_l1_current() {
         live_keys(&with_current, "default", "nodes", ""),
         vec!["l01-r20200106-b09", "l01-rc-b09"]
     );
+
+    let with_later_current = TrieCatalog::from_manifests(&[manifest(
+        10,
+        vec![entry("l01-r20200106-b09"), entry("l01-rc-b0a")],
+    )])
+    .unwrap();
+    assert_eq!(
+        live_keys(&with_later_current, "default", "nodes", ""),
+        vec!["l01-rc-b0a"]
+    );
 }
 
 #[test]
