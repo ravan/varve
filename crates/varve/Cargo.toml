@@ -12,6 +12,8 @@ datafusion = { workspace = true }
 
 [dev-dependencies]
 arrow = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
 tokio = { workspace = true }
 tempfile = { workspace = true }
 varve-index = { path = "../varve-index" }
