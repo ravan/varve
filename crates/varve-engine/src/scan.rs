@@ -489,16 +489,58 @@ pub(crate) async fn reachable_edges(
 mod tests {
     use super::*;
     use crate::state::{PersistedTrie, TableKind, TableState, DEFAULT_GRAPH, NODES_TABLE};
+    use bytes::Bytes;
+    use std::ops::Range;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, RwLock};
     use varve_index::block::encode_block;
-    use varve_index::{Event, LiveTable, Op};
-    use varve_storage::{keys, memory_store, ObjectStore, TrieEntry};
+    use varve_index::{encode_sorted_events_by, Event, LiveTable, Op, SortOrder};
+    use varve_storage::{
+        keys, memory_store, ConditionalStore, ObjectStore, StorageError, TrieEntry,
+    };
     use varve_types::{Doc, Iid, Instant, TemporalBounds, TemporalDimension, Value};
 
     const EOT: Instant = Instant::END_OF_TIME;
 
+    struct CountingStore {
+        inner: Arc<dyn ObjectStore>,
+        range_reads: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for CountingStore {
+        async fn put(&self, key: &str, bytes: Bytes) -> Result<(), StorageError> {
+            self.inner.put(key, bytes).await
+        }
+
+        async fn get(&self, key: &str) -> Result<Bytes, StorageError> {
+            self.inner.get(key).await
+        }
+
+        async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes, StorageError> {
+            self.range_reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.get_range(key, range).await
+        }
+
+        async fn list(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
+            self.inner.list(prefix).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), StorageError> {
+            self.inner.delete(key).await
+        }
+
+        fn conditional(&self) -> Option<&dyn ConditionalStore> {
+            self.inner.conditional()
+        }
+    }
+
     fn iid(n: u8) -> Iid {
         Iid::derive(DEFAULT_GRAPH, NODES_TABLE, &[n])
+    }
+
+    fn raw_iid(first: u8) -> Iid {
+        Iid::from_bytes([first, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
     }
 
     fn us(n: i64) -> Instant {
@@ -612,6 +654,81 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(names(&batch), vec!["Ada", "Bob"]);
+    }
+
+    #[tokio::test]
+    async fn point_lookup_skips_pages_outside_trie_path() {
+        fn raw_put(first: u8, sf: i64, name: &str) -> Event {
+            let mut doc = Doc::new();
+            doc.insert("name".into(), Value::Str(name.into()));
+            Event {
+                iid: raw_iid(first),
+                system_from: us(sf),
+                valid_from: us(sf),
+                valid_to: EOT,
+                src: None,
+                dst: None,
+                op: Op::Put {
+                    labels: vec!["P".into()],
+                    doc,
+                },
+            }
+        }
+
+        let rows = vec![raw_put(0x00, 1, "Ada"), raw_put(0x40, 2, "Bob")];
+        let target = rows[1].iid;
+        let block = encode_sorted_events_by(&rows, 1, SortOrder::ByIid, 1).unwrap();
+        assert_eq!(block.pages.len(), 2);
+        assert_eq!(block.pages[0].path, vec![0]);
+        assert_eq!(block.pages[1].path, vec![1]);
+
+        let mut pages = block.pages.clone();
+        pages[0].min_iid = raw_iid(0x00);
+        pages[0].max_iid = raw_iid(0xff);
+
+        let inner = memory_store();
+        let trie_key = "l01-rc-b00".to_string();
+        inner
+            .put(
+                &keys::data_key(DEFAULT_GRAPH, NODES_TABLE, &trie_key),
+                block.data.into(),
+            )
+            .await
+            .unwrap();
+        let range_reads = Arc::new(AtomicUsize::new(0));
+        let store: Arc<dyn ObjectStore> = Arc::new(CountingStore {
+            inner,
+            range_reads: range_reads.clone(),
+        });
+
+        let mut table = TableState::new();
+        table.nodes.tries.push(PersistedTrie {
+            entry: TrieEntry {
+                trie_key,
+                row_count: rows.len() as u64,
+                data_len: pages.iter().map(|page| page.len).sum(),
+            },
+            pages: Arc::new(pages),
+        });
+        let mut graphs = GraphsState::new();
+        graphs.graphs.insert(DEFAULT_GRAPH.to_string(), table);
+        let state = Arc::new(RwLock::new(graphs));
+
+        let batch = merged_snapshot(
+            &state,
+            &store,
+            DEFAULT_GRAPH,
+            TableKind::Nodes,
+            LabelFilter::Single("P"),
+            &at(10),
+            Some(target),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(names(&batch), vec!["Bob"]);
+        assert_eq!(range_reads.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

@@ -2049,6 +2049,96 @@ mod tests {
         assert_eq!(recovered.watermark.as_u64(), 3);
     }
 
+    #[tokio::test]
+    async fn restart_preserves_path_pruning_metadata() {
+        use bytes::Bytes;
+        use varve_index::{encode_sorted_events_by, Event, Op, SortOrder};
+        use varve_storage::{keys, memory_store, BlockManifest, TableTries, TrieEntry};
+        use varve_types::Doc;
+
+        fn raw_iid(first: u8) -> Iid {
+            Iid::from_bytes([first, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        }
+
+        fn event(first: u8, sf: i64) -> Event {
+            Event {
+                iid: raw_iid(first),
+                system_from: Instant::from_micros(sf),
+                valid_from: Instant::from_micros(sf),
+                valid_to: Instant::END_OF_TIME,
+                src: None,
+                dst: None,
+                op: Op::Put {
+                    labels: vec!["P".into()],
+                    doc: Doc::new(),
+                },
+            }
+        }
+
+        let rows = vec![event(0x00, 1), event(0x40, 2)];
+        let block = encode_sorted_events_by(&rows, 1, SortOrder::ByIid, 1).unwrap();
+        let expected_paths: Vec<Vec<u8>> =
+            block.pages.iter().map(|page| page.path.clone()).collect();
+        assert_eq!(expected_paths, vec![vec![0], vec![1]]);
+
+        let store = memory_store();
+        let trie_key = "l01-rc-b00".to_string();
+        let data_len = block.data.len() as u64;
+        store
+            .put(
+                &keys::data_key(DEFAULT_GRAPH, NODES_TABLE, &trie_key),
+                Bytes::from(block.data),
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                &keys::meta_key(DEFAULT_GRAPH, NODES_TABLE, &trie_key),
+                Bytes::from(block.meta),
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                &keys::manifest_key(0),
+                Bytes::from(
+                    BlockManifest {
+                        block_id: 0,
+                        watermark: 0,
+                        max_tx_id: 0,
+                        max_system_time_us: 2,
+                        tables: vec![TableTries {
+                            graph: DEFAULT_GRAPH.to_string(),
+                            table: NODES_TABLE.to_string(),
+                            family: String::new(),
+                            tries: vec![TrieEntry {
+                                trie_key: trie_key.clone(),
+                                row_count: rows.len() as u64,
+                                data_len,
+                            }],
+                        }],
+                    }
+                    .to_wire(),
+                ),
+            )
+            .await
+            .unwrap();
+
+        let log = MemoryLog::new();
+        let clock = MonotonicClock::new();
+        let recovered = recover(&log, &clock, &store).await.unwrap();
+        let graph = recovered.state.graph(DEFAULT_GRAPH).unwrap();
+        assert_eq!(graph.nodes.tries.len(), 1);
+        assert_eq!(graph.nodes.tries[0].entry.trie_key, trie_key);
+        let recovered_paths: Vec<Vec<u8>> = graph.nodes.tries[0]
+            .pages
+            .iter()
+            .map(|page| page.path.clone())
+            .collect();
+        assert_eq!(recovered_paths, expected_paths);
+        assert!(recovered_paths.iter().all(|path| !path.is_empty()));
+    }
+
     /// Anchor-pruned adjacency must return exactly the full-scan result
     /// filtered to that anchor — across a LIVE tail, a FLUSHED adjacency
     /// family, and a fresh recovery from the manifest. Uses the T5 flush-

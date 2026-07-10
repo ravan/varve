@@ -172,7 +172,7 @@ async fn bitemporal_history_survives_flush_and_restart() {
 }
 
 #[tokio::test]
-async fn flushed_meta_paths_survive_restart() {
+async fn flushed_l0_meta_survives_restart() {
     let dir = tempfile::tempdir().unwrap();
 
     {
@@ -199,7 +199,6 @@ async fn flushed_meta_paths_survive_restart() {
     let meta = std::fs::read(&meta_path).unwrap();
     let pages = varve_index::decode_meta(&meta).unwrap();
     assert!(!pages.is_empty());
-    assert!(pages.iter().all(|page| page.path.is_empty()));
 
     let db = Db::open(blocks_config(dir.path(), 2)).await.unwrap();
     let point = db
