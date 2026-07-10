@@ -116,16 +116,43 @@ async fn exercise(store: Arc<dyn ObjectStore>) {
         vec!["v1/a/one".to_string(), "v1/a/two".to_string()]
     );
     assert_eq!(store.list("v1/absent").await.unwrap(), Vec::<String>::new());
+}
 
-    store.delete("v1/a/one").await.unwrap();
+#[allow(clippy::unwrap_used)]
+async fn assert_delete_removes_object_and_is_idempotent(store: Arc<dyn ObjectStore>) {
+    store
+        .put("v1/delete-me", Bytes::from_static(b"value"))
+        .await
+        .unwrap();
+
+    store.delete("v1/delete-me").await.unwrap();
     assert!(matches!(
-        store.get("v1/a/one").await,
-        Err(StorageError::NotFound(k)) if k == "v1/a/one"
+        store.get("v1/delete-me").await,
+        Err(StorageError::NotFound(k)) if k == "v1/delete-me"
     ));
-    store.delete("v1/a/one").await.unwrap();
+
+    store.delete("v1/delete-me").await.unwrap();
+}
+
+#[allow(clippy::unwrap_used)]
+async fn assert_delete_keeps_prefix_listing_sorted(store: Arc<dyn ObjectStore>) {
+    for key in ["v1/a/three", "v1/a/one", "v1/a/two"] {
+        store.put(key, Bytes::from_static(b"value")).await.unwrap();
+    }
+    store
+        .put("v1/b/unrelated", Bytes::from_static(b"value"))
+        .await
+        .unwrap();
+
+    store.delete("v1/a/two").await.unwrap();
+
     assert_eq!(
         store.list("v1/a").await.unwrap(),
-        vec!["v1/a/two".to_string()]
+        vec!["v1/a/one".to_string(), "v1/a/three".to_string()]
+    );
+    assert_eq!(
+        store.list("v1/b").await.unwrap(),
+        vec!["v1/b/unrelated".to_string()]
     );
 }
 
@@ -138,6 +165,22 @@ async fn memory_backend_conforms() {
 async fn local_backend_conforms() {
     let dir = tempfile::tempdir().unwrap();
     exercise(local_store(dir.path()).unwrap()).await;
+}
+
+#[tokio::test]
+async fn delete_removes_object_and_is_idempotent_for_missing_keys() {
+    assert_delete_removes_object_and_is_idempotent(memory_store()).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    assert_delete_removes_object_and_is_idempotent(local_store(dir.path()).unwrap()).await;
+}
+
+#[tokio::test]
+async fn delete_keeps_prefix_listing_sorted() {
+    assert_delete_keeps_prefix_listing_sorted(memory_store()).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    assert_delete_keeps_prefix_listing_sorted(local_store(dir.path()).unwrap()).await;
 }
 
 #[tokio::test]
