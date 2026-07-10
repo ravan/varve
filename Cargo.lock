@@ -3496,6 +3496,8 @@ name = "varve"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "async-trait",
+ "bytes",
  "datafusion",
  "tempfile",
  "tokio",
