@@ -1,6 +1,6 @@
 use varve_storage::keys::{
     l0_trie_key, Bucketer, Recency, TableScope, TrieKey, TrieKeyShard, TrieShard, ADJ_IN,
-    LOG_LIMIT, PAGE_LIMIT, TRIE_BRANCH_FACTOR, TRIE_LEVEL_BITS,
+    LOG_LIMIT, MAX_TRIE_LEVELS, PAGE_LIMIT, TRIE_BRANCH_FACTOR, TRIE_LEVEL_BITS,
 };
 
 #[test]
@@ -47,6 +47,8 @@ fn trie_key_rejects_invalid_parts_and_recency() {
     assert!(TrieKey::parse("l02-p13-rc-b00").is_err());
     assert!(TrieKey::parse("l02-rC-p13-b00").is_err());
     assert!(TrieKey::parse("l02-rc-p13-bFF").is_err());
+    assert!(TrieKey::parse(&format!("l02-rc-p{}-b00", "0".repeat(MAX_TRIE_LEVELS + 1))).is_err());
+    assert!(TrieKey::parse("l141-rc-b00").is_err());
 }
 
 #[test]
@@ -151,13 +153,13 @@ fn bucketer_matches_xtdb_known_bit_patterns() {
         0,
         0,
     ]);
-    assert_eq!(Bucketer::bucket(&iid, 0), 0);
-    assert_eq!(Bucketer::bucket(&iid, 1), 1);
-    assert_eq!(Bucketer::bucket(&iid, 2), 2);
-    assert_eq!(Bucketer::bucket(&iid, 3), 3);
-    assert_eq!(Bucketer::bucket(&iid, 4), 3);
-    assert_eq!(Bucketer::bucket(&iid, 5), 2);
-    assert_eq!(Bucketer::path(&iid, 6), vec![0, 1, 2, 3, 3, 2]);
+    assert_eq!(Bucketer::bucket(&iid, 0), Some(0));
+    assert_eq!(Bucketer::bucket(&iid, 1), Some(1));
+    assert_eq!(Bucketer::bucket(&iid, 2), Some(2));
+    assert_eq!(Bucketer::bucket(&iid, 3), Some(3));
+    assert_eq!(Bucketer::bucket(&iid, 4), Some(3));
+    assert_eq!(Bucketer::bucket(&iid, 5), Some(2));
+    assert_eq!(Bucketer::path(&iid, 6), Some(vec![0, 1, 2, 3, 3, 2]));
     assert!(Bucketer::contains(&[0, 1, 2, 3], &iid));
     assert!(!Bucketer::contains(&[0, 1, 2, 2], &iid));
 }

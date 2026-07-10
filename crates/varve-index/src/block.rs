@@ -17,13 +17,13 @@ use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
-use varve_types::{Bucketer, Iid, Instant, TemporalBounds, PAGE_LIMIT, TRIE_LEVEL_BITS};
+use varve_types::{
+    Bucketer, Iid, Instant, TemporalBounds, MAX_TRIE_LEVELS, PAGE_LIMIT, TRIE_BRANCH_FACTOR,
+};
 
 /// Rows per page (XTDB `pageLimit`). A parameter on `encode_block` so tests
 /// can force page splits; the engine passes this constant.
 pub const DEFAULT_PAGE_ROWS: usize = PAGE_LIMIT;
-const MAX_TRIE_PATH_LEVELS: usize = 128 / (TRIE_LEVEL_BITS as usize);
-
 /// One page's entry in the meta file: byte range in the data file plus the
 /// stats the scan prunes by.
 #[derive(Debug, Clone, PartialEq)]
@@ -187,7 +187,7 @@ fn encode_pages_by_keys(
     if rows.len() != keys.len() {
         return Err(IndexError::Codec("page key count mismatch".into()));
     }
-    if page_path_levels > MAX_TRIE_PATH_LEVELS {
+    if page_path_levels > MAX_TRIE_LEVELS {
         return Err(IndexError::Codec(format!(
             "page path level {page_path_levels} exceeds 128-bit IID trie depth"
         )));
@@ -202,7 +202,7 @@ fn encode_pages_by_keys(
         data.extend_from_slice(&bytes);
         let key_chunk = &keys[i * chunk..i * chunk + events.len()];
         let mut meta = page_meta(events, offset, bytes.len() as u64);
-        meta.path = shared_page_path(key_chunk, page_path_levels);
+        meta.path = shared_page_path(key_chunk, page_path_levels)?;
         // Record the SORT KEY's range, not row iids; adjacency scans use this
         // field for the anchor entity while primary scans use the row iid.
         if let Some(min_iid) = key_chunk.iter().min().copied() {
@@ -218,25 +218,29 @@ fn encode_pages_by_keys(
     Ok(EncodedBlock { data, meta, pages })
 }
 
-fn shared_page_path(keys: &[Iid], page_path_levels: usize) -> Vec<u8> {
+fn shared_page_path(keys: &[Iid], page_path_levels: usize) -> Result<Vec<u8>, IndexError> {
     let Some(first) = keys.first() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
     let mut path = Vec::with_capacity(page_path_levels);
     for level in 0..page_path_levels {
-        let bucket = Bucketer::bucket(first, level);
+        let bucket = Bucketer::bucket(first, level).ok_or_else(|| {
+            IndexError::Codec(format!(
+                "page path level {page_path_levels} exceeds 128-bit IID trie depth"
+            ))
+        })?;
         if keys
             .iter()
             .skip(1)
-            .all(|key| Bucketer::bucket(key, level) == bucket)
+            .all(|key| Bucketer::bucket(key, level) == Some(bucket))
         {
             path.push(bucket);
         } else {
             break;
         }
     }
-    path
+    Ok(path)
 }
 
 /// Stats over one page's events. `chunks()` never yields an empty slice.
@@ -369,6 +373,21 @@ pub fn decode_meta(bytes: &[u8]) -> Result<Vec<PageMeta>, IndexError> {
         let max_vt = downcast::<TimestampMicrosecondArray>(&batch, 11)?;
         let has_erase = downcast::<BooleanArray>(&batch, 12)?;
         for row in 0..batch.num_rows() {
+            let trie_path = path.value(row);
+            if trie_path.len() > MAX_TRIE_LEVELS {
+                return Err(IndexError::Codec(format!(
+                    "meta trie path has {} levels, maximum is {MAX_TRIE_LEVELS}",
+                    trie_path.len()
+                )));
+            }
+            if let Some(bucket) = trie_path
+                .iter()
+                .find(|bucket| **bucket >= TRIE_BRANCH_FACTOR)
+            {
+                return Err(IndexError::Codec(format!(
+                    "meta trie path bucket {bucket} outside branch factor {TRIE_BRANCH_FACTOR}"
+                )));
+            }
             let iid_at = |arr: &FixedSizeBinaryArray, i: usize| -> Result<Iid, IndexError> {
                 let bytes: [u8; 16] = arr
                     .value(i)
@@ -377,7 +396,7 @@ pub fn decode_meta(bytes: &[u8]) -> Result<Vec<PageMeta>, IndexError> {
                 Ok(Iid::from_bytes(bytes))
             };
             pages.push(PageMeta {
-                path: path.value(row).to_vec(),
+                path: trie_path.to_vec(),
                 offset: offset.value(row),
                 len: len.value(row),
                 rows: rows.value(row),
@@ -532,7 +551,7 @@ mod tests {
                 .map(|page| page.path.clone())
                 .collect::<Vec<_>>(),
             rows.iter()
-                .map(|row| Bucketer::path(&row.iid, 1))
+                .map(|row| Bucketer::path(&row.iid, 1).unwrap())
                 .collect::<Vec<_>>()
         );
         assert_eq!(decode_meta(&block.meta).unwrap(), block.pages);
@@ -547,11 +566,11 @@ mod tests {
         assert_eq!(shared_prefix.pages.len(), 1);
         assert_eq!(
             shared_prefix.pages[0].path,
-            vec![Bucketer::bucket(&shared_prefix_rows[0].iid, 0)]
+            vec![Bucketer::bucket(&shared_prefix_rows[0].iid, 0).unwrap()]
         );
         assert_ne!(
             shared_prefix.pages[0].path,
-            Bucketer::path(&shared_prefix_rows[0].iid, 2)
+            Bucketer::path(&shared_prefix_rows[0].iid, 2).unwrap()
         );
     }
 
@@ -568,10 +587,16 @@ mod tests {
         let block = encode_sorted_events_by(&rows, 1, SortOrder::BySrc, 1).unwrap();
 
         assert_eq!(block.pages.len(), 2);
-        assert_eq!(block.pages[0].path, Bucketer::path(&src_a, 1));
-        assert_eq!(block.pages[1].path, Bucketer::path(&src_b, 1));
-        assert_ne!(block.pages[0].path, Bucketer::path(&rows[0].iid, 1));
-        assert_ne!(block.pages[1].path, Bucketer::path(&rows[1].iid, 1));
+        assert_eq!(block.pages[0].path, Bucketer::path(&src_a, 1).unwrap());
+        assert_eq!(block.pages[1].path, Bucketer::path(&src_b, 1).unwrap());
+        assert_ne!(
+            block.pages[0].path,
+            Bucketer::path(&rows[0].iid, 1).unwrap()
+        );
+        assert_ne!(
+            block.pages[1].path,
+            Bucketer::path(&rows[1].iid, 1).unwrap()
+        );
         assert_eq!(
             (block.pages[0].min_iid, block.pages[0].max_iid),
             (src_a, src_a)
@@ -734,6 +759,22 @@ mod tests {
         assert!(block.pages.is_empty());
         assert!(block.data.is_empty());
         assert_eq!(decode_meta(&block.meta).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn malformed_page_paths_are_rejected_without_panicking_selection() {
+        let block = encode_block(&table(&[put(1, 1, 1, EOT, 0)]), 16).unwrap();
+        let mut page = block.pages[0].clone();
+
+        page.path = vec![0; MAX_TRIE_LEVELS + 1];
+        assert!(!page.selected(&at(10), Some(&iid(1))));
+        let err = decode_meta(&encode_meta(&[page.clone()]).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("maximum is 64"));
+
+        page.path = vec![TRIE_BRANCH_FACTOR];
+        assert!(!page.selected(&at(10), Some(&iid(1))));
+        let err = decode_meta(&encode_meta(&[page]).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("outside branch factor 4"));
     }
 
     #[test]
