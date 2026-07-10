@@ -23,7 +23,7 @@ pub fn parse_lex_hex(s: &str) -> Option<u64> {
     u64::from_str_radix(body, 16).ok()
 }
 
-pub use varve_types::{Bucketer, TRIE_BRANCH_FACTOR, TRIE_LEVEL_BITS};
+pub use varve_types::{Bucketer, PAGE_LIMIT, TRIE_BRANCH_FACTOR, TRIE_LEVEL_BITS};
 
 pub const LOG_LIMIT: usize = 64;
 

@@ -6,5 +6,5 @@ pub mod value;
 pub use iid::Iid;
 pub use position::{LogPosition, TypeError};
 pub use temporal::{Instant, TemporalBounds, TemporalDimension};
-pub use trie::{Bucketer, TRIE_BRANCH_FACTOR, TRIE_LEVEL_BITS};
+pub use trie::{Bucketer, PAGE_LIMIT, TRIE_BRANCH_FACTOR, TRIE_LEVEL_BITS};
 pub use value::{decode_doc, encode_doc, Doc, Value};

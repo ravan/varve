@@ -16,12 +16,14 @@ use varve_types::{Bucketer, Iid, Instant, TRIE_BRANCH_FACTOR};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CompactionConfig {
     pub log_limit: usize,
+    pub file_size_target: u64,
 }
 
 impl Default for CompactionConfig {
     fn default() -> CompactionConfig {
         CompactionConfig {
             log_limit: varve_storage::keys::LOG_LIMIT,
+            file_size_target: 104_857_600,
         }
     }
 }
@@ -32,12 +34,49 @@ pub(crate) enum CompactionKind {
     SameShard,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum CompactionOutputPlan {
+    Exact(Vec<TrieKey>),
+    L0RecencySplit {
+        level: u64,
+        part: Vec<u8>,
+        block: u64,
+    },
+}
+
+impl CompactionOutputPlan {
+    fn output_key_for_event(
+        &self,
+        event: &Event,
+        order: SortOrder,
+        recency: Recency,
+    ) -> Option<TrieKey> {
+        match self {
+            CompactionOutputPlan::Exact(output_keys) => {
+                let key = sort_key(event, order);
+                output_keys
+                    .iter()
+                    .find(|candidate| {
+                        candidate.recency == recency && Bucketer::contains(&candidate.part, &key)
+                    })
+                    .cloned()
+            }
+            CompactionOutputPlan::L0RecencySplit { level, part, block } => Some(TrieKey {
+                level: *level,
+                recency,
+                part: part.clone(),
+                block: *block,
+            }),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CompactionJob {
     pub kind: CompactionKind,
     pub scope: TableScope,
     pub input_trie_keys: Vec<TrieKey>,
-    pub output_trie_keys: Vec<TrieKey>,
+    pub output_plan: CompactionOutputPlan,
 }
 
 impl CompactionJob {
@@ -146,6 +185,7 @@ pub(crate) struct CompactedBlock {
 struct LiveTrie {
     scoped_key: ScopedTrieKey,
     key: TrieKey,
+    data_len: u64,
 }
 
 pub(crate) fn select_compaction_jobs(
@@ -155,9 +195,11 @@ pub(crate) fn select_compaction_jobs(
     let mut live = Vec::new();
     for live_entry in catalog.live_entries() {
         let key = live_entry.scoped_key.parse_trie_key()?;
+        let data_len = live_entry.entry.data_len;
         live.push(LiveTrie {
             scoped_key: live_entry.scoped_key,
             key,
+            data_len,
         });
     }
     live.sort_by(|a, b| {
@@ -179,12 +221,12 @@ pub(crate) fn select_compaction_jobs(
 
     let mut jobs = Vec::new();
     select_l0_jobs(&live, config, &mut jobs);
-    select_same_shard_jobs(&live, &mut jobs);
+    select_same_shard_jobs(&live, config, &mut jobs);
     jobs.sort_by(|a, b| {
-        (&a.scope, &a.input_trie_keys, &a.output_trie_keys).cmp(&(
+        (&a.scope, &a.input_trie_keys, &a.output_plan).cmp(&(
             &b.scope,
             &b.input_trie_keys,
-            &b.output_trie_keys,
+            &b.output_plan,
         ))
     });
     Ok(jobs)
@@ -214,19 +256,25 @@ fn select_l0_jobs(live: &[LiveTrie], config: &CompactionConfig, jobs: &mut Vec<C
             kind: CompactionKind::L0ToL1Split,
             scope,
             input_trie_keys: inputs.iter().map(|trie| trie.key.clone()).collect(),
-            output_trie_keys: vec![TrieKey {
+            output_plan: CompactionOutputPlan::L0RecencySplit {
                 level: 1,
-                recency: Recency::Current,
                 part: Vec::new(),
                 block,
-            }],
+            },
         });
     }
 }
 
-fn select_same_shard_jobs(live: &[LiveTrie], jobs: &mut Vec<CompactionJob>) {
+fn select_same_shard_jobs(
+    live: &[LiveTrie],
+    config: &CompactionConfig,
+    jobs: &mut Vec<CompactionJob>,
+) {
     let mut groups: BTreeMap<TrieShard, Vec<&LiveTrie>> = BTreeMap::new();
-    for trie in live.iter().filter(|trie| trie.key.level >= 1) {
+    for trie in live
+        .iter()
+        .filter(|trie| trie.key.level >= 1 && trie.data_len >= config.file_size_target)
+    {
         groups
             .entry(TrieShard::from_trie_key(
                 trie.scoped_key.scope.clone(),
@@ -251,14 +299,14 @@ fn select_same_shard_jobs(live: &[LiveTrie], jobs: &mut Vec<CompactionJob>) {
             .max()
             .unwrap_or_default();
         let parent = shard.key_shard.to_trie_key(block);
-        let output_trie_keys = (0..TRIE_BRANCH_FACTOR)
+        let output_keys = (0..TRIE_BRANCH_FACTOR)
             .map(|bucket| parent.child(bucket, block))
             .collect();
         jobs.push(CompactionJob {
             kind: CompactionKind::SameShard,
             scope: shard.scope,
             input_trie_keys: inputs.iter().map(|trie| trie.key.clone()).collect(),
-            output_trie_keys,
+            output_plan: CompactionOutputPlan::Exact(output_keys),
         });
     }
 }
@@ -300,7 +348,9 @@ pub(crate) fn write_compacted_blocks(
     let mut routed: BTreeMap<TrieKey, Vec<Event>> = BTreeMap::new();
     for (_iid, events) in by_iid {
         for (event, recency) in retained_events_with_recency(events) {
-            let key = output_key_for_event(job, &event, order, recency)
+            let key = job
+                .output_plan
+                .output_key_for_event(&event, order, recency)
                 .ok_or_else(|| IndexError::Codec("compaction output trie key missing".into()))?;
             routed.entry(key).or_default().push(event);
         }
@@ -344,34 +394,6 @@ fn retained_events_with_recency(events: Vec<Event>) -> Vec<(Event, Recency)> {
     }
     retained.reverse();
     retained
-}
-
-fn output_key_for_event(
-    job: &CompactionJob,
-    event: &Event,
-    order: SortOrder,
-    recency: Recency,
-) -> Option<TrieKey> {
-    match job.kind {
-        CompactionKind::L0ToL1Split => {
-            let base = job.output_trie_keys.first()?;
-            Some(TrieKey {
-                level: base.level,
-                recency,
-                part: base.part.clone(),
-                block: base.block,
-            })
-        }
-        CompactionKind::SameShard => {
-            let key = sort_key(event, order);
-            job.output_trie_keys
-                .iter()
-                .find(|candidate| {
-                    candidate.recency == recency && Bucketer::contains(&candidate.part, &key)
-                })
-                .cloned()
-        }
-    }
 }
 
 fn sort_key(event: &Event, order: SortOrder) -> Iid {
@@ -434,10 +456,14 @@ mod tests {
     use varve_types::{Doc, Iid, Instant, Value};
 
     fn entry(key: String) -> TrieEntry {
+        entry_with_data_len(key, 10)
+    }
+
+    fn entry_with_data_len(key: String, data_len: u64) -> TrieEntry {
         TrieEntry {
             trie_key: key,
             row_count: 1,
-            data_len: 10,
+            data_len,
         }
     }
 
@@ -446,6 +472,10 @@ mod tests {
     }
 
     fn catalog(keys: Vec<String>) -> TrieCatalog {
+        catalog_entries(keys.into_iter().map(entry).collect())
+    }
+
+    fn catalog_entries(tries: Vec<TrieEntry>) -> TrieCatalog {
         TrieCatalog::from_manifests(&[BlockManifest {
             block_id: 99,
             watermark: 99,
@@ -455,10 +485,18 @@ mod tests {
                 graph: "default".into(),
                 table: "nodes".into(),
                 family: String::new(),
-                tries: keys.into_iter().map(entry).collect(),
+                tries,
             }],
         }])
         .unwrap()
+    }
+
+    fn full_catalog(keys: Vec<String>, file_size_target: u64) -> TrieCatalog {
+        catalog_entries(
+            keys.into_iter()
+                .map(|key| entry_with_data_len(key, file_size_target))
+                .collect(),
+        )
     }
 
     fn empty_manifest(tables: Vec<TableTries>) -> BlockManifest {
@@ -476,7 +514,11 @@ mod tests {
             kind: CompactionKind::L0ToL1Split,
             scope,
             input_trie_keys: vec![parse_trie_key("l00-rc-b00")],
-            output_trie_keys: vec![parse_trie_key("l01-rc-b00")],
+            output_plan: CompactionOutputPlan::L0RecencySplit {
+                level: 1,
+                part: Vec::new(),
+                block: 0,
+            },
         }
     }
 
@@ -500,6 +542,15 @@ mod tests {
                 .target_sort_order(),
             Some(SortOrder::ByDst)
         );
+    }
+
+    #[test]
+    fn compaction_config_defaults_match_public_limits() {
+        let config = CompactionConfig::default();
+
+        assert_eq!(varve_storage::keys::PAGE_LIMIT, 1024);
+        assert_eq!(config.log_limit, 64);
+        assert_eq!(config.file_size_target, 104_857_600);
     }
 
     #[test]
@@ -587,22 +638,53 @@ mod tests {
         assert_eq!(job.input_trie_keys.len(), 64);
         assert_eq!(job.input_trie_keys[0], TrieKey::l0(0));
         assert_eq!(
-            job.output_trie_keys,
-            vec![TrieKey {
+            job.output_plan,
+            CompactionOutputPlan::L0RecencySplit {
                 level: 1,
-                recency: Recency::Current,
                 part: Vec::new(),
                 block: 63,
-            }]
+            }
         );
     }
 
     #[test]
-    fn selects_four_same_shard_level_jobs() {
+    fn selects_l0_recency_split_outputs() {
+        let keys = (0..varve_storage::keys::LOG_LIMIT)
+            .map(|block| format!("l00-rc-b{}", lex_hex(block as u64)))
+            .collect();
+        let jobs = select_compaction_jobs(&catalog(keys), &CompactionConfig::default()).unwrap();
+
+        assert_eq!(jobs.len(), 1);
+        let job = &jobs[0];
+        assert_eq!(job.kind, CompactionKind::L0ToL1Split);
+        assert_eq!(
+            job.output_plan,
+            CompactionOutputPlan::L0RecencySplit {
+                level: 1,
+                part: Vec::new(),
+                block: (varve_storage::keys::LOG_LIMIT - 1) as u64,
+            }
+        );
+    }
+
+    #[test]
+    fn partial_same_shard_files_do_not_schedule_compaction() {
         let keys = (0..4)
             .map(|block| format!("l01-rc-b{}", lex_hex(block)))
             .collect();
         let jobs = select_compaction_jobs(&catalog(keys), &CompactionConfig::default()).unwrap();
+
+        assert!(jobs.is_empty());
+    }
+
+    #[test]
+    fn selects_four_full_same_shard_level_jobs() {
+        let config = CompactionConfig::default();
+        let keys = (0..4)
+            .map(|block| format!("l01-rc-b{}", lex_hex(block)))
+            .collect();
+        let jobs =
+            select_compaction_jobs(&full_catalog(keys, config.file_size_target), &config).unwrap();
 
         assert_eq!(jobs.len(), 1);
         let job = &jobs[0];
@@ -617,8 +699,8 @@ mod tests {
             ]
         );
         assert_eq!(
-            job.output_trie_keys,
-            vec![
+            job.output_plan,
+            CompactionOutputPlan::Exact(vec![
                 TrieKey {
                     level: 2,
                     recency: Recency::Current,
@@ -643,6 +725,35 @@ mod tests {
                     part: vec![3],
                     block: 3,
                 },
+            ])
+        );
+    }
+
+    #[test]
+    fn same_shard_selection_skips_partial_files_and_preserves_full_file_order() {
+        let config = CompactionConfig {
+            file_size_target: 100,
+            ..CompactionConfig::default()
+        };
+        let catalog = catalog_entries(
+            [(0, 99), (1, 100), (2, 1), (3, 101), (4, 100), (5, 200)]
+                .into_iter()
+                .map(|(block, data_len)| {
+                    entry_with_data_len(format!("l01-rc-b{}", lex_hex(block)), data_len)
+                })
+                .collect(),
+        );
+
+        let jobs = select_compaction_jobs(&catalog, &config).unwrap();
+
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            jobs[0].input_trie_keys,
+            vec![
+                parse_trie_key("l01-rc-b01"),
+                parse_trie_key("l01-rc-b03"),
+                parse_trie_key("l01-rc-b04"),
+                parse_trie_key("l01-rc-b05"),
             ]
         );
     }
@@ -665,13 +776,14 @@ mod tests {
 
     #[test]
     fn duplicate_output_key_for_same_catalog_state() {
+        let config = CompactionConfig::default();
         let keys = (0..4)
             .map(|block| format!("l01-rc-b{}", lex_hex(block)))
             .collect::<Vec<_>>();
-        let catalog = catalog(keys);
+        let catalog = full_catalog(keys, config.file_size_target);
 
-        let a = select_compaction_jobs(&catalog, &CompactionConfig::default()).unwrap();
-        let b = select_compaction_jobs(&catalog, &CompactionConfig::default()).unwrap();
+        let a = select_compaction_jobs(&catalog, &config).unwrap();
+        let b = select_compaction_jobs(&catalog, &config).unwrap();
 
         assert_eq!(a, b);
     }
@@ -737,12 +849,11 @@ mod tests {
             kind: CompactionKind::L0ToL1Split,
             scope: TableScope::new("default", "nodes", ""),
             input_trie_keys: vec![parse_trie_key("l00-rc-b00"), parse_trie_key("l00-rc-b01")],
-            output_trie_keys: vec![TrieKey {
+            output_plan: CompactionOutputPlan::L0RecencySplit {
                 level: 1,
-                recency: Recency::Current,
                 part: Vec::new(),
                 block: 1,
-            }],
+            },
         }
     }
 
