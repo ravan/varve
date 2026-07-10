@@ -333,12 +333,12 @@ mod tests {
     use crate::db::{EngineError, TxReceipt};
     use crate::scan::merged_snapshot;
     use crate::state::{GraphsState, TableKind, DEFAULT_GRAPH};
-    use crate::writer::{spawn_writer, Submission, WriterConfig, WriterState};
+    use crate::writer::{spawn_writer, Submission, WriterConfig, WriterHandle, WriterState};
     use bytes::Bytes;
     use std::collections::BTreeMap;
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::sync::oneshot;
     use varve_index::LabelFilter;
     use varve_log::{Log, MemoryLog};
     use varve_storage::{
@@ -350,11 +350,7 @@ mod tests {
         store: Arc<dyn ObjectStore>,
         max_block_rows: usize,
         flush_interval: Duration,
-    ) -> (
-        mpsc::Sender<Submission>,
-        Arc<RwLock<GraphsState>>,
-        Arc<MemoryLog>,
-    ) {
+    ) -> (WriterHandle, Arc<RwLock<GraphsState>>, Arc<MemoryLog>) {
         let log = Arc::new(MemoryLog::new());
         let state = Arc::new(RwLock::new(GraphsState::new()));
         let writer_state = WriterState {
@@ -379,7 +375,7 @@ mod tests {
     }
 
     fn submit(
-        sender: &mpsc::Sender<Submission>,
+        sender: &WriterHandle,
         gql: &str,
     ) -> oneshot::Receiver<Result<TxReceipt, EngineError>> {
         let program = varve_gql::parse_program(gql).unwrap();
@@ -387,14 +383,12 @@ mod tests {
             .use_graph
             .unwrap_or_else(|| DEFAULT_GRAPH.to_string());
         let (ack, rx) = oneshot::channel();
-        sender
-            .try_send(Submission {
-                statements: program.statements,
-                params: BTreeMap::new(),
-                graph,
-                ack,
-            })
-            .unwrap();
+        sender.try_submit(Submission {
+            statements: program.statements,
+            params: BTreeMap::new(),
+            graph,
+            ack,
+        });
         rx
     }
 

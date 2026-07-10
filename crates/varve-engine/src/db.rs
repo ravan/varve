@@ -1,8 +1,5 @@
 use crate::clock::{Clock, MonotonicClock};
-use crate::compact::{
-    self, select_compaction_jobs, write_compacted_blocks, CompactionConfig, CompactionInputBlock,
-    CompactionReport,
-};
+use crate::compact::CompactionReport;
 use crate::const_eval::const_value;
 use crate::gc::{execute_gc, GcConfig, GcReport};
 use crate::registries::Registries;
@@ -11,14 +8,14 @@ use crate::state::{
     GraphsState, PersistedTrie, TableKind, TableState, DEFAULT_GRAPH, EDGES_TABLE, META_GRAPH,
     NODES_TABLE,
 };
-use crate::writer::{spawn_writer, Submission, WriterConfig, WriterState};
+use crate::writer::{spawn_writer, Submission, WriterConfig, WriterHandle, WriterState};
 use datafusion::arrow::record_batch::RecordBatch;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use varve_config::{BuildContext, Config, ConfigError, ConfigSection, RegistryError};
 use varve_gql::ast::{Expr, LabelSpec, QueryBody, Statement};
 use varve_gql::token::GqlError;
@@ -26,8 +23,7 @@ use varve_index::{decode_events, Event, IndexError, LabelFilter, LiveTable, Op};
 use varve_log::{LocalLog, Log, LogError, MemoryLog, DEFAULT_SEGMENT_MAX_BYTES};
 use varve_plan::PlanError;
 use varve_storage::{
-    keys, manifest_history, memory_store, CachedStore, MemoryCache, ObjectStore, ProbeReport,
-    StorageError, TrieCatalog, TrieEntry,
+    memory_store, CachedStore, MemoryCache, ObjectStore, ProbeReport, StorageError,
 };
 use varve_types::{Instant, LogPosition, TemporalBounds, TypeError, Value};
 
@@ -329,7 +325,7 @@ pub struct Db {
     state: Arc<RwLock<GraphsState>>,
     store: Arc<dyn ObjectStore>,
     clock: Arc<dyn Clock>,
-    submit: mpsc::Sender<Submission>,
+    writer: WriterHandle,
     functions: Arc<varve_plan::FunctionRegistry>,
     gc_config: GcConfig,
     /// Cap on quantified-hop expansion length (spec §10, `[query]
@@ -660,12 +656,12 @@ impl Db {
             next_block_id,
             durable_watermark,
         };
-        let submit = spawn_writer(writer_state, cfg);
+        let writer = spawn_writer(writer_state, cfg);
         Db {
             state,
             store,
             clock,
-            submit,
+            writer,
             functions,
             gc_config,
             max_path_depth,
@@ -784,103 +780,7 @@ impl Db {
     /// resolves and commits inside the writer loop, and returns once the tx
     /// is durable AND visible.
     pub async fn compact_once(&self) -> Result<CompactionReport, EngineError> {
-        let history = manifest_history(self.store.as_ref()).await?;
-        let Some(latest) = history.iter().max_by_key(|manifest| manifest.block_id) else {
-            return Ok(CompactionReport::default());
-        };
-        let catalog = TrieCatalog::from_manifests(&history)?;
-        let mut jobs = select_compaction_jobs(&catalog, &CompactionConfig::default())?;
-        let Some(job) = jobs.drain(..).next() else {
-            return Ok(CompactionReport::default());
-        };
-        let order = job.target_sort_order().ok_or_else(|| {
-            EngineError::UnknownTable(format!("{}/{}", job.scope().table, job.scope().family))
-        })?;
-
-        let mut inputs = Vec::with_capacity(job.input_trie_keys.len());
-        for trie_key in &job.input_trie_keys {
-            let data = self.store.get(&job.data_key(trie_key)).await?;
-            let meta = self.store.get(&job.meta_key(trie_key)).await?;
-            inputs.push(CompactionInputBlock {
-                trie_key: trie_key.clone(),
-                data: data.to_vec(),
-                pages: varve_index::decode_meta(&meta)?,
-            });
-        }
-        let input_rows = inputs
-            .iter()
-            .flat_map(|input| &input.pages)
-            .map(|page| page.rows)
-            .sum();
-
-        let compacted = write_compacted_blocks(&job, &inputs, order, crate::flush::PAGE_ROWS)?;
-        let mut output_entries = Vec::with_capacity(compacted.len());
-        let mut persisted = Vec::with_capacity(compacted.len());
-        for output in compacted {
-            let trie_key = output.trie_key.clone();
-            let trie_key_string = trie_key.to_key_string();
-            let row_count = output.encoded.pages.iter().map(|page| page.rows).sum();
-            let entry = TrieEntry {
-                trie_key: trie_key_string,
-                row_count,
-                data_len: output.encoded.data.len() as u64,
-            };
-            self.store
-                .put(
-                    &job.data_key(&trie_key),
-                    bytes::Bytes::from(output.encoded.data.clone()),
-                )
-                .await?;
-            self.store
-                .put(
-                    &job.meta_key(&trie_key),
-                    bytes::Bytes::from(output.encoded.meta.clone()),
-                )
-                .await?;
-            persisted.push(PersistedTrie {
-                entry: entry.clone(),
-                pages: Arc::new(output.encoded.pages),
-            });
-            output_entries.push(entry);
-        }
-
-        let output_rows = output_entries.iter().map(|entry| entry.row_count).sum();
-        let manifest = compact::compacted_manifest(latest, &job, output_entries.clone());
-        self.store
-            .put(
-                &keys::manifest_key(manifest.block_id),
-                bytes::Bytes::from(manifest.to_wire()),
-            )
-            .await?;
-
-        {
-            let mut state = self.state.write().map_err(|_| EngineError::Poisoned)?;
-            let scope = job.scope();
-            let table = state
-                .graph_mut(&scope.graph)
-                .ok_or_else(|| EngineError::UnknownGraph(scope.graph.clone()))?;
-            let tries = match (scope.table.as_str(), scope.family.as_str()) {
-                (NODES_TABLE, "") => &mut table.nodes.tries,
-                (EDGES_TABLE, "") => &mut table.edges.tries,
-                (EDGES_TABLE, varve_storage::ADJ_OUT) => &mut table.adj_out,
-                (EDGES_TABLE, varve_storage::ADJ_IN) => &mut table.adj_in,
-                _ => {
-                    return Err(EngineError::UnknownTable(format!(
-                        "{}/{}/{}",
-                        scope.graph, scope.table, scope.family
-                    )))
-                }
-            };
-            job.replace_inputs_with_outputs(tries, persisted, |trie| trie.entry.trie_key.as_str());
-        }
-
-        Ok(CompactionReport {
-            jobs: 1,
-            input_tries: job.input_trie_keys.len(),
-            output_tries: output_entries.len(),
-            input_rows,
-            output_rows,
-        })
+        self.writer.compact_once().await
     }
 
     pub async fn gc_once(&self) -> Result<GcReport, EngineError> {
@@ -911,15 +811,14 @@ impl Db {
             return Err(EngineError::NotAMutation);
         }
         let (ack, rx) = oneshot::channel();
-        self.submit
-            .send(Submission {
+        self.writer
+            .submit(Submission {
                 statements: program.statements,
                 params: params.clone(),
                 graph,
                 ack,
             })
-            .await
-            .map_err(|_| EngineError::WriterUnavailable)?;
+            .await?;
         rx.await.map_err(|_| EngineError::WriterUnavailable)?
     }
 

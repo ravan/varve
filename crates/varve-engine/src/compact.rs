@@ -130,6 +130,7 @@ impl CompactionJob {
 
 pub(crate) fn compacted_manifest(
     latest: &BlockManifest,
+    block_id: u64,
     job: &CompactionJob,
     output_entries: Vec<TrieEntry>,
 ) -> BlockManifest {
@@ -152,7 +153,7 @@ pub(crate) fn compacted_manifest(
         tables.push(TableTries::new(job.scope().clone(), tries));
     }
     BlockManifest {
-        block_id: latest.block_id + 1,
+        block_id,
         watermark: latest.watermark,
         max_tx_id: latest.max_tx_id,
         max_system_time_us: latest.max_system_time_us,
@@ -584,11 +585,12 @@ mod tests {
 
         let compacted = compacted_manifest(
             &latest,
+            11,
             &job,
             vec![entry("l01-rc-b04".into()), entry("l01-rc-b00".into())],
         );
 
-        assert_eq!(compacted.block_id, latest.block_id + 1);
+        assert_eq!(compacted.block_id, 11);
         assert_eq!(compacted.watermark, latest.watermark);
         assert_eq!(compacted.max_tx_id, latest.max_tx_id);
         assert_eq!(compacted.max_system_time_us, latest.max_system_time_us);
@@ -610,7 +612,7 @@ mod tests {
         let latest = empty_manifest(Vec::new());
         let job = job_for_scope(scope.clone());
 
-        let compacted = compacted_manifest(&latest, &job, vec![entry("l01-rc-b00".into())]);
+        let compacted = compacted_manifest(&latest, 11, &job, vec![entry("l01-rc-b00".into())]);
 
         assert_eq!(compacted.tables.len(), 1);
         assert_eq!(compacted.tables[0].scope_ref(), scope);

@@ -157,7 +157,7 @@ async fn block_store_object_count(dir: &Path) -> usize {
 #[tokio::test]
 async fn storage_object_count_plateaus_under_update_churn() {
     let dir = tempfile::tempdir().unwrap();
-    let mut db = Db::open(gc_blocks_config(dir.path(), 1)).await.unwrap();
+    let db = Db::open(gc_blocks_config(dir.path(), 1)).await.unwrap();
     let mut max_objects = 0;
     let mut latest = 0;
 
@@ -176,8 +176,6 @@ async fn storage_object_count_plateaus_under_update_churn() {
         let objects = block_store_object_count(dir.path()).await;
         max_objects = max_objects.max(objects);
         assert!(objects <= 12, "cycle {cycle} left {objects} objects");
-        drop(db);
-        db = Db::open(gc_blocks_config(dir.path(), 1)).await.unwrap();
     }
 
     let values = query_i64(&db, "MATCH (p:P) RETURN p.v AS v", "v").await;

@@ -5,13 +5,20 @@
 //! both durable and visible; queries never observe un-durable data.
 
 use crate::clock::Clock;
+use crate::compact::{
+    self, select_compaction_jobs, write_compacted_blocks, CompactionConfig, CompactionInputBlock,
+    CompactionReport,
+};
 use crate::const_eval::const_value;
 use crate::db::{
     bounds_per_clause, scan_inputs_for, validate_user_graph_name, EngineError, Overlay,
     SideEffects, TxReceipt,
 };
 use crate::scan::{incident_edges, AdjDirection};
-use crate::state::{GraphsState, TableKind, DEFAULT_GRAPH, EDGES_TABLE, META_GRAPH, NODES_TABLE};
+use crate::state::{
+    GraphsState, PersistedTrie, TableKind, DEFAULT_GRAPH, EDGES_TABLE, META_GRAPH, NODES_TABLE,
+};
+use bytes::Bytes;
 use datafusion::arrow::array::{
     Array, BinaryArray, BooleanArray, FixedSizeBinaryArray, Float64Array, Int64Array, StringArray,
 };
@@ -28,7 +35,7 @@ use varve_gql::ast::{
 };
 use varve_index::{decode_events, encode_events, visible_events, Event, Op};
 use varve_log::{Log, LogRecord, TableEffects};
-use varve_storage::keys;
+use varve_storage::{keys, manifest_history, TrieCatalog, TrieEntry};
 use varve_types::{Doc, Iid, Instant, LogPosition, TemporalBounds, TemporalDimension, Value};
 
 /// Bounded submission queue (roadmap slice 3). Config-driven backpressure
@@ -40,6 +47,39 @@ pub(crate) struct Submission {
     pub params: BTreeMap<String, Value>,
     pub graph: String,
     pub ack: oneshot::Sender<Result<TxReceipt, EngineError>>,
+}
+
+enum Command {
+    Submit(Submission),
+    Compact(oneshot::Sender<Result<CompactionReport, EngineError>>),
+}
+
+#[derive(Clone)]
+pub(crate) struct WriterHandle {
+    sender: mpsc::Sender<Command>,
+}
+
+impl WriterHandle {
+    pub async fn submit(&self, submission: Submission) -> Result<(), EngineError> {
+        self.sender
+            .send(Command::Submit(submission))
+            .await
+            .map_err(|_| EngineError::WriterUnavailable)
+    }
+
+    pub async fn compact_once(&self) -> Result<CompactionReport, EngineError> {
+        let (ack, rx) = oneshot::channel();
+        self.sender
+            .send(Command::Compact(ack))
+            .await
+            .map_err(|_| EngineError::WriterUnavailable)?;
+        rx.await.map_err(|_| EngineError::WriterUnavailable)?
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_submit(&self, submission: Submission) {
+        self.sender.try_send(Command::Submit(submission)).unwrap();
+    }
 }
 
 /// Group-commit tuning (spec §6): a batch flushes when its window elapses OR
@@ -76,7 +116,7 @@ pub(crate) struct WriterState {
     pub query_limits: varve_plan::QueryLimits,
     pub log: Arc<dyn Log>,
     pub next_tx_id: u64,
-    /// Next L0 block id (recovered from the latest manifest in Task 11).
+    /// Next manifest generation, shared by flush and compaction commits.
     pub next_block_id: u64,
     /// Exclusive end of the durably-appended log prefix — becomes the next
     /// flushed block's manifest watermark (decision 6).
@@ -179,30 +219,34 @@ fn stored_labels(labels: &LabelSpec) -> Result<Vec<String>, EngineError> {
 /// Distinguishes a real submission from a flush-timer wakeup in the writer
 /// loop's `select!` below.
 enum Received {
-    Submission(Option<Submission>),
+    Command(Option<Command>),
     FlushTimeout,
 }
 
-/// Spawns the writer loop on a dedicated task and returns the submission
-/// channel `Db` sends statements through.
-pub(crate) fn spawn_writer(mut state: WriterState, cfg: WriterConfig) -> mpsc::Sender<Submission> {
-    let (sender, mut rx) = mpsc::channel::<Submission>(SUBMISSION_QUEUE_LEN);
+/// Spawns the writer loop on a dedicated task and returns the command handle
+/// `Db` uses for transactions and inventory mutations.
+pub(crate) fn spawn_writer(mut state: WriterState, cfg: WriterConfig) -> WriterHandle {
+    let (sender, mut rx) = mpsc::channel::<Command>(SUBMISSION_QUEUE_LEN);
     tokio::spawn(async move {
         // Armed (Some) while unflushed rows exist and a flush interval is
         // configured; disarmed after every flush and whenever the live
         // table is empty.
         let mut flush_deadline: Option<tokio::time::Instant> = None;
+        let mut pending = None;
         loop {
-            let received = match flush_deadline {
-                Some(deadline) => tokio::select! {
-                    sub = rx.recv() => Received::Submission(sub),
-                    _ = tokio::time::sleep_until(deadline) => Received::FlushTimeout,
+            let received = match pending.take() {
+                Some(command) => Received::Command(Some(command)),
+                None => match flush_deadline {
+                    Some(deadline) => tokio::select! {
+                        command = rx.recv() => Received::Command(command),
+                        _ = tokio::time::sleep_until(deadline) => Received::FlushTimeout,
+                    },
+                    None => Received::Command(rx.recv().await),
                 },
-                None => Received::Submission(rx.recv().await),
             };
             match received {
-                Received::Submission(Some(first)) => {
-                    run_batch(&mut state, &cfg, &mut rx, first).await;
+                Received::Command(Some(Command::Submit(first))) => {
+                    pending = run_batch(&mut state, &cfg, &mut rx, first).await;
                     if live_rows(&state) >= cfg.max_block_rows {
                         // A failed flush leaves the live table intact and
                         // retries at the next trigger (decision 10).
@@ -210,7 +254,11 @@ pub(crate) fn spawn_writer(mut state: WriterState, cfg: WriterConfig) -> mpsc::S
                     }
                     flush_deadline = next_deadline(&state, &cfg, flush_deadline);
                 }
-                Received::Submission(None) => {
+                Received::Command(Some(Command::Compact(ack))) => {
+                    let _ = ack.send(compact_once(&mut state).await);
+                    flush_deadline = next_deadline(&state, &cfg, flush_deadline);
+                }
+                Received::Command(None) => {
                     // Sender dropped (Db closed) and channel drained:
                     // nothing left to do.
                     break;
@@ -222,7 +270,7 @@ pub(crate) fn spawn_writer(mut state: WriterState, cfg: WriterConfig) -> mpsc::S
             }
         }
     });
-    sender
+    WriterHandle { sender }
 }
 
 fn live_rows(state: &WriterState) -> usize {
@@ -248,9 +296,9 @@ fn next_deadline(
 async fn run_batch(
     state: &mut WriterState,
     cfg: &WriterConfig,
-    rx: &mut mpsc::Receiver<Submission>,
+    rx: &mut mpsc::Receiver<Command>,
     first: Submission,
-) {
+) -> Option<Command> {
     let deadline = tokio::time::Instant::now() + cfg.window;
     let mut staged: Vec<Staged> = Vec::new();
     let mut staged_bytes = 0usize;
@@ -285,13 +333,117 @@ async fn run_batch(
             }
         }
         match tokio::time::timeout_at(deadline, rx.recv()).await {
-            Ok(Some(sub)) => pending = Some(sub),
+            Ok(Some(Command::Submit(sub))) => pending = Some(sub),
+            Ok(Some(command @ Command::Compact(_))) => {
+                if !staged.is_empty() {
+                    flush(state, std::mem::take(&mut staged)).await;
+                }
+                return Some(command);
+            }
             Ok(None) | Err(_) => break, // channel closed or window elapsed
         }
     }
     if !staged.is_empty() {
         flush(state, staged).await;
     }
+    None
+}
+
+async fn compact_once(state: &mut WriterState) -> Result<CompactionReport, EngineError> {
+    let history = manifest_history(state.store.as_ref()).await?;
+    let Some(latest) = history.iter().max_by_key(|manifest| manifest.block_id) else {
+        return Ok(CompactionReport::default());
+    };
+    let catalog = TrieCatalog::from_manifests(&history)?;
+    let mut jobs = select_compaction_jobs(&catalog, &CompactionConfig::default())?;
+    let Some(job) = jobs.drain(..).next() else {
+        return Ok(CompactionReport::default());
+    };
+    let order = job.target_sort_order().ok_or_else(|| {
+        EngineError::UnknownTable(format!("{}/{}", job.scope().table, job.scope().family))
+    })?;
+
+    let mut inputs = Vec::with_capacity(job.input_trie_keys.len());
+    for trie_key in &job.input_trie_keys {
+        let data = state.store.get(&job.data_key(trie_key)).await?;
+        let meta = state.store.get(&job.meta_key(trie_key)).await?;
+        inputs.push(CompactionInputBlock {
+            trie_key: trie_key.clone(),
+            data: data.to_vec(),
+            pages: varve_index::decode_meta(&meta)?,
+        });
+    }
+    let input_rows = inputs
+        .iter()
+        .flat_map(|input| &input.pages)
+        .map(|page| page.rows)
+        .sum();
+
+    let compacted = write_compacted_blocks(&job, &inputs, order, crate::flush::PAGE_ROWS)?;
+    let mut output_entries = Vec::with_capacity(compacted.len());
+    let mut persisted = Vec::with_capacity(compacted.len());
+    for output in compacted {
+        let trie_key = output.trie_key.clone();
+        let entry = TrieEntry {
+            trie_key: trie_key.to_key_string(),
+            row_count: output.encoded.pages.iter().map(|page| page.rows).sum(),
+            data_len: output.encoded.data.len() as u64,
+        };
+        state
+            .store
+            .put(&job.data_key(&trie_key), Bytes::from(output.encoded.data))
+            .await?;
+        state
+            .store
+            .put(&job.meta_key(&trie_key), Bytes::from(output.encoded.meta))
+            .await?;
+        persisted.push(PersistedTrie {
+            entry: entry.clone(),
+            pages: Arc::new(output.encoded.pages),
+        });
+        output_entries.push(entry);
+    }
+
+    let output_rows = output_entries.iter().map(|entry| entry.row_count).sum();
+    let generation = state.next_block_id;
+    let manifest = compact::compacted_manifest(latest, generation, &job, output_entries.clone());
+    state
+        .store
+        .put(
+            &keys::manifest_key(generation),
+            Bytes::from(manifest.to_wire()),
+        )
+        .await?;
+    state.next_block_id += 1;
+
+    {
+        let mut graphs = state.state.write().map_err(|_| EngineError::Poisoned)?;
+        let scope = job.scope();
+        let table = graphs
+            .graph_mut(&scope.graph)
+            .ok_or_else(|| EngineError::UnknownGraph(scope.graph.clone()))?;
+        let tries = match (scope.table.as_str(), scope.family.as_str()) {
+            (NODES_TABLE, "") => &mut table.nodes.tries,
+            (EDGES_TABLE, "") => &mut table.edges.tries,
+            (EDGES_TABLE, varve_storage::ADJ_OUT) => &mut table.adj_out,
+            (EDGES_TABLE, varve_storage::ADJ_IN) => &mut table.adj_in,
+            _ => {
+                return Err(EngineError::UnknownTable(format!(
+                    "{}/{}/{}",
+                    scope.graph, scope.table, scope.family
+                )))
+            }
+        };
+        job.replace_inputs_with_outputs(tries, persisted, |trie| trie.entry.trie_key.as_str());
+    }
+
+    Ok(CompactionReport {
+        jobs: 1,
+        input_tries: job.input_trie_keys.len(),
+        output_tries: output_entries.len(),
+        input_rows,
+        output_rows,
+    })
 }
 
 /// A statement "reads" if resolving it must observe every earlier tx — so
@@ -1689,10 +1841,7 @@ mod tests {
         }
     }
 
-    fn spawn(
-        log: Arc<dyn Log>,
-        cfg: WriterConfig,
-    ) -> (mpsc::Sender<Submission>, Arc<RwLock<GraphsState>>) {
+    fn spawn(log: Arc<dyn Log>, cfg: WriterConfig) -> (WriterHandle, Arc<RwLock<GraphsState>>) {
         let state = Arc::new(RwLock::new(GraphsState::new()));
         let writer_state = WriterState {
             state: Arc::clone(&state),
@@ -1711,7 +1860,7 @@ mod tests {
 
     /// try_send keeps submission order deterministic (mpsc is FIFO).
     fn submit(
-        sender: &mpsc::Sender<Submission>,
+        sender: &WriterHandle,
         gql: &str,
     ) -> oneshot::Receiver<Result<TxReceipt, EngineError>> {
         let program = varve_gql::parse_program(gql).unwrap();
@@ -1719,14 +1868,12 @@ mod tests {
             .use_graph
             .unwrap_or_else(|| DEFAULT_GRAPH.to_string());
         let (ack, rx) = oneshot::channel();
-        sender
-            .try_send(Submission {
-                statements: program.statements,
-                params: BTreeMap::new(),
-                graph,
-                ack,
-            })
-            .unwrap();
+        sender.try_submit(Submission {
+            statements: program.statements,
+            params: BTreeMap::new(),
+            graph,
+            ack,
+        });
         rx
     }
 
