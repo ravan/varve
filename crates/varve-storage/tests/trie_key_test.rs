@@ -1,6 +1,6 @@
 use varve_storage::keys::{
     l0_trie_key, Bucketer, Recency, TableScope, TrieKey, TrieKeyShard, TrieShard, ADJ_IN,
-    LOG_LIMIT, TRIE_BRANCH_FACTOR, TRIE_LEVEL_BITS,
+    LOG_LIMIT, PAGE_LIMIT, TRIE_BRANCH_FACTOR, TRIE_LEVEL_BITS,
 };
 
 #[test]
@@ -130,6 +130,7 @@ fn table_scope_routes_primary_and_family_object_keys() {
 fn bucketer_matches_xtdb_known_bit_patterns() {
     assert_eq!(TRIE_LEVEL_BITS, 2);
     assert_eq!(TRIE_BRANCH_FACTOR, 4);
+    assert_eq!(PAGE_LIMIT, 1024);
     assert_eq!(LOG_LIMIT, 64);
 
     let iid = varve_types::Iid::from_bytes([

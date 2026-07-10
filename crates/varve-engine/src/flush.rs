@@ -14,7 +14,7 @@ use varve_storage::{keys, BlockManifest, TableTries, TrieEntry};
 
 /// Rows per page (spec §9's XTDB `pageLimit`) — Task 6's block-encoding
 /// default, reused verbatim for every flush.
-pub(crate) const PAGE_ROWS: usize = varve_index::block::DEFAULT_PAGE_ROWS;
+pub(crate) const PAGE_ROWS: usize = varve_storage::keys::PAGE_LIMIT;
 
 /// Encodes both tables' live tails into ONE L0 block and commits it under a
 /// SINGLE manifest PUT (THE atomic commit point, spec §9) — only once that

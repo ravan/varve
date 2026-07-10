@@ -17,11 +17,11 @@ use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
-use varve_types::{Bucketer, Iid, Instant, TemporalBounds, TRIE_LEVEL_BITS};
+use varve_types::{Bucketer, Iid, Instant, TemporalBounds, PAGE_LIMIT, TRIE_LEVEL_BITS};
 
 /// Rows per page (XTDB `pageLimit`). A parameter on `encode_block` so tests
 /// can force page splits; the engine passes this constant.
-pub const DEFAULT_PAGE_ROWS: usize = 1024;
+pub const DEFAULT_PAGE_ROWS: usize = PAGE_LIMIT;
 const MAX_TRIE_PATH_LEVELS: usize = 128 / (TRIE_LEVEL_BITS as usize);
 
 /// One page's entry in the meta file: byte range in the data file plus the

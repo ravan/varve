@@ -2,6 +2,7 @@ use crate::Iid;
 
 pub const TRIE_LEVEL_BITS: u8 = 2;
 pub const TRIE_BRANCH_FACTOR: u8 = 1 << TRIE_LEVEL_BITS;
+pub const PAGE_LIMIT: usize = 1024;
 
 pub struct Bucketer;
 
