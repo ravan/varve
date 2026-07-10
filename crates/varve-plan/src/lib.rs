@@ -13,7 +13,7 @@ pub use expand::{expand_paths, AdjEdge, EdgeAdjacency, PathExpandLimits, QueryLi
 pub use expr::{iid_from_conjuncts, lower_expr, split_conjuncts, ElementCols, Scope};
 pub use functions::{session_context, FunctionRegistry, ScalarFn};
 pub use pattern::{
-    binding_rows, execute_body, execute_body_with_limits, execute_pattern, mangled, scan_specs,
-    scan_specs_for_stmt, scan_specs_with_params, union_query_results, ClauseSpecs, ScanInput,
-    ScanSpec, SpecKind, SYNTH_PREFIX,
+    binding_iid, binding_rows, binding_rows_with_limits, execute_body, execute_body_with_limits,
+    execute_pattern, mangled, scan_specs, scan_specs_for_stmt, scan_specs_with_params,
+    union_query_results, ClauseSpecs, ScanInput, ScanSpec, SpecKind, SYNTH_PREFIX,
 };

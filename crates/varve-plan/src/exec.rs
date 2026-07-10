@@ -58,7 +58,7 @@ pub(crate) fn to_df_literal(l: &Literal) -> datafusion::prelude::Expr {
 /// wins, else the query-level clause, else the spec §7 default — AS OF `now`
 /// on both axes (the writer clock is monotonic, so `at(now)` sees exactly the
 /// current versions).
-pub const PIPELINE_UNSUPPORTED: &str = "pipeline lowering lands in Task 6";
+pub const PIPELINE_UNSUPPORTED: &str = "query shape is not supported by this execution path";
 
 pub struct DegenerateQuery<'a> {
     pub query_temporal: &'a TemporalClauses,

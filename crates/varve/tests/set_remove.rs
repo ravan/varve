@@ -4,7 +4,7 @@ use arrow::array::{Array, Int64Array, StringArray};
 use std::collections::BTreeMap;
 use std::path::Path;
 use varve::{Config, Db, EngineError, RecordBatch};
-use varve_types::Value;
+use varve_types::{Iid, Value};
 
 fn rows(batches: &[RecordBatch]) -> usize {
     batches.iter().map(|batch| batch.num_rows()).sum()
@@ -132,6 +132,39 @@ async fn set_prop_from_expression_per_row() {
         .await
         .unwrap();
     assert_eq!(ints(&batches, "double"), vec![20, 40, 60]);
+}
+
+#[tokio::test]
+async fn set_last_wins_uses_iid_tuple_order() {
+    let db = Db::memory();
+    db.execute(
+        "INSERT (:Source {_id: 1, rank: 10}), (:Source {_id: 2, rank: 20}), \
+                 (:Target {_id: 9})",
+    )
+    .await
+    .unwrap();
+    for source in [1, 2] {
+        db.execute(&format!(
+            "MATCH (s:Source {{_id: {source}}}), (n:Target {{_id: 9}}) \
+             INSERT (s)-[:K]->(n)"
+        ))
+        .await
+        .unwrap();
+    }
+
+    db.execute("MATCH (s:Source)-[:K]->(n:Target) SET n.chosen = s.rank")
+        .await
+        .unwrap();
+
+    let last_source = [1_i64, 2]
+        .into_iter()
+        .max_by_key(|id| Iid::derive("default", "nodes", &Value::Int(*id).id_bytes().unwrap()))
+        .unwrap();
+    let batches = db
+        .query("MATCH (n:Target) RETURN n.chosen AS chosen")
+        .await
+        .unwrap();
+    assert_eq!(ints(&batches, "chosen"), vec![last_source * 10]);
 }
 
 #[tokio::test]

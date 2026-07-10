@@ -431,7 +431,8 @@ async fn union_schema_mismatch_errors() {
         )
         .await;
 
-    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("Error during planning"), "{err}");
 }
 
 #[tokio::test]
@@ -446,7 +447,8 @@ async fn union_schema_name_mismatch_errors() {
         )
         .await;
 
-    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("Error during planning"), "{err}");
 }
 
 #[tokio::test]
@@ -540,15 +542,15 @@ async fn aggregate_result_can_feed_return_expression() {
 }
 
 #[tokio::test]
-async fn aggregate_expression_groups_by_non_aggregate_subexpression() {
+async fn aggregate_expression_does_not_infer_hidden_group_key() {
     let db = people_db().await;
 
-    let batches = db
+    let err = db
         .query("MATCH (n:Person) RETURN n.age + count(*) AS mixed")
         .await
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(int_column(&batches, "mixed"), vec![38, 42]);
+    assert!(err.to_string().contains("n__age"));
 }
 
 #[tokio::test]

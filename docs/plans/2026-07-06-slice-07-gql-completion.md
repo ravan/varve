@@ -655,7 +655,7 @@ oracle release verification was optimized in Task 23 and reclosed in Task 25.
 
 - [x] **Steps:** TDD added `QueryTuning` parse/env tests for `[query]` fields, plus an e2e cyclic quantified-path query proving `path_row_budget = 3` returns `ResourcesExhausted`. Implemented `[query] path_output_batch_rows`, `path_row_budget`, `path_frontier_budget`, `traversal_node_budget`, `traversal_adjacency_budget`; introduced `varve_plan::{QueryLimits, PathExpandLimits}`; propagated configured `PathExpandLimits` through `Db`, writer-side MATCH resolution, `execute_body_with_limits`, `PathExpandNode`, and `PathExpandExec`. `path_output_batch_rows` and traversal scan budgets are parsed/stored for Tasks 21–22.
 
-**Run:** `cargo test -p varve-config`; `cargo test -p varve-plan`; `cargo test -p varve --test traversal`; `cargo test -p varve-engine -- --test-threads=1`.
+**Run:** `cargo test -p varve-plan`; `cargo test -p varve --test traversal`; `cargo test -p varve-engine -- --test-threads=1`. (`QueryTuning` and its parse/env tests live in `varve-engine`; `varve-config` only provides the generic section decoder.)
 
 ### Task 21: Streaming `PathExpandExec`
 

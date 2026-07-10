@@ -354,7 +354,7 @@ fn print_instant(instant: &Instant) -> String {
     format!("TIMESTAMP '{}'", instant)
 }
 
-fn print_expr(expr: &Expr) -> String {
+pub(crate) fn print_expr(expr: &Expr) -> String {
     print_expr_with_parent(expr, None, ChildSide::Left)
 }
 

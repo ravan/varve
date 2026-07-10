@@ -141,6 +141,22 @@ async fn param_in_return() {
 }
 
 #[tokio::test]
+async fn byte_array_param_in_expression_is_unsupported() {
+    let db = Db::memory();
+    db.execute("INSERT (:P {_id: 1})").await.unwrap();
+    let params = one_param("value", Value::Bytes(vec![1, 2, 3]));
+
+    let err = db
+        .query_with("MATCH (n:P) RETURN $value AS value", &params)
+        .await
+        .unwrap_err();
+
+    assert!(err
+        .to_string()
+        .contains("byte-array parameters are not supported in expressions"));
+}
+
+#[tokio::test]
 async fn unary_negation_rejects_param_operand_in_insert_props() {
     let db = Db::memory();
     let params = one_param("n", Value::Int(7));

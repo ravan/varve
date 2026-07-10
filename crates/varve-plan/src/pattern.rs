@@ -646,6 +646,11 @@ pub async fn execute_body_with_limits(
     let mut acc: Option<DataFrame> = None;
     let mut all_specs = Vec::new();
     let mut value_vars = BTreeSet::new();
+    let lowering = LoweringContext {
+        params,
+        functions,
+        path_expand_limits,
+    };
 
     for clause in &body.clauses {
         let Clause::Match {
@@ -660,12 +665,7 @@ pub async fn execute_body_with_limits(
                     .ok_or_else(|| PlanError::Unsupported("FILTER before MATCH".into()))?;
                 let (exists, _) = split_conjuncts(Some(expr));
                 if exists.is_empty() {
-                    let vars = all_specs
-                        .iter()
-                        .map(|spec: &ScanSpec| spec.var.as_str())
-                        .collect::<Vec<_>>();
-                    let mut scope = scope_from_schema(df.schema(), &vars);
-                    scope.value_vars = value_vars.clone();
+                    let scope = pipeline_scope(&df, &all_specs, &value_vars);
                     acc = Some(df.filter(lower_expr(expr, &scope, params, functions)?)?);
                     continue;
                 }
@@ -686,11 +686,9 @@ pub async fn execute_body_with_limits(
                     &filter_clause,
                     &all_specs,
                     &value_vars,
-                    params,
-                    functions,
                     &clause_spec.exists,
                     filter_inputs,
-                    path_expand_limits,
+                    &lowering,
                 )?);
                 continue;
             }
@@ -702,12 +700,7 @@ pub async fn execute_body_with_limits(
                     if value_vars.contains(var) || is_bound_element_var(&all_specs, var) {
                         return Err(PlanError::Unsupported(format!("re-binding variable {var}")));
                     }
-                    let vars = all_specs
-                        .iter()
-                        .map(|spec: &ScanSpec| spec.var.as_str())
-                        .collect::<Vec<_>>();
-                    let mut scope = scope_from_schema(df.schema(), &vars);
-                    scope.value_vars = value_vars.clone();
+                    let scope = pipeline_scope(&df, &all_specs, &value_vars);
                     df = df.with_column(var, lower_expr(expr, &scope, params, functions)?)?;
                     value_vars.insert(var.clone());
                 }
@@ -724,12 +717,7 @@ pub async fn execute_body_with_limits(
                 let mut df = acc
                     .take()
                     .ok_or_else(|| PlanError::Unsupported("FOR before MATCH".into()))?;
-                let vars = all_specs
-                    .iter()
-                    .map(|spec: &ScanSpec| spec.var.as_str())
-                    .collect::<Vec<_>>();
-                let mut scope = scope_from_schema(df.schema(), &vars);
-                scope.value_vars = value_vars.clone();
+                let scope = pipeline_scope(&df, &all_specs, &value_vars);
                 df = df.with_column(var, lower_expr(list, &scope, params, functions)?)?;
                 df = df.unnest_columns_with_options(
                     &[var.as_str()],
@@ -793,16 +781,7 @@ pub async fn execute_body_with_limits(
                 }
                 return Ok(vec![]);
             }
-            let path_df = path_dataframe(
-                path,
-                where_clause,
-                specs,
-                path_inputs,
-                params,
-                functions,
-                path_expand_limits,
-                &[],
-            )?;
+            let path_df = path_dataframe(path, where_clause, specs, path_inputs, &lowering, &[])?;
             clause_df = Some(match clause_df {
                 Some(left) => join_dataframes(
                     left,
@@ -816,18 +795,39 @@ pub async fn execute_body_with_limits(
             all_specs.extend_from_slice(specs);
             specs_remaining = &specs_remaining[path_len..];
         }
-        let exists_inputs = clause_inputs;
+        let mut exists_inputs = Some(clause_inputs);
 
-        let clause_df =
+        let mut clause_df =
             clause_df.ok_or_else(|| PlanError::Unsupported("MATCH without path".into()))?;
+        let (exists, rest) = split_conjuncts(where_clause.as_ref());
+        if clause_spec.optional {
+            clause_df = apply_exists_conjuncts(
+                clause_df,
+                &exists,
+                &clause_spec.exists,
+                exists_inputs.take().ok_or_else(|| {
+                    PlanError::Unsupported("internal: missing OPTIONAL EXISTS inputs".into())
+                })?,
+                &lowering,
+            )?;
+        }
         let mut joined = match acc {
             Some(left) => {
-                let join_type = if clause_spec.optional {
-                    JoinType::Left
+                if clause_spec.optional {
+                    join_optional_dataframes(
+                        left,
+                        clause_df,
+                        &clause_spec.shared_vars,
+                        &rest,
+                        PredicateScope {
+                            specs: &all_specs,
+                            value_vars: &value_vars,
+                        },
+                        &lowering,
+                    )?
                 } else {
-                    JoinType::Inner
-                };
-                join_dataframes(left, clause_df, &clause_spec.shared_vars, join_type)?
+                    join_dataframes(left, clause_df, &clause_spec.shared_vars, JoinType::Inner)?
+                }
             }
             None => {
                 if clause_spec.optional {
@@ -838,17 +838,19 @@ pub async fn execute_body_with_limits(
                 clause_df
             }
         };
-        joined = apply_clause_where(
-            joined,
-            where_clause,
-            &all_specs,
-            &value_vars,
-            params,
-            functions,
-            &clause_spec.exists,
-            exists_inputs,
-            PathExpandLimits::default(),
-        )?;
+        if !clause_spec.optional {
+            joined = apply_clause_where(
+                joined,
+                where_clause,
+                &all_specs,
+                &value_vars,
+                &clause_spec.exists,
+                exists_inputs.take().ok_or_else(|| {
+                    PlanError::Unsupported("internal: missing MATCH EXISTS inputs".into())
+                })?,
+                &lowering,
+            )?;
+        }
         acc = Some(joined);
     }
 
@@ -865,44 +867,47 @@ pub async fn binding_rows(
     params: &BTreeMap<String, Value>,
     vars: &[String],
 ) -> Result<Vec<BTreeMap<String, Iid>>, PlanError> {
-    let batches = execute_body(body, clause_specs, inputs, functions, params).await?;
+    binding_rows_with_limits(
+        body,
+        clause_specs,
+        inputs,
+        functions,
+        PathExpandLimits::default(),
+        params,
+        vars,
+    )
+    .await
+}
+
+pub async fn binding_rows_with_limits(
+    body: &QueryBody,
+    clause_specs: &[ClauseSpecs],
+    inputs: Vec<Vec<ScanInput>>,
+    functions: &FunctionRegistry,
+    path_expand_limits: PathExpandLimits,
+    params: &BTreeMap<String, Value>,
+    vars: &[String],
+) -> Result<Vec<BTreeMap<String, Iid>>, PlanError> {
+    let batches = execute_body_with_limits(
+        body,
+        clause_specs,
+        inputs,
+        functions,
+        path_expand_limits,
+        params,
+    )
+    .await?;
     let mut seen = BTreeSet::new();
     let mut rows = Vec::new();
 
     for batch in batches {
-        let mut columns = Vec::with_capacity(vars.len());
-        for var in vars {
-            let (idx, _) = batch
-                .schema()
-                .column_with_name(var)
-                .ok_or_else(|| PlanError::UnknownColumn(var.clone()))?;
-            let arr = batch
-                .column(idx)
-                .as_any()
-                .downcast_ref::<FixedSizeBinaryArray>()
-                .ok_or_else(|| {
-                    PlanError::Unsupported(format!("binding column {var} is not an iid"))
-                })?;
-            if arr.value_length() != 16 {
-                return Err(PlanError::Unsupported(format!(
-                    "binding column {var} has iid width {}",
-                    arr.value_length()
-                )));
-            }
-            columns.push(arr);
-        }
-
         for row_idx in 0..batch.num_rows() {
             let mut tuple = Vec::with_capacity(vars.len());
-            for column in &columns {
-                if column.is_null(row_idx) {
-                    return Err(PlanError::Unsupported("null binding iid".into()));
-                }
-                let bytes: [u8; 16] = column
-                    .value(row_idx)
-                    .try_into()
-                    .map_err(|_| PlanError::Unsupported("binding iid must be 16 bytes".into()))?;
-                tuple.push(Iid::from_bytes(bytes));
+            for var in vars {
+                tuple.push(
+                    binding_iid(&batch, var, row_idx)?
+                        .ok_or_else(|| PlanError::Unsupported("null binding iid".into()))?,
+                );
             }
             if seen.insert(tuple.clone()) {
                 rows.push(
@@ -923,6 +928,38 @@ pub async fn binding_rows(
     Ok(rows)
 }
 
+/// Reads one projected element binding. Mutation planning and query binding
+/// extraction share this validation so IID width/null semantics cannot drift.
+pub fn binding_iid(
+    batch: &RecordBatch,
+    var: &str,
+    row_idx: usize,
+) -> Result<Option<Iid>, PlanError> {
+    let (idx, _) = batch
+        .schema()
+        .column_with_name(var)
+        .ok_or_else(|| PlanError::UnknownColumn(var.to_string()))?;
+    let column = batch
+        .column(idx)
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .ok_or_else(|| PlanError::Unsupported(format!("binding column {var} is not an iid")))?;
+    if column.value_length() != 16 {
+        return Err(PlanError::Unsupported(format!(
+            "binding column {var} has iid width {}",
+            column.value_length()
+        )));
+    }
+    if column.is_null(row_idx) {
+        return Ok(None);
+    }
+    let bytes: [u8; 16] = column
+        .value(row_idx)
+        .try_into()
+        .map_err(|_| PlanError::Unsupported("binding iid must be 16 bytes".into()))?;
+    Ok(Some(Iid::from_bytes(bytes)))
+}
+
 pub async fn union_query_results(
     first: Vec<RecordBatch>,
     unions: Vec<(UnionKind, Vec<RecordBatch>)>,
@@ -939,7 +976,10 @@ pub async fn union_query_results(
             .map(|batch| batch.schema())
             .ok_or_else(|| PlanError::Unsupported("UNION body produced no schema".into()))?;
         if !same_projected_schema(expected_schema.as_ref(), schema.as_ref()) {
-            return Err(PlanError::Unsupported("UNION schema mismatch".into()));
+            return Err(datafusion::error::DataFusionError::Plan(
+                "UNION inputs must have identical column names and types".into(),
+            )
+            .into());
         }
         df = df.union(batches_dataframe(batches, functions)?)?;
         if matches!(kind, UnionKind::Distinct) {
@@ -972,18 +1012,27 @@ fn batches_dataframe(
     Ok(session_context(functions).read_table(Arc::new(table))?)
 }
 
-#[allow(clippy::too_many_arguments)]
+struct LoweringContext<'a> {
+    params: &'a BTreeMap<String, Value>,
+    functions: &'a FunctionRegistry,
+    path_expand_limits: PathExpandLimits,
+}
+
+#[derive(Clone, Copy)]
+struct PredicateScope<'a> {
+    specs: &'a [ScanSpec],
+    value_vars: &'a BTreeSet<String>,
+}
+
 fn path_dataframe(
     path: &PathPattern,
     where_clause: &Option<Expr>,
     specs: &[ScanSpec],
     inputs: Vec<ScanInput>,
-    params: &BTreeMap<String, Value>,
-    functions: &FunctionRegistry,
-    path_expand_limits: PathExpandLimits,
+    lowering: &LoweringContext<'_>,
     preserve_vars: &[String],
 ) -> Result<DataFrame, PlanError> {
-    let ctx = session_context(functions);
+    let ctx = session_context(lowering.functions);
     let mut frames: Vec<Option<DataFrame>> = Vec::with_capacity(specs.len());
     let mut adjacencies: Vec<Option<Arc<EdgeAdjacency>>> = Vec::with_capacity(specs.len());
     let mut row_counts: Vec<usize> = Vec::with_capacity(specs.len());
@@ -991,7 +1040,7 @@ fn path_dataframe(
         match input {
             ScanInput::Batch(None) => {
                 return Err(PlanError::Unsupported(
-                    "empty pipeline path input lands later in Task 6".into(),
+                    "empty path input is not supported by this execution path".into(),
                 ));
             }
             ScanInput::Batch(Some(batch)) => {
@@ -1005,8 +1054,8 @@ fn path_dataframe(
                     &spec.var,
                     element_props(path, i),
                     where_clause,
-                    params,
-                    functions,
+                    lowering.params,
+                    lowering.functions,
                 )?;
                 let df = if preserve_vars.contains(&spec.var) {
                     df.with_column(&exists_join_key(&spec.var), col(mangled(&spec.var, "_iid")))?
@@ -1035,7 +1084,7 @@ fn path_dataframe(
         specs,
         path,
         forward,
-        path_expand_limits,
+        lowering.path_expand_limits,
     )
 }
 
@@ -1126,17 +1175,28 @@ fn is_bound_element_var(specs: &[ScanSpec], var: &str) -> bool {
         .any(|spec| !spec.var.starts_with(SYNTH_PREFIX) && spec.var == var)
 }
 
-#[allow(clippy::too_many_arguments)]
+fn pipeline_scope(
+    df: &DataFrame,
+    specs: &[ScanSpec],
+    value_vars: &BTreeSet<String>,
+) -> Scope<'static> {
+    let vars = specs
+        .iter()
+        .map(|spec| spec.var.as_str())
+        .collect::<Vec<_>>();
+    let mut scope = scope_from_schema(df.schema(), &vars);
+    scope.value_vars = value_vars.clone();
+    scope
+}
+
 fn apply_clause_where(
     mut df: DataFrame,
     where_clause: &Option<Expr>,
     specs: &[ScanSpec],
     value_vars: &BTreeSet<String>,
-    params: &BTreeMap<String, Value>,
-    functions: &FunctionRegistry,
     exists_specs: &[ExistsSpecs],
-    mut exists_inputs: Vec<ScanInput>,
-    path_expand_limits: PathExpandLimits,
+    exists_inputs: Vec<ScanInput>,
+    lowering: &LoweringContext<'_>,
 ) -> Result<DataFrame, PlanError> {
     let Some(where_clause) = where_clause else {
         if !exists_inputs.is_empty() {
@@ -1159,17 +1219,30 @@ fn apply_clause_where(
     let mut scope = scope_from_schema(df.schema(), &vars);
     scope.value_vars = value_vars.clone();
     for expr in rest {
-        df = df.filter(lower_expr(expr, &scope, params, functions)?)?;
+        df = df.filter(lower_expr(
+            expr,
+            &scope,
+            lowering.params,
+            lowering.functions,
+        )?)?;
+    }
+    apply_exists_conjuncts(df, &exists, exists_specs, exists_inputs, lowering)
+}
+
+fn apply_exists_conjuncts(
+    mut df: DataFrame,
+    exists: &[ExistsConjunct<'_>],
+    exists_specs: &[ExistsSpecs],
+    mut exists_inputs: Vec<ScanInput>,
+    lowering: &LoweringContext<'_>,
+) -> Result<DataFrame, PlanError> {
+    if exists.len() != exists_specs.len() {
+        return Err(PlanError::Unsupported(
+            "internal: EXISTS specs/input length mismatch".into(),
+        ));
     }
     for (exists, specs) in exists.iter().copied().zip(exists_specs) {
-        let subquery = exists_dataframe(
-            exists,
-            specs,
-            &mut exists_inputs,
-            params,
-            functions,
-            path_expand_limits,
-        )?;
+        let subquery = exists_dataframe(exists, specs, &mut exists_inputs, lowering)?;
         let join_type = if exists.negated {
             JoinType::LeftAnti
         } else {
@@ -1195,9 +1268,7 @@ fn exists_dataframe(
     exists: ExistsConjunct<'_>,
     exists_specs: &ExistsSpecs,
     inputs: &mut Vec<ScanInput>,
-    params: &BTreeMap<String, Value>,
-    functions: &FunctionRegistry,
-    path_expand_limits: PathExpandLimits,
+    lowering: &LoweringContext<'_>,
 ) -> Result<DataFrame, PlanError> {
     let inner_where = exists.where_clause.cloned();
     let mut specs_remaining = exists_specs.specs.as_slice();
@@ -1219,7 +1290,7 @@ fn exists_dataframe(
             empty_path_dataframe(
                 path_specs,
                 &path_inputs,
-                functions,
+                lowering.functions,
                 &exists_specs.shared_keys,
             )?
         } else {
@@ -1228,9 +1299,7 @@ fn exists_dataframe(
                 &inner_where,
                 path_specs,
                 path_inputs,
-                params,
-                functions,
-                path_expand_limits,
+                lowering,
                 &exists_specs.shared_vars,
             )?
         };
@@ -1247,7 +1316,13 @@ fn exists_dataframe(
         specs_remaining = &specs_remaining[path_len..];
     }
     let df = df.ok_or_else(|| PlanError::Unsupported("EXISTS without path".into()))?;
-    apply_where(df, &inner_where, &exists_specs.specs, params, functions)
+    apply_where(
+        df,
+        &inner_where,
+        &exists_specs.specs,
+        lowering.params,
+        lowering.functions,
+    )
 }
 
 fn join_dataframes(
@@ -1292,6 +1367,121 @@ fn join_dataframes(
     Ok(left
         .join(right, join_type, &key_refs, &right_key_refs, None)?
         .drop_columns(&right_key_refs)?)
+}
+
+fn join_optional_dataframes(
+    left: DataFrame,
+    mut right: DataFrame,
+    shared_vars: &[String],
+    predicates: &[&Expr],
+    predicate_scope: PredicateScope<'_>,
+    lowering: &LoweringContext<'_>,
+) -> Result<DataFrame, PlanError> {
+    let mut conditions = Vec::new();
+    let mut right_keys = Vec::new();
+    let mut drop_cols = Vec::new();
+
+    if shared_vars.is_empty() {
+        let left = left.with_column("__cross", lit(1i64))?;
+        right = right.with_column("__cross_right", lit(1i64))?;
+        conditions.push(col("__cross").eq(col("__cross_right")));
+        right_keys.push("__cross_right".to_string());
+        return finish_optional_join(
+            left,
+            right,
+            conditions,
+            predicates,
+            predicate_scope,
+            lowering,
+            &["__cross", "__cross_right"],
+        );
+    }
+
+    for var in shared_vars {
+        let key = mangled(var, "_iid");
+        let right_key = format!("__join_{key}");
+        right = right.with_column(&right_key, col(key.clone()))?;
+        conditions.push(col(key).eq(col(right_key.clone())));
+        right_keys.push(right_key);
+        let prefix = format!("{var}__");
+        drop_cols.extend(
+            right
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().to_string())
+                .filter(|name| name.starts_with(&prefix)),
+        );
+    }
+    if !drop_cols.is_empty() {
+        let refs = drop_cols.iter().map(String::as_str).collect::<Vec<_>>();
+        right = right.drop_columns(&refs)?;
+    }
+    let drop_after = right_keys.iter().map(String::as_str).collect::<Vec<_>>();
+    finish_optional_join(
+        left,
+        right,
+        conditions,
+        predicates,
+        predicate_scope,
+        lowering,
+        &drop_after,
+    )
+}
+
+fn finish_optional_join(
+    left: DataFrame,
+    right: DataFrame,
+    mut conditions: Vec<DfExpr>,
+    predicates: &[&Expr],
+    predicate_scope: PredicateScope<'_>,
+    lowering: &LoweringContext<'_>,
+    drop_after: &[&str],
+) -> Result<DataFrame, PlanError> {
+    let vars = predicate_scope
+        .specs
+        .iter()
+        .map(|spec| spec.var.as_str())
+        .collect::<Vec<_>>();
+    let mut scope = scope_from_join_schemas(left.schema(), right.schema(), &vars);
+    scope.value_vars = predicate_scope.value_vars.clone();
+    for predicate in predicates {
+        conditions.push(lower_expr(
+            predicate,
+            &scope,
+            lowering.params,
+            lowering.functions,
+        )?);
+    }
+    Ok(left
+        .join_on(right, JoinType::Left, conditions)?
+        .drop_columns(drop_after)?)
+}
+
+fn scope_from_join_schemas(
+    left: &datafusion::common::DFSchema,
+    right: &datafusion::common::DFSchema,
+    vars: &[&str],
+) -> Scope<'static> {
+    let names = left
+        .fields()
+        .iter()
+        .chain(right.fields())
+        .map(|field| field.name().to_string())
+        .collect::<BTreeSet<_>>();
+    let elements = vars
+        .iter()
+        .map(|var| {
+            let prefix = format!("{var}__");
+            let available = names
+                .iter()
+                .filter(|name| name.starts_with(&prefix))
+                .cloned()
+                .collect();
+            ((*var).to_string(), ElementCols { available })
+        })
+        .collect();
+    Scope::new(elements, BTreeSet::new(), BTreeSet::new())
 }
 
 fn join_exists(
@@ -1687,17 +1877,6 @@ async fn project_return_body(
         let mut agg_exprs = Vec::new();
         for (expr, _) in &ret.items {
             if contains_aggregate(expr, functions) {
-                let mut group_props = Vec::new();
-                collect_group_properties(expr, functions, &mut group_props);
-                for group_expr in group_props {
-                    let (group_name, added) =
-                        add_internal_alias(&mut group_aliases, &group_expr, "__varve_group");
-                    if added {
-                        group_exprs.push(
-                            lower_expr(&group_expr, &scope, params, functions)?.alias(group_name),
-                        );
-                    }
-                }
                 collect_aggregate_exprs(expr, functions, &mut aggregate_exprs);
             } else {
                 let (group_name, added) =
@@ -1967,51 +2146,6 @@ fn collect_aggregate_exprs(expr: &Expr, functions: &FunctionRegistry, out: &mut 
     }
 }
 
-fn collect_group_properties(expr: &Expr, functions: &FunctionRegistry, out: &mut Vec<Expr>) {
-    match expr {
-        Expr::FnCall { name, .. } if functions.is_aggregate(name) => {}
-        Expr::Prop { .. } => {
-            if !out.iter().any(|existing| existing == expr) {
-                out.push(expr.clone());
-            }
-        }
-        Expr::FnCall { args, .. } | Expr::List(args) => {
-            for arg in args {
-                collect_group_properties(arg, functions, out);
-            }
-        }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
-            collect_group_properties(expr, functions, out);
-        }
-        Expr::Binary { lhs, rhs, .. } => {
-            collect_group_properties(lhs, functions, out);
-            collect_group_properties(rhs, functions, out);
-        }
-        Expr::Case {
-            operand,
-            whens,
-            otherwise,
-        } => {
-            if let Some(expr) = operand {
-                collect_group_properties(expr, functions, out);
-            }
-            for (when_expr, then_expr) in whens {
-                collect_group_properties(when_expr, functions, out);
-                collect_group_properties(then_expr, functions, out);
-            }
-            if let Some(expr) = otherwise {
-                collect_group_properties(expr, functions, out);
-            }
-        }
-        Expr::Exists { where_clause, .. } => {
-            if let Some(expr) = where_clause {
-                collect_group_properties(expr, functions, out);
-            }
-        }
-        Expr::Literal(_) | Expr::Param(_) | Expr::Var(_) | Expr::Star => {}
-    }
-}
-
 fn add_internal_alias(
     aliases: &mut Vec<(Expr, String)>,
     expr: &Expr,
@@ -2274,7 +2408,7 @@ mod tests {
         .unwrap_err();
         assert!(
             err.to_string()
-                .contains("pipeline lowering lands in Task 6"),
+                .contains("query shape is not supported by this execution path"),
             "unexpected error: {err}"
         );
     }

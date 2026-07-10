@@ -688,8 +688,8 @@ impl Parser {
             if path.var.is_some() {
                 return Err(GqlError::Parse {
                     offset,
-                    msg: "path variables (`p = …`) on INSERT patterns land in slice 7: bare \
-                          node/edge patterns only for INSERT"
+                    msg: "path variables (`p = …`) are not supported in INSERT patterns; use \
+                          bare node/edge patterns"
                         .into(),
                 });
             }
@@ -884,7 +884,8 @@ impl Parser {
         if quantifier.is_some() && var.is_some() {
             return Err(GqlError::Parse {
                 offset,
-                msg: "edge variables on quantified edges (group variables) land in slice 7".into(),
+                msg: "edge variables on quantified edges (group variables) are not supported"
+                    .into(),
             });
         }
         Ok(EdgePattern {

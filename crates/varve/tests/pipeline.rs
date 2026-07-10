@@ -139,6 +139,30 @@ async fn optional_match_preserves_left_rows_with_nulls() {
 }
 
 #[tokio::test]
+async fn optional_match_where_preserves_left_rows() {
+    let db = Db::memory();
+    seed_people(&db).await;
+
+    let rows = db
+        .query(
+            "MATCH (p:Person)
+             OPTIONAL MATCH (p:Person)-[:KNOWS]->(f:Person) WHERE f.name = 'Nobody'
+             RETURN p.name AS person, f.name AS friend",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        nullable_string_pairs(&rows, "person", "friend"),
+        vec![
+            ("Ada".to_string(), None),
+            ("Bob".to_string(), None),
+            ("Cy".to_string(), None),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn optional_match_chained_after_hop() {
     let db = Db::memory();
     seed_people(&db).await;
