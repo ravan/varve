@@ -9,6 +9,9 @@ varve-engine = { path = "../varve-engine" }
 varve-types = { path = "../varve-types" }
 varve-config = { path = "../varve-config" }
 datafusion = { workspace = true }
+arrow-json = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 arrow = { workspace = true }

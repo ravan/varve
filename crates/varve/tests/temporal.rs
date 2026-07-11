@@ -93,7 +93,7 @@ async fn retroactive_correction_is_system_time_dependent() {
 
     // Old system time: we still see what we believed then.
     let then = db
-        .query(&format!(
+        .query(format!(
             "FOR SYSTEM_TIME AS OF TIMESTAMP '{}' MATCH (e:Employee) RETURN e.salary AS salary",
             before.system_time
         ))
@@ -103,7 +103,7 @@ async fn retroactive_correction_is_system_time_dependent() {
 
     // And at the old system time, February 2026 had no known salary at all.
     let feb_then = db
-        .query(&format!(
+        .query(format!(
             "FOR VALID_TIME AS OF DATE '2026-02-01' FOR SYSTEM_TIME AS OF TIMESTAMP '{}' \
              MATCH (e:Employee) RETURN e.salary AS salary",
             before.system_time
@@ -130,7 +130,7 @@ async fn delete_then_as_of_before_the_delete() {
         0
     );
     let back = db
-        .query(&format!(
+        .query(format!(
             "FOR SYSTEM_TIME AS OF TIMESTAMP '{}' MATCH (p:Person) RETURN p.name AS name",
             ins.system_time
         ))

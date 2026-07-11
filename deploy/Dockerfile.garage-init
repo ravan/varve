@@ -1,0 +1,16 @@
+# syntax=docker/dockerfile:1
+#
+# Init image for the Compose demo's one-shot `garage-init` service. The
+# upstream `dxflrs/garage` image is shell-less (FROM scratch + a static
+# binary), so the multi-step layout/bucket/key bootstrap — which needs a POSIX
+# shell, awk, and idempotent conditionals — cannot run there. We lift the
+# static `garage` binary onto alpine (it runs unchanged) and drive it from
+# `garage-init.sh`. GARAGE_IMAGE is passed as a build arg by docker-compose.yml
+# (x-garage-image anchor) so the tag is pinned in exactly one place.
+ARG GARAGE_IMAGE
+FROM ${GARAGE_IMAGE} AS garage
+
+FROM alpine:3.20
+COPY --from=garage /garage /garage
+COPY deploy/garage-init.sh /garage-init.sh
+ENTRYPOINT ["/bin/sh", "/garage-init.sh"]

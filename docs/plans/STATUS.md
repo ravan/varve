@@ -3,8 +3,14 @@
 > Update end EVERY session. entry point next session — read first, then `varve-v1-roadmap.md`, then current slice's detailed plan.
 
 ## Current position
-- **Current entry point:** Slice 9 planning in `docs/plans/varve-v1-roadmap.md` -- write the Slice 9 detailed plan for server, CLI, and query-node role, then execute it task-by-task.
-- **Current slice:** 9 (Server, CLI, query nodes) -- NOT STARTED. Slice 8 is COMPLETE.
+- **Current entry point:** Slice 10 planning (Coordination, failover, backpressure, observability) -- no detailed plan file yet. FIRST generate it (superpowers:writing-plans) from `docs/plans/varve-v1-roadmap.md` Slice 10 + the spec, then execute.
+- **Current slice:** 9 (Server, CLI, query nodes) -- ✅ **COMPLETE** (2026-07-11, branch `slice-9`, Tasks 1-16 of 16). Whole-slice verification + docs closeout committed as Task 16.
+- **Slice 9 shipped:** strict IEC byte sizes; bounded durable log reads (stop at exclusive upper bound); atomic resolved-effect replay (no GQL re-execution); cloneable role-aware `Db` + bounded query follower; basis-aware streaming query builder; writer advertisement + role-gated admin/verification; `varve-server` JSON/wire contract + `varve::rows` facade iterator; protocol/auth/metrics registries; authenticated axum router + chunked Arrow IPC; HTTP frontend + rustls + `varved` binary; `varve-cli` client adapters; shell REPL + table output; JSONL import/export + admin commands; cross-process consistency/scale-out harness; distroless image + Garage/1-writer/2-query Compose demo.
+- **Slice 9 final demo command:** `just compose-demo` (`rtk proxy sh scripts/compose_demo.sh`) -- distroless build + pinned Garage + 1 writer + 2 query nodes; loads the reduced Slice 6 fixture over HTTP, verifies both query nodes agree under a basis read, decodes an Arrow stream, drives `varve` shell + admin, and always tears the stack + volumes down. Prints `=== compose-demo: PASSED ===`.
+- **Slice 9 final verification (2026-07-11):** `rtk cargo fmt --all --check` clean; `rtk cargo clippy --workspace --all-targets -- -D warnings` clean; `rtk cargo test --workspace -- --test-threads=1` **809 passed, 96 suites, 180.55 s** (809 incl. the final-review `/healthz` decoupling test); `rtk cargo test -p varve-server --test process_consistency --test process_scale_out -- --test-threads=1` **4 passed, 2 suites**; `rtk cargo test -p varve-cli -- --test-threads=1` **47 passed, 9 suites**; `rtk cargo test -p varve-server --test arrow_stream --test tls -- --test-threads=1` **2 passed, 2 suites**; dependency unification (`cargo tree -d` shows NO duplicate of arrow/object_store/reqwest -- single arrow 58.3.0, object_store 0.13.2, reqwest 0.12.28); `rtk cargo check -p varve-server --no-default-features` compiles (core lib builds without http/tls); `varved --help` documents `--config`; `varve --help` documents shell/import/export/admin + `--dir`/`--url`/`--token`; `rtk git diff --check` clean; `just compose-demo` PASSED.
+- **Slice 9 final whole-branch review (2026-07-11):** SDD final review over the whole branch (`0514328..4425ca3`, 43 commits) found NO Critical and one Important cross-cutting finding: the only public/unauthenticated route `/healthz` was calling `Db::status()`, which does an object-store `latest_manifest` LIST+GET on every hit — an unauthenticated traffic-amplification vector into the sovereign backend AND false-503 coupling of liveness to transient storage reachability. FIXED (`a6133c7`): added I/O-free `Db::follower_error()` (reads only the in-memory progress watch); `/healthz` uses it and preserves the exact `200 {"status":"ok"}` / `503 {"status":"degraded","error":"follower stopped"}` bodies; the manifest-reading `Db::status()` stays on authenticated `/v1/status` + `/metrics` only. A non-vacuous test corrupts the on-disk manifest and proves `/v1/status` 500s while `/healthz` stays 200. Also removed the dead `RemoteClient::send_mutation` `allow_redirect` param (one-hop-then-RedirectLoop behavior unchanged). Re-reviewed ✅.
+- **Slice 9 deferred fast-follows (final-review triaged safe-to-defer; recorded here with owner):** (1) CLI `invalid --label/--graph` rejection untested + `cli_help.rs` never asserts literal `import`/`export`/`admin` help substrings — add durable tests (Slice 10/11 cleanup). (2) `process_scale_out.rs` reader loop has no overall wall-clock deadline (each query bounded by a 30s client timeout, but persistent read-path errors would retry every 25 ms indefinitely = hang-on-regression, not flaky-pass) — wrap in a `tokio::time::timeout` (Slice 10). (3) `varve-testkit` as a `varve-server` dev-dep transitively enables the inert `fault-injection` feature for the server test build (env-gated by `VARVE_CRASH_TRIGGER`, unset) — isolate the fixture if preferred (low priority). (4) Binary columns render as arrow-json hex on `/v1/query` JSON vs the `{"$bytes":base64}` tag on CLI `export` — only export round-trips losslessly; doc note (low priority). (5) Pre-existing Slice-7-era minors: Task 6 `publish_writer` doc-comment placement; Task 7 `TxResponse::from_receipt` formatting of out-of-chrono-range synthetic instants.
+- **Slice 9 CI note (2026-07-11):** `.github/workflows/ci.yml` had 2 PRE-EXISTING workflow-breaking YAML indentation bugs (the `check` job's `upload-artifact` `with:` block + `property-nightly`'s `env:` block) that made the WHOLE workflow unparseable; the Task 15 commit fixed them (pure whitespace, values unchanged — base=unparseable, head=parses) and added a non-scheduled `container-image` job (`docker build`). CI is now known-parseable again.
 - **Slice 8 completed session:** Task 14 whole-slice verification and docs closeout.
 - **Slice 8 shipped:** hash-trie key/parser and page path metadata; recovery/query trie-path pruning; manifest-history trie catalog; GC-only object-store delete; deterministic embedded compaction through manifest state; compaction query equivalence coverage; retention-aware embedded `Db::gc_once()`/`GcReport`; raw-object GDPR erase proof; churn plateau smoke/demo.
 - **Slice 8 Task 13 deviation RESOLVED (2026-07-10):** compaction manifest commits now run through the single writer and share its manifest-generation allocator; the plateau smoke churns through compact+GC cycles on one `Db` handle.
@@ -61,6 +67,24 @@
   files. `varve-testkit` moved `tempfile` to `[dependencies]` and added `varve-config` (deps) + `bytes` (dev-dep). Container tests are
   gated by `VARVE_S3_BACKENDS` (comma-list or `all`) and skip silently otherwise; image pins live ONLY in `varve-testkit/src/backends.rs`
   (tags listed in slice-5 decision 7). Live matrix runner: `just s3-matrix` (defaults garage,seaweedfs,minio).
+- **Dependency pins (slice 9, verified live 2026-07-11 from `Cargo.lock`):** server/CLI deps resolved to
+  `serde_json` 1.0.150, `base64` 0.22.1, `axum` 0.8.9, `axum-server` 0.8.0, `prometheus` 0.14.0,
+  `subtle` 2.6.1 (constant-time token compare), `clap` 4.6.1 (derive+env), `reqwest` 0.12.28 (STAYS 0.12 —
+  default-features off, `rustls-tls`/`json`/`stream`; Varve's direct HTTP client), `rustyline` 18.0.1,
+  `tokio-stream` 0.1.18, `url` 2.5.8, `tracing` 0.1.44, `tracing-subscriber` 0.3.23 (env-filter, routed to
+  STDERR so stdout carries only the `VARVED_LISTENING <addr>` contract line), `rustls` 0.23.41
+  (`default-features = false`, features `ring`/`std`/`tls12`; the crypto provider is made deterministic by an
+  explicit `rustls` dep + idempotent `ring::default_provider().install_default()` in the TLS branch, avoiding
+  heavier aws-lc-rs), and `arrow-json` 58.3.0. **Arrow stays unified at 58.3.0** and gained the `prettyprint`
+  feature at the workspace pin (CLI shell table output via `pretty_format_batches`). `varve-server` features:
+  `http = ["dep:axum-server","dep:url"]`, `tls = ["http","dep:rustls","axum-server/tls-rustls-no-provider"]`;
+  the core lib compiles with `--no-default-features` (no http/tls). `varve-cli`'s lib dep on `varve-server` is
+  `default-features = false` (the axum router is a dev-dep only). Implementation-only API adaptations (tests
+  unchanged; full detail in the decisions below): live `PageMeta.rows` implements the plan's `row_count`;
+  exact-key writer-advertisement discovery falls back from an exact prefix to parent `v1` listing (the
+  object-store abstraction excludes a key equal to its prefix) while still requiring exact equality before GET;
+  object-store log decoding is frame-incremental to satisfy the excluded-corruption contract; clap `Cli`/`Command`
+  live in `varve-cli/src/cli.rs` (integration tests link the lib, not `[[bin]]` main.rs).
 - Gate: `just check` = `cargo fmt --all --check` + `cargo clippy --workspace --all-targets
   -- -D warnings` + `cargo test --workspace`. Same three commands run in CI (`.github/workflows/ci.yml`).
   CI gained a `crash-matrix` job (slice 3): `cargo test -p varve-testkit --release --test
@@ -70,6 +94,53 @@
   byte format, so it is pinned). `.superpowers/` is SDD scratch (self-ignored).
 
 ## Decisions made during implementation
+
+- **2026-07-10 (slice 9 Tasks 1-2, configuration and bounded logs):** `ByteSize` accepts only quoted IEC forms (`B`/`KiB`/`MiB`/`GiB`), replacing numeric byte compatibility for group commit and cache limits while preserving 8 MiB/512 MiB/50 GiB defaults. Local log reads now stop before excluded frames/segments. Object-store decoding became frame-incremental because the plan's post-decode loop guard alone could not exclude corrupt later frames inside one object; strict whole-object recovery still validates every frame.
+- **2026-07-10 (slice 9 Tasks 3-4, replay and node lifecycle):** resolved records are fully decoded and whole-record prevalidated before any catalog/table mutation; startup recovery and followers share the same ordered catalog classifier. `Db` is a private-`Arc<DbInner>` Clone+Debug handle with exact Writer/Query/Compactor gates. Query-only nodes consume bounded resolved log ranges, publish progress only after apply, expose terminal errors/gaps, and own an abortable follower task so final-handle drop cancels an in-flight poll.
+- **2026-07-10 (slice 9 Task 5, basis and streaming):** the sole query API is an owned `Query` builder implementing `IntoFuture`; `query_with` was removed. Non-UNION final DataFrames stream lazily and collection helpers reuse that lowering. Basis waits use exact tx/log-position comparisons and a hard timeout; timeout-boundary resolution takes at most two linearized watch snapshots with precedence follower error → satisfied basis → closed channel → timeout, so continuous publication cannot extend the deadline.
+- **2026-07-10 (slice 9 Tasks 6-7, administration and wire contract):** writer advertisement is canonical JSON at `v1/writer.json` via plain PUT. Exact-key discovery falls back from an exact prefix to parent `v1` listing because the active object-store abstraction excludes a key equal to its prefix, while still requiring exact equality before GET. Verification is deterministic/read-only over the latest manifest and bounded 1024-position log ranges. `varve-server` is currently library-only; snake_case DTOs, basis forms, tagged bytes, and explicit-null rows are frozen, with `varve::rows` as the single Arrow-to-JSON implementation.
+- **2026-07-10 (slice 9 session-1 dependencies/adaptations):** `serde_json` resolves 1.0.150, `base64` 0.22.1, and `arrow-json` 58.3.0; Arrow remains unified at 58.3.0. Live `PageMeta.rows` implements the plan's `row_count` check. Two non-blocking review minors remain for final triage: move the mutation doc comment from `publish_writer` back to `execute`; decide whether public `TxResponse::from_receipt` should reject or specially format synthetic instants outside chrono's RFC3339 range.
+
+- **2026-07-11 (slice 9 Tasks 8-16, server/CLI/query-node COMPLETE — final contracts):**
+  - **Query follower defaults (`[node]` config):** `roles` (default all: writer+query+compactor; compactor requires
+    writer; a non-empty subset is validated), `tail_poll_interval_ms` **= 50**, `tail_batch_records` **= 1024**
+    (must be > 0; the bounded log-range size a follower consumes per apply), `basis_timeout_ms` **= 5000**. Query-only
+    nodes open from the latest manifest watermark, apply decoded resolved effects with NO GQL re-execution, publish
+    progress only after apply, expose terminal errors/gaps, and own an abortable follower task (final-handle drop
+    cancels an in-flight poll).
+  - **Basis:** a read basis is either a bare tx id or `at:<packed-u64>` (packed `LogPosition`); the query blocks until
+    that basis is applied or `basis_timeout_ms` elapses (`basis_timeout` error), makes a writer receipt immediately
+    readable from BOTH query processes, and (unset) reads current node state (eventually consistent).
+  - **`v1/writer.json` advertisement is NON-coordination:** a plain canonical-JSON PUT of the writer's
+    `advertised_address` (required config on writer nodes). It is NOT a lock, lease, or election — exactly-one-writer is
+    still a deployment guarantee; the CAS lease/failover coordinator is Slice 10. Query nodes read it to answer 421.
+  - **Route/auth matrix (`varve-server` http frontend):** `GET /healthz` **public**; `GET /metrics` (Prometheus
+    `text/plain; version=0.0.4`), `GET /v1/status`, `POST /v1/query`, `POST /v1/tx`, `POST /v1/admin/{compact,gc,verify}`
+    all require `Authorization: Bearer <token>`. A mutation (`/v1/tx`, admin) to a query-only node returns **421**
+    (Misdirected Request) with the advertised writer address. Request bodies bounded by `[server.http] max_body_bytes`
+    (human IEC size). Content negotiation: response is **JSON by default** (`*/*` and `application/json`); send
+    `Accept: application/vnd.apache.arrow.stream` for a chunked, batch-backpressured Arrow IPC stream. `varve::rows`
+    is the single Arrow->JSON conversion path (explicit nulls; bytes as `{"$bytes":"<base64>"}`).
+  - **Interfaces + registries:** `ProtocolFrontend`, `Authenticator`, `MetricsSink` are traits behind explicit
+    registries; builtin names are **`http`**, **`static`** (constant-time `subtle` token compare over
+    `[auth.static] tokens = [{subject, token}]`), and **`prometheus`** (per-instance registry, no global state).
+  - **CLI (`varve`):** shared `--dir` XOR `--url`+`--token` (env `VARVE_TOKEN`, value hidden) selector; subcommands
+    `shell` (embedded/remote REPL, `pretty_format_batches` tables, `(0 rows)`, automatic last-tx read-your-writes
+    basis), `import --label [--graph] <file>` (one parameterized INSERT tx per JSONL line, `$pN` in BTreeMap order,
+    generated GQL validated via `parse_program` before any client call, 1-based line-numbered stop-at-first-failure),
+    `export --query [--basis] <file>` (Arrow->line-delimited JSON), `admin status|compact|gc|verify [--json]`
+    (1:1 client dispatch; compact/gc writer-gated). `RemoteClient` does Arrow-IPC decode, bearer auth, bounded response
+    read, and one-hop 421->writer reroute.
+  - **Compose topology / TLS:** distroless nonroot image (multi-stage; `docker build` ~55.6 MB) + pinned Garage
+    (`x-garage-image` anchor in ONE place) + 1 writer (writer+query+compactor roles, object-store log + s3 storage)
+    + 2 query-only nodes over the shared bucket; ports 8080/8081/8082; a shell-less-Garage `garage-init` alpine helper.
+    TLS is served by rustls (explicit `ring` provider) when `[server.http] tls_cert`/`tls_key` are BOTH set;
+    configuring exactly one of the pair is a startup error. The Garage capability probe verdict stays `inconsistent`
+    (no-CAS sovereignty, matches Slice 5) and is expected.
+  - **CLOSED open items:** the **Slice-1 `Db` Clone/Debug** item is closed — `Db` is a private-`Arc<DbInner>`
+    Clone+Debug role-aware handle (Task 4, `ca78cba`..`95e7cd9`). The **Slice-3 bounded `read_range_sync`
+    early-return** item is closed — local and object-store bounded reads stop before excluded frames/segments
+    (Task 2, `0133ddb`/`bfc121c`); object-store frame-incremental decoding closes the same-object excluded-suffix case.
 
 - **2026-07-06 (slice 6) edge model + IPC (decisions 1–3):** `Event` gained `src: Option<Iid>`/`dst: Option<Iid>`
   (Some on EVERY edge event incl. Delete/Erase; None on nodes; endpoints immutable per edge `_id`). Event IPC gained
@@ -357,6 +428,31 @@
 
 ## Open items / decisions needed
 
+- **Slice-9 fast-follows (non-blocking; genuinely deferred at slice close 2026-07-11 — the Minor findings roll-up
+  from `.superpowers/sdd/progress.md`, each with a concrete risk + owner slice):**
+  - **`RemoteClient::send_mutation` dead `allow_redirect` param (owner: Slice 10, low risk):** always passed `true`;
+    its `if !allow_redirect { RedirectLoop }` branch is unreachable (second-421 detection is done inline). Vestigial/
+    misleading — remove the param or add a direct `allow_redirect=false` unit test when Slice 10 touches routing.
+  - **Invalid `--label`/`--graph` identifier rejection untested + `cli_help` literal-substring test (owner: Slice 11
+    docs/ship, low risk):** the reject path is correct by inspection (only an invalid property-KEY identifier is
+    tested), and `tests/cli_help.rs` asserts subcommands parse + reject `--dir`+`--url` but never renders `--help` to
+    assert the literal `import`/`export`/`admin` substrings (only checked manually). Add both durable tests.
+  - **Scale-out reader loop lacks an overall deadline (owner: Slice 10 backpressure, medium risk):** each query is
+    bounded by the 30 s client timeout, but a persistent query error from a real regression retries every ~25 ms
+    indefinitely = hang-on-regression (not a flaky pass). Wrap the reader `loop` in an overall `tokio::time::timeout`.
+  - **`varve-testkit` dev-dep transitively enables inert `fault-injection` (owner: Slice 11, low risk):** adding
+    `varve-testkit` as a `varve-server` dev-dep unifies the `fault-injection` feature into the server test build;
+    confirmed inert (env-gated by `VARVE_CRASH_TRIGGER`, unset). Note if per-test fixture isolation is later preferred.
+  - **PRE-EXISTING `ci.yml` YAML fix now applied (owner: closed, informational):** `.github/workflows/ci.yml` had 2
+    workflow-breaking YAML indentation bugs (tck-report `with:` + property-nightly `env:`) that made the whole workflow
+    UNPARSEABLE — introduced before Slice 9, fixed in the Task 15 commit (pure whitespace, values unchanged, re-parsed
+    base=broken/head=OK by reviewer + controller). CI is now known-good; surfaced here for the record.
+  - **`TxResponse::from_receipt` synthetic-instant formatting (owner: Slice 11, trivial):** normal engine receipts emit
+    RFC3339-microseconds; extreme out-of-chrono-range synthetic instants format as `<micros>us`. Decide whether to
+    reject/specially-format synthetic extremes (public API only; unreachable from real receipts).
+  - **`Db::publish_writer` doc comment (owner: trivial cleanup):** inherits a mutation-execution doc comment intended
+    for `Db::execute`; move it back.
+
 - **Slice-6 fast-follows (non-blocking; whole-branch review triaged READY TO MERGE):**
   - **T10 e2e property CI wall-time (user tuning decision):** `db_traversal_matches_oracle` runs `min(cases,128)`
     cases over `arb_graph(200,400)`, each booting a Db + replaying hundreds of `MATCH…INSERT` — ~200 s, on EVERY
@@ -402,7 +498,7 @@
   multi-label `(:A:B)` test (slice 7); T4 factor `var.prop` parse duplication (slice 7); T6
   unlabeled `MATCH (p) …` returns empty not error (revisit when patterns expand); WHERE/RETURN on
   an all-absent property errors (`UnknownColumn`) rather than yielding null/0 rows — mild GQL
-  deviation, revisit slice 7; `Db` derives neither `Clone` nor `Debug` (slice 9, query-node handles).
+  deviation, revisit slice 7; **Db Clone/Debug RESOLVED in Slice 9 Task 4** (`ca78cba`, with lifecycle/API review fixes through `95e7cd9`).
 - **~~Deferred slice-0 minors (rustdoc + `from_file` test)~~ — RESOLVED** 2026-07-05 (slice 3, Task 10,
   `e5b4519`): full rustdoc sweep on the public `varve-config` API (`Config`/`ConfigSection`/`ConfigError`/
   `Registry`/`ComponentFactory`/`RegistryError`), `cargo doc` warning-free; `Config::from_file` /
@@ -418,10 +514,9 @@
     order ⇒ `OutOfOrderEvent` cannot fire). Make apply-failure FATAL (stop the writer / mark unavailable)
     when slice 10's multi-writer or per-entity monotonicity weakens that invariant — else a durable tx
     could be acked as failed (false-negative ack that only a restart heals).
-  - **T5 `read_range_sync` early-return (defer):** dropped the reference's `position >= to` early break, so
-    a bounded `read_range` scans every frame in every segment and a corrupt frame beyond `to` surfaces as
-    `Corrupt`. Output-equivalent for valid data; full replay uses `tail(ZERO..MAX)` so it's unaffected.
-    Restore the early break when a real bounded `read_range` caller lands (slice 9 query-node tailing).
+  - **~~T5 `read_range_sync` early-return~~ RESOLVED in Slice 9 Task 2** (`0133ddb`, `bfc121c`): local and
+    object-store bounded reads stop before excluded frames; corruption at/after `to` is ignored while included
+    corruption remains loud. Object-store frame-incremental decoding closes the same-object excluded-suffix case.
   - **4 GiB `len() as u32` truncation (defer, forward-hardening):** `value.rs::write_len_prefixed` and
     `codec.rs::encode_put_payload` silently truncate a >4 GiB value/label/doc with no `Result` to signal.
     Unreachable in v1 (statements come from parsed GQL). Harden both together when it can matter.
@@ -479,6 +574,6 @@
 | 6 edges & traversal | ✅ complete | 1 | `cargo run --release --example traversal_bench -p varve` | edge events (`_src_iid`/`_dst_iid`) + `LiveTable` adjacency views; `INSERT (a)-[:REL]->(b)` inline + `MATCH…INSERT`; 3 sort-order edge families (primary/adj-out/adj-in) in one atomic manifest (`TableTries.family`); anchor-pruned `edge_adjacency`; multi-element MATCH → DataFusion hash joins; `PathExpand` UDLN+ExecutionPlan for `{m,n}`/`*` WALK + `RETURN p`; `DETACH DELETE` + still-connected error; independent traversal oracle (pure 10k + e2e + flush-invariance properties) + 10k/60k social fixture; anchor-reachable edge-pruning perf opt → **warm 2-hop 16.23 ms** (<50 ms). Caught+fixed a mid-slice `DELETE` data-loss bug. 372 workspace tests |
 | 7 GQL completion & TCK | ✅ complete | 5 | `cargo run --release --example gql_tour -p varve` | Tasks 1-25 complete. Practical-core expressions/statements/mutations/catalog/TCK/differential/fuzz/demo shipped; post-exit hardening closed configurable query budgets, streaming `PathExpandExec`, reachable-edge BFS budgets, traversal-oracle CPU reduction, TCK side effects/path values, and final fuzz reclose. Final verification: 596 workspace tests, clippy clean, fmt clean, release traversal oracle 6 passed in 49.17s, TCK 445/511 adapted passed (0.870841), 10-min parser fuzz 13,903,093 execs no crashes. Open future hardening: million-edge streaming/cursor/backpressure work. |
 | 8 compaction & GC | ✅ complete | 4 | `cargo run --release --example compaction_gc -p varve` | Full hash trie keys/meta/recovery pruning; manifest-history trie catalog; deterministic embedded compaction; compaction query equivalence; retention-aware GC; raw-object erase proof; churn plateau demo. Final verification: fmt, clippy, workspace tests 630 passed, compaction equivalence 4 passed. Demo: 192 objects before compaction, 3 after GC, 62 current rows. |
-| 9 server, CLI, query nodes | not started | – | – | no detailed plan yet |
+| 9 server, CLI, query nodes | ✅ complete | 2 | `just compose-demo` | Tasks 1-16 complete. Role-aware cloneable `Db` + bounded query follower (no GQL re-execution); atomic resolved replay; basis-aware streaming query builder; writer advertisement + role-gated admin/verify; `varve-server` (axum, bearer auth via `Authenticator`, `MetricsSink` Prometheus, `ProtocolFrontend` http registry, chunked Arrow IPC, 421 writer routing, rustls); `varved` binary; `varve-cli` shell/import/export/admin over `--dir`/`--url`; distroless image + Garage/1-writer/2-query Compose. Final verification: fmt + clippy clean; **workspace 809 passed, 96 suites, 180.55 s**; process_consistency+process_scale_out 4 passed; varve-cli 47 passed; arrow_stream+tls 2 passed; single arrow 58.3.0 / object_store 0.13.2 / reqwest 0.12.28; `--no-default-features` core lib compiles; `just compose-demo` PASSED (1 writer + 2 query nodes over Garage, basis reads agree on both query nodes, Arrow==JSON, shell table + admin verify, full teardown). |
 | 10 coordination | not started | – | – | no detailed plan yet |
 | 11 ship | not started | – | – | no detailed plan yet |

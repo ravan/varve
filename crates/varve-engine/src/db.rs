@@ -1,25 +1,35 @@
 use crate::clock::{Clock, MonotonicClock};
 use crate::compact::CompactionReport;
 use crate::const_eval::const_value;
+use crate::follower::{spawn_follower, FollowerConfig, FollowerHandle, FollowerState};
 use crate::gc::{execute_gc, GcConfig, GcReport};
+use crate::node::{
+    AppliedProgress, BasisToken, NodeRole, NodeRoles, NodeStatus, NodeTuning, ProgressState,
+};
 use crate::registries::Registries;
+use crate::replay::{apply_catalog_event, apply_decoded_log_record, decode_log_record};
 use crate::scan::merged_snapshot;
 use crate::state::{
     GraphsState, PersistedTrie, TableKind, TableState, DEFAULT_GRAPH, EDGES_TABLE, META_GRAPH,
     NODES_TABLE,
 };
+use crate::verify::{verify_database, VerifyReport};
 use crate::writer::{spawn_writer, Submission, WriterConfig, WriterHandle, WriterState};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::physical_plan::SendableRecordBatchStream;
+use futures::TryStreamExt;
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::oneshot;
-use varve_config::{BuildContext, Config, ConfigError, ConfigSection, RegistryError};
+use tokio::sync::{oneshot, watch};
+use varve_config::{BuildContext, ByteSize, Config, ConfigError, ConfigSection, RegistryError};
 use varve_gql::ast::{Expr, LabelSpec, QueryBody, Statement};
 use varve_gql::token::GqlError;
-use varve_index::{decode_events, Event, IndexError, LabelFilter, LiveTable, Op};
+use varve_index::{decode_events, IndexError, LabelFilter, LiveTable};
 use varve_log::{LocalLog, Log, LogError, MemoryLog, DEFAULT_SEGMENT_MAX_BYTES};
 use varve_plan::PlanError;
 use varve_storage::{
@@ -63,6 +73,8 @@ pub enum EngineError {
     GraphExists(String),
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error("writer advertisement JSON: {0}")]
+    WriterAdvertisementJson(#[from] serde_json::Error),
     #[error(
         "[log] backend \"local\" with [storage] backend \"memory\" would lose \
          flushed blocks on restart while trimming the durable log; set \
@@ -80,6 +92,22 @@ pub enum EngineError {
         "cannot DELETE/ERASE node(s) with {0} still-connected edge(s); use DETACH DELETE/ERASE"
     )]
     StillConnected(usize),
+    #[error("node role {0:?} is disabled")]
+    RoleDisabled(NodeRole),
+    #[error("query-node follower failed: {0}")]
+    FollowerFailed(String),
+    #[error("timed out waiting for basis {requested:?}; latest applied progress is {applied:?}")]
+    BasisTimeout {
+        requested: BasisToken,
+        applied: AppliedProgress,
+    },
+    #[error("log gap: expected {expected:?}, found {actual:?}")]
+    LogGap {
+        expected: LogPosition,
+        actual: LogPosition,
+    },
+    #[error("invalid node configuration: {0}")]
+    InvalidNodeConfig(String),
 }
 
 fn label_filter(labels: &LabelSpec) -> LabelFilter<'_> {
@@ -107,16 +135,16 @@ pub(crate) fn validate_user_graph_name(graph: &str) -> Result<(), EngineError> {
 struct LogTuning {
     #[serde(default = "default_window_ms")]
     group_commit_window_ms: u64,
-    #[serde(default = "default_max_bytes")]
-    group_commit_max_bytes: usize,
+    #[serde(default = "default_group_commit_max_bytes")]
+    group_commit_max_bytes: ByteSize,
 }
 
 fn default_window_ms() -> u64 {
     15
 }
 
-fn default_max_bytes() -> usize {
-    8 * 1024 * 1024
+fn default_group_commit_max_bytes() -> ByteSize {
+    ByteSize::from_bytes(8 * 1024 * 1024)
 }
 
 /// Block-flush tuning read from `[storage]` (spec §9). Unknown keys
@@ -311,6 +339,13 @@ pub struct TxReceipt {
     pub side_effects: SideEffects,
 }
 
+const WRITER_ADVERTISEMENT_KEY: &str = "v1/writer.json";
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
+pub struct WriterAdvertisement {
+    pub address: String,
+}
+
 /// Default in-memory cache budget for `Db::memory()`/`Db::local()`, which
 /// take no config file and so never read `[cache]` (that wiring lives in
 /// `open_with`).
@@ -321,13 +356,156 @@ const DEFAULT_CACHE_MEMORY_BYTES: usize = 512 * 1024 * 1024;
 /// committed to the log, applied to the live index after durability, then
 /// acked — so concurrent `execute()` calls are fully supported, and an
 /// acked transaction is both durable and visible.
+///
+/// Node internals are intentionally not part of the public API:
+///
+/// ```compile_fail
+/// fn expose(_: &varve_engine::db::DbInner) {}
+/// ```
+#[derive(Clone)]
 pub struct Db {
+    inner: Arc<DbInner>,
+}
+
+pub struct Query {
+    db: Db,
+    gql: String,
+    params: BTreeMap<String, Value>,
+    basis: Option<BasisToken>,
+    timeout: Duration,
+}
+
+impl Query {
+    pub fn params(mut self, params: BTreeMap<String, Value>) -> Query {
+        self.params = params;
+        self
+    }
+
+    pub fn basis(mut self, basis: impl Into<BasisToken>) -> Query {
+        self.basis = Some(basis.into());
+        self
+    }
+
+    pub fn basis_timeout(mut self, timeout: Duration) -> Query {
+        self.timeout = timeout;
+        self
+    }
+
+    pub async fn stream(self) -> Result<SendableRecordBatchStream, EngineError> {
+        self.db.require_role(NodeRole::Query)?;
+        if let Some(basis) = self.basis {
+            self.db.wait_for_basis(basis, self.timeout).await?;
+        }
+        self.db.query_stream_impl(&self.gql, &self.params).await
+    }
+}
+
+impl std::future::IntoFuture for Query {
+    type Output = Result<Vec<RecordBatch>, EngineError>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let stream = self.stream().await?;
+            stream
+                .try_collect::<Vec<_>>()
+                .await
+                .map_err(|error| EngineError::Plan(PlanError::DataFusion(error)))
+        })
+    }
+}
+
+fn basis_satisfied(basis: BasisToken, applied: AppliedProgress) -> bool {
+    match basis {
+        BasisToken::TxId(tx_id) => applied.tx_id >= tx_id,
+        BasisToken::At(position) => applied.log_position >= position,
+    }
+}
+
+enum BasisTimeoutChannel {
+    Open,
+    Pending,
+    Closed,
+}
+
+struct BasisTimeoutObservation {
+    current: ProgressState,
+    channel: BasisTimeoutChannel,
+}
+
+fn basis_result_after_timeout_with(
+    basis: BasisToken,
+    mut observe: impl FnMut() -> BasisTimeoutObservation,
+) -> Result<(), EngineError> {
+    let first = observe();
+    if let Some(result) = basis_result_for_observation(basis, &first.current) {
+        return result;
+    }
+    if matches!(first.channel, BasisTimeoutChannel::Open) {
+        return Err(EngineError::BasisTimeout {
+            requested: basis,
+            applied: first.current.applied,
+        });
+    }
+
+    let second = observe();
+    if let Some(result) = basis_result_for_observation(basis, &second.current) {
+        return result;
+    }
+    if matches!(
+        (&first.channel, &second.channel),
+        (BasisTimeoutChannel::Closed, _) | (_, BasisTimeoutChannel::Closed)
+    ) {
+        return Err(EngineError::FollowerFailed(
+            "progress channel closed".into(),
+        ));
+    }
+    Err(EngineError::BasisTimeout {
+        requested: basis,
+        applied: second.current.applied,
+    })
+}
+
+fn basis_result_for_observation(
+    basis: BasisToken,
+    current: &ProgressState,
+) -> Option<Result<(), EngineError>> {
+    if let Some(error) = &current.follower_error {
+        return Some(Err(EngineError::FollowerFailed(error.clone())));
+    }
+    basis_satisfied(basis, current.applied).then_some(Ok(()))
+}
+
+fn basis_result_after_timeout(
+    progress: &watch::Receiver<ProgressState>,
+    basis: BasisToken,
+) -> Result<(), EngineError> {
+    let mut progress = progress.clone();
+    basis_result_after_timeout_with(basis, || {
+        let current = progress.borrow_and_update().clone();
+        let channel = match progress.has_changed() {
+            Ok(true) => BasisTimeoutChannel::Pending,
+            Ok(false) => BasisTimeoutChannel::Open,
+            Err(_) => BasisTimeoutChannel::Closed,
+        };
+        BasisTimeoutObservation { current, channel }
+    })
+}
+
+struct DbInner {
     state: Arc<RwLock<GraphsState>>,
+    #[allow(dead_code)] // ownership keeps the configured log alive for the node lifetime
+    log: Arc<dyn Log>,
     store: Arc<dyn ObjectStore>,
     clock: Arc<dyn Clock>,
-    writer: WriterHandle,
+    writer: Option<WriterHandle>,
     functions: Arc<varve_plan::FunctionRegistry>,
     gc_config: GcConfig,
+    roles: NodeRoles,
+    progress: watch::Receiver<ProgressState>,
+    basis_timeout: Duration,
+    #[allow(dead_code)] // dropping the final owner signals follower shutdown
+    follower: Option<FollowerHandle>,
     /// Cap on quantified-hop expansion length (spec §10, `[query]
     /// max_path_depth`); an unbounded `*`/`{m,}` quantifier is lowered to this
     /// depth. Task 9 consumes it during expansion; Task 8 already validates
@@ -625,6 +803,12 @@ impl Db {
             default_max_path_depth(),
             QueryTuning::default().limits(),
             GcConfig::default(),
+            NodeRoles::all(),
+            FollowerConfig {
+                poll_interval: Duration::from_millis(50),
+                batch_records: 1024,
+            },
+            Duration::from_millis(5000),
         )
     }
 
@@ -641,9 +825,14 @@ impl Db {
         max_path_depth: u32,
         query_limits: varve_plan::QueryLimits,
         gc_config: GcConfig,
+        roles: NodeRoles,
+        follower_config: FollowerConfig,
+        basis_timeout: Duration,
     ) -> Db {
         let state = Arc::new(RwLock::new(graphs_state));
         let functions = Arc::new(varve_plan::FunctionRegistry::with_builtins());
+        let (progress_tx, progress_rx) =
+            watch::channel(ProgressState::running(next_tx_id, durable_watermark));
         let writer_state = WriterState {
             state: Arc::clone(&state),
             store: Arc::clone(&store),
@@ -651,21 +840,43 @@ impl Db {
             functions: Arc::clone(&functions),
             max_path_depth,
             query_limits,
-            log,
+            log: Arc::clone(&log),
             next_tx_id,
             next_block_id,
             durable_watermark,
+            progress: progress_tx.clone(),
         };
-        let writer = spawn_writer(writer_state, cfg);
+        let writer = roles
+            .contains(NodeRole::Writer)
+            .then(|| spawn_writer(writer_state, cfg));
+        let follower = if roles.contains(NodeRole::Writer) {
+            None
+        } else {
+            Some(spawn_follower(FollowerState {
+                state: Arc::clone(&state),
+                log: Arc::clone(&log),
+                store: Arc::clone(&store),
+                cursor: durable_watermark,
+                config: follower_config,
+                progress: progress_tx,
+            }))
+        };
         Db {
-            state,
-            store,
-            clock,
-            writer,
-            functions,
-            gc_config,
-            max_path_depth,
-            query_limits,
+            inner: Arc::new(DbInner {
+                state,
+                log,
+                store,
+                clock,
+                writer,
+                functions,
+                gc_config,
+                roles,
+                progress: progress_rx,
+                basis_timeout,
+                follower,
+                max_path_depth,
+                query_limits,
+            }),
         }
     }
 
@@ -728,9 +939,14 @@ impl Db {
         let query_tuning: QueryTuning = query_section.get()?;
         let gc_section = config.section("gc").unwrap_or_else(ConfigSection::empty);
         let gc_config = gc_section.get::<GcTuning>()?.into_config();
+        let node_section = config.section("node").unwrap_or_else(ConfigSection::empty);
+        let node_tuning: NodeTuning = node_section.get()?;
+        let (roles, node_tuning) = node_tuning
+            .validate()
+            .map_err(EngineError::InvalidNodeConfig)?;
         let cfg = WriterConfig {
             window: Duration::from_millis(log_tuning.group_commit_window_ms),
-            max_bytes: log_tuning.group_commit_max_bytes,
+            max_bytes: log_tuning.group_commit_max_bytes.as_usize(),
             max_block_rows: storage_tuning.max_block_rows,
             flush_interval: Duration::from_millis(storage_tuning.flush_interval_ms),
         };
@@ -747,6 +963,12 @@ impl Db {
             query_tuning.max_path_depth,
             query_tuning.limits(),
             gc_config,
+            roles,
+            FollowerConfig {
+                poll_interval: Duration::from_millis(node_tuning.tail_poll_interval_ms),
+                batch_records: node_tuning.tail_batch_records,
+            },
+            Duration::from_millis(node_tuning.basis_timeout_ms),
         ))
     }
 
@@ -773,18 +995,68 @@ impl Db {
             default_max_path_depth(),
             QueryTuning::default().limits(),
             GcConfig::default(),
+            NodeRoles::all(),
+            FollowerConfig {
+                poll_interval: Duration::from_millis(50),
+                batch_records: 1024,
+            },
+            Duration::from_millis(5000),
         ))
     }
 
     /// Executes a mutation statement (INSERT, MATCH … DELETE): parses here,
     /// resolves and commits inside the writer loop, and returns once the tx
     /// is durable AND visible.
+    pub async fn publish_writer(&self, address: &str) -> Result<(), EngineError> {
+        self.require_role(NodeRole::Writer)?;
+        let bytes = serde_json::to_vec(&WriterAdvertisement {
+            address: address.to_string(),
+        })?;
+        self.inner
+            .store
+            .put(WRITER_ADVERTISEMENT_KEY, bytes::Bytes::from(bytes))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn writer_advertisement(&self) -> Result<Option<WriterAdvertisement>, EngineError> {
+        let mut keys = self.inner.store.list(WRITER_ADVERTISEMENT_KEY).await?;
+        if !keys.iter().any(|key| key == WRITER_ADVERTISEMENT_KEY) {
+            // object_store treats a list prefix as a directory and excludes
+            // an object whose key equals that prefix. Keep the exact-prefix
+            // check above for backends that include it, then inspect the
+            // parent inventory without ever probing GET on an absent key.
+            keys = self.inner.store.list("v1").await?;
+        }
+        if !keys.iter().any(|key| key == WRITER_ADVERTISEMENT_KEY) {
+            return Ok(None);
+        }
+        let bytes = self.inner.store.get(WRITER_ADVERTISEMENT_KEY).await?;
+        Ok(Some(serde_json::from_slice(&bytes)?))
+    }
+
+    pub async fn verify(&self) -> Result<VerifyReport, EngineError> {
+        if !self.inner.roles.contains(NodeRole::Writer)
+            && !self.inner.roles.contains(NodeRole::Query)
+        {
+            return Err(EngineError::RoleDisabled(NodeRole::Query));
+        }
+        verify_database(self.inner.store.as_ref(), self.inner.log.as_ref()).await
+    }
+
     pub async fn compact_once(&self) -> Result<CompactionReport, EngineError> {
-        self.writer.compact_once().await
+        self.require_role(NodeRole::Compactor)?;
+        self.inner
+            .writer
+            .as_ref()
+            .ok_or(EngineError::RoleDisabled(NodeRole::Writer))?
+            .compact_once()
+            .await
     }
 
     pub async fn gc_once(&self) -> Result<GcReport, EngineError> {
-        Ok(execute_gc(&self.store, &self.gc_config).await?)
+        self.require_role(NodeRole::Compactor)?;
+        Ok(execute_gc(&self.inner.store, &self.inner.gc_config).await?)
     }
 
     pub async fn execute(&self, gql: &str) -> Result<TxReceipt, EngineError> {
@@ -797,6 +1069,16 @@ impl Db {
         gql: &str,
         params: &BTreeMap<String, Value>,
     ) -> Result<TxReceipt, EngineError> {
+        self.execute_as(gql, params, "").await
+    }
+
+    pub async fn execute_as(
+        &self,
+        gql: &str,
+        params: &BTreeMap<String, Value>,
+        user: &str,
+    ) -> Result<TxReceipt, EngineError> {
+        self.require_role(NodeRole::Writer)?;
         let program = varve_gql::parse_program(gql)?;
         let graph = program
             .use_graph
@@ -811,34 +1093,73 @@ impl Db {
             return Err(EngineError::NotAMutation);
         }
         let (ack, rx) = oneshot::channel();
-        self.writer
+        self.inner
+            .writer
+            .as_ref()
+            .ok_or(EngineError::RoleDisabled(NodeRole::Writer))?
             .submit(Submission {
                 statements: program.statements,
                 params: params.clone(),
                 graph,
+                user: user.to_string(),
                 ack,
             })
             .await?;
         rx.await.map_err(|_| EngineError::WriterUnavailable)?
     }
 
-    /// Executes a read query, returning Arrow batches.
-    pub async fn query(&self, gql: &str) -> Result<Vec<RecordBatch>, EngineError> {
-        let params = BTreeMap::new();
-        self.query_with(gql, &params).await
+    /// Builds an owned read query. Await it to collect Arrow batches, or call
+    /// [`Query::stream`] to consume batches lazily.
+    pub fn query(&self, gql: impl Into<String>) -> Query {
+        Query {
+            db: self.clone(),
+            gql: gql.into(),
+            params: BTreeMap::new(),
+            basis: None,
+            timeout: self.inner.basis_timeout,
+        }
     }
 
-    pub async fn query_with(
+    pub async fn wait_for_basis(
+        &self,
+        basis: BasisToken,
+        timeout: Duration,
+    ) -> Result<(), EngineError> {
+        let mut progress = self.inner.progress.clone();
+        let wait = async {
+            loop {
+                let current = progress.borrow().clone();
+                if let Some(error) = current.follower_error {
+                    return Err(EngineError::FollowerFailed(error));
+                }
+                if basis_satisfied(basis, current.applied) {
+                    return Ok(());
+                }
+                if progress.changed().await.is_err() {
+                    return Err(EngineError::FollowerFailed(
+                        "progress channel closed".into(),
+                    ));
+                }
+            }
+        };
+        match tokio::time::timeout(timeout, wait).await {
+            Ok(result) => result,
+            Err(_) => basis_result_after_timeout(&progress, basis),
+        }
+    }
+
+    async fn query_stream_impl(
         &self,
         gql: &str,
         params: &BTreeMap<String, Value>,
-    ) -> Result<Vec<RecordBatch>, EngineError> {
+    ) -> Result<SendableRecordBatchStream, EngineError> {
         let program = varve_gql::parse_program(gql)?;
         let graph = program
             .use_graph
             .unwrap_or_else(|| DEFAULT_GRAPH.to_string());
         validate_user_graph_name(&graph)?;
         if !self
+            .inner
             .state
             .read()
             .map_err(|_| EngineError::Poisoned)?
@@ -854,7 +1175,7 @@ impl Db {
         let Statement::Query(q) = statements.remove(0) else {
             return Err(EngineError::NotAQuery);
         };
-        let now = self.clock.watermark();
+        let now = self.inner.clock.watermark();
         if !q.unions.is_empty() {
             let first = self
                 .query_body_batches(&graph, &q.first, params, now)
@@ -866,12 +1187,19 @@ impl Db {
                     self.query_body_batches(&graph, body, params, now).await?,
                 ));
             }
-            return Ok(
-                varve_plan::union_query_results(first, unions, self.functions.as_ref()).await?,
-            );
+            return Ok(varve_plan::union_query_results_stream(
+                first,
+                unions,
+                self.inner.functions.as_ref(),
+            )
+            .await?);
         }
-        let clause_specs =
-            varve_plan::scan_specs_with_params(&q.first, &graph, self.max_path_depth, params)?;
+        let clause_specs = varve_plan::scan_specs_with_params(
+            &q.first,
+            &graph,
+            self.inner.max_path_depth,
+            params,
+        )?;
         let bounds = bounds_per_clause(&q.first, now);
         let fast_path = if q.first.clauses.len() == 1
             && clause_specs.len() == 1
@@ -896,23 +1224,23 @@ impl Db {
             paths
         });
         let inputs = scan_inputs_for(
-            &self.state,
-            &self.store,
+            &self.inner.state,
+            &self.inner.store,
             &graph,
             &clause_specs,
             &bounds,
             params,
-            self.query_limits,
+            self.inner.query_limits,
             fast_paths.as_deref(),
             None,
         )
         .await?;
-        Ok(varve_plan::execute_body_with_limits(
+        Ok(varve_plan::execute_body_stream_with_limits(
             &q.first,
             &clause_specs,
             inputs,
-            self.functions.as_ref(),
-            self.query_limits.path_expand,
+            self.inner.functions.as_ref(),
+            self.inner.query_limits.path_expand,
             params,
         )
         .await?)
@@ -926,16 +1254,16 @@ impl Db {
         now: Instant,
     ) -> Result<Vec<RecordBatch>, EngineError> {
         let clause_specs =
-            varve_plan::scan_specs_with_params(body, graph, self.max_path_depth, params)?;
+            varve_plan::scan_specs_with_params(body, graph, self.inner.max_path_depth, params)?;
         let bounds = bounds_per_clause(body, now);
         let inputs = scan_inputs_for(
-            &self.state,
-            &self.store,
+            &self.inner.state,
+            &self.inner.store,
             graph,
             &clause_specs,
             &bounds,
             params,
-            self.query_limits,
+            self.inner.query_limits,
             None,
             None,
         )
@@ -944,8 +1272,8 @@ impl Db {
             body,
             &clause_specs,
             inputs,
-            self.functions.as_ref(),
-            self.query_limits.path_expand,
+            self.inner.functions.as_ref(),
+            self.inner.query_limits.path_expand,
             params,
         )
         .await?)
@@ -1018,15 +1346,15 @@ impl Db {
                 };
                 let hops = vec![hop; *max as usize];
                 let reachable = crate::scan::reachable_edges(
-                    &self.state,
-                    &self.store,
+                    &self.inner.state,
+                    &self.inner.store,
                     graph,
                     anchor,
                     &hops,
                     None,
                     bounds,
-                    self.query_limits.traversal_node_budget,
-                    self.query_limits.traversal_adjacency_budget,
+                    self.inner.query_limits.traversal_node_budget,
+                    self.inner.query_limits.traversal_adjacency_budget,
                     None,
                 )
                 .await?;
@@ -1123,15 +1451,15 @@ impl Db {
             })
             .collect();
         let reachable = crate::scan::reachable_edges(
-            &self.state,
-            &self.store,
+            &self.inner.state,
+            &self.inner.store,
             graph,
             anchor,
             &hops,
             Some(first_label),
             bounds,
-            self.query_limits.traversal_node_budget,
-            self.query_limits.traversal_adjacency_budget,
+            self.inner.query_limits.traversal_node_budget,
+            self.inner.query_limits.traversal_adjacency_budget,
             None,
         )
         .await?;
@@ -1148,9 +1476,47 @@ impl Db {
         let key = format!(
             "{}/{}",
             varve_storage::PROBE_PREFIX,
-            self.clock.next().as_micros()
+            self.inner.clock.next().as_micros()
         );
-        Ok(varve_storage::probe_conditional_put(self.store.as_ref(), &key).await?)
+        Ok(varve_storage::probe_conditional_put(self.inner.store.as_ref(), &key).await?)
+    }
+
+    pub fn roles(&self) -> &NodeRoles {
+        &self.inner.roles
+    }
+
+    /// I/O-free liveness signal for the public, unauthenticated `/healthz`
+    /// route (spec Task 9's health contract): the terminal follower-error
+    /// string, read only from the in-memory progress watch. Unlike
+    /// [`Db::status`], this never touches the object store, so a momentary
+    /// manifest LIST/GET failure — or unauthenticated traffic hammering the
+    /// endpoint — can never turn a live node's health check into storage
+    /// I/O. `None` means healthy; `Some(_)` is the same follower-error
+    /// string `status().follower_error` would carry.
+    pub fn follower_error(&self) -> Option<String> {
+        self.inner.progress.borrow().follower_error.clone()
+    }
+
+    pub async fn status(&self) -> Result<NodeStatus, EngineError> {
+        let progress = self.inner.progress.borrow().clone();
+        let manifest = varve_storage::latest_manifest(self.inner.store.as_ref()).await?;
+        Ok(NodeStatus {
+            roles: self.inner.roles.clone(),
+            applied: progress.applied,
+            manifest_block_id: manifest.as_ref().map(|value| value.block_id),
+            manifest_watermark: manifest.as_ref().map_or(LogPosition::ZERO, |value| {
+                LogPosition::from_u64(value.watermark)
+            }),
+            follower_error: progress.follower_error,
+        })
+    }
+
+    fn require_role(&self, role: NodeRole) -> Result<(), EngineError> {
+        if self.inner.roles.contains(role) {
+            Ok(())
+        } else {
+            Err(EngineError::RoleDisabled(role))
+        }
     }
 }
 
@@ -1190,7 +1556,6 @@ async fn recover(
 ) -> Result<Recovered, EngineError> {
     let manifest = varve_storage::latest_manifest(store.as_ref()).await?;
     let mut state = GraphsState::new();
-    let mut catalog_iids: BTreeMap<varve_types::Iid, String> = BTreeMap::new();
     let (mut next_tx_id, next_block_id, mut watermark, mut max_system) = match &manifest {
         Some(m) => {
             for table in &m.tables {
@@ -1234,38 +1599,15 @@ async fn recover(
         }
         None => (0, 0, LogPosition::ZERO, None),
     };
-    apply_persisted_catalog_entries(&mut state, &mut catalog_iids, store).await?;
+    apply_persisted_catalog_entries(&mut state, store).await?;
 
     for (position, record) in log.tail(watermark).await? {
-        for effect in &record.effects {
-            let graph = if effect.graph.is_empty() {
-                DEFAULT_GRAPH
-            } else {
-                effect.graph.as_str()
-            };
-            match effect.table.as_str() {
-                NODES_TABLE | EDGES_TABLE => {}
-                _ => return Err(EngineError::UnknownTable(effect.table.clone())),
-            }
-            for event in decode_events(&effect.arrow_ipc)? {
-                if graph == META_GRAPH && effect.table == NODES_TABLE {
-                    apply_catalog_replay_event(&mut state, &mut catalog_iids, &event);
-                }
-                let table_state = state
-                    .graphs
-                    .entry(graph.to_string())
-                    .or_insert_with(TableState::new);
-                let live = match effect.table.as_str() {
-                    NODES_TABLE => &mut table_state.nodes.live,
-                    EDGES_TABLE => &mut table_state.edges.live,
-                    _ => return Err(EngineError::UnknownTable(effect.table.clone())),
-                };
-                live.append(event)?;
-            }
-        }
-        next_tx_id = next_tx_id.max(record.tx_id);
-        let system = Instant::from_micros(record.system_time_us);
-        max_system = Some(max_system.map_or(system, |m| m.max(system)));
+        let decoded = decode_log_record(&record)?;
+        let system_time = decoded.system_time;
+        let tx_id = decoded.tx_id;
+        apply_decoded_log_record(&mut state, decoded)?;
+        next_tx_id = next_tx_id.max(tx_id);
+        max_system = Some(max_system.map_or(system_time, |current| current.max(system_time)));
         watermark = watermark.max(position.advance(1)?);
     }
 
@@ -1283,7 +1625,6 @@ async fn recover(
 
 async fn apply_persisted_catalog_entries(
     state: &mut GraphsState,
-    catalog_iids: &mut BTreeMap<varve_types::Iid, String>,
     store: &Arc<dyn ObjectStore>,
 ) -> Result<(), EngineError> {
     let Some(meta) = state.graph(META_GRAPH) else {
@@ -1297,40 +1638,11 @@ async fn apply_persisted_catalog_entries(
                 .get_range(&data_key, page.offset..page.offset + page.len)
                 .await?;
             for event in decode_events(&bytes)? {
-                apply_catalog_replay_event(state, catalog_iids, &event);
+                apply_catalog_event(state, &event);
             }
         }
     }
     Ok(())
-}
-
-fn apply_catalog_replay_event(
-    state: &mut GraphsState,
-    catalog_iids: &mut BTreeMap<varve_types::Iid, String>,
-    event: &Event,
-) {
-    match &event.op {
-        Op::Put { labels, doc } if labels.iter().any(|label| label == "Graph") => {
-            let Some(Value::Str(name)) = doc.get("_id") else {
-                return;
-            };
-            if name == DEFAULT_GRAPH || name == META_GRAPH {
-                return;
-            }
-            catalog_iids.insert(event.iid, name.clone());
-            state
-                .graphs
-                .entry(name.clone())
-                .or_insert_with(TableState::new);
-        }
-        Op::Delete | Op::Erase => {
-            let Some(name) = catalog_iids.remove(&event.iid) else {
-                return;
-            };
-            state.graphs.remove(&name);
-        }
-        _ => {}
-    }
 }
 
 #[cfg(test)]
@@ -1341,6 +1653,115 @@ mod tests {
     use varve_types::{Iid, TemporalBounds, TemporalDimension, Value};
 
     static QUERY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn timeout_boundary_prefers_follower_error_over_satisfied_basis() {
+        let (progress_tx, progress) = watch::channel(ProgressState::running(0, LogPosition::ZERO));
+        progress_tx.send_modify(|state| {
+            state.applied.tx_id = 7;
+            state.follower_error = Some("terminal".into());
+        });
+
+        assert!(matches!(
+            basis_result_after_timeout(&progress, BasisToken::TxId(7)),
+            Err(EngineError::FollowerFailed(error)) if error == "terminal"
+        ));
+    }
+
+    #[test]
+    fn timeout_boundary_accepts_at_basis_at_or_below_current_position() {
+        let position = LogPosition::from_u64(7);
+        let (_progress_tx, progress) = watch::channel(ProgressState::running(3, position));
+
+        assert!(basis_result_after_timeout(&progress, BasisToken::At(position)).is_ok());
+        assert!(
+            basis_result_after_timeout(&progress, BasisToken::At(LogPosition::from_u64(6))).is_ok()
+        );
+    }
+
+    #[test]
+    fn timeout_boundary_reports_closed_progress_channel_before_timeout() {
+        let (progress_tx, progress) = watch::channel(ProgressState::running(0, LogPosition::ZERO));
+        drop(progress_tx);
+
+        assert!(matches!(
+            basis_result_after_timeout(&progress, BasisToken::TxId(1)),
+            Err(EngineError::FollowerFailed(error)) if error == "progress channel closed"
+        ));
+    }
+
+    #[test]
+    fn timeout_boundary_observes_final_update_before_closed_channel() {
+        let (progress_tx, progress) = watch::channel(ProgressState::running(0, LogPosition::ZERO));
+        progress_tx.send_modify(|state| {
+            state.applied.tx_id = 7;
+            state.applied.log_position = LogPosition::from_u64(8);
+        });
+        drop(progress_tx);
+
+        assert!(basis_result_after_timeout(&progress, BasisToken::TxId(7)).is_ok());
+    }
+
+    #[test]
+    fn timeout_boundary_uses_latest_progress_for_true_timeout() {
+        let (_progress_tx, progress) =
+            watch::channel(ProgressState::running(3, LogPosition::from_u64(4)));
+
+        assert!(matches!(
+            basis_result_after_timeout(&progress, BasisToken::TxId(5)),
+            Err(EngineError::BasisTimeout {
+                requested: BasisToken::TxId(5),
+                applied: AppliedProgress { tx_id: 3, log_position },
+            }) if log_position == LogPosition::from_u64(4)
+        ));
+    }
+
+    #[test]
+    fn timeout_boundary_uses_bounded_snapshots_during_continuous_publication() {
+        let calls = std::cell::Cell::new(0_u64);
+
+        let result = basis_result_after_timeout_with(BasisToken::TxId(100), || {
+            let next = calls.get() + 1;
+            calls.set(next);
+            BasisTimeoutObservation {
+                current: ProgressState::running(next, LogPosition::from_u64(next)),
+                channel: BasisTimeoutChannel::Pending,
+            }
+        });
+
+        assert_eq!(calls.get(), 2, "timeout resolution must do fixed work");
+        assert!(matches!(
+            result,
+            Err(EngineError::BasisTimeout {
+                applied: AppliedProgress { tx_id: 2, .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn log_tuning_uses_human_readable_byte_sizes() {
+        let config = Config::from_toml_str("[log]\ngroup_commit_max_bytes = \"1MiB\"\n").unwrap();
+        let tuning: LogTuning = config.section("log").unwrap().get().unwrap();
+
+        assert_eq!(
+            tuning.group_commit_max_bytes,
+            ByteSize::from_bytes(1024 * 1024)
+        );
+    }
+
+    #[test]
+    fn log_tuning_rejects_numeric_byte_sizes() {
+        let config = Config::from_toml_str("[log]\ngroup_commit_max_bytes = 1048576\n").unwrap();
+        let error = config
+            .section("log")
+            .unwrap()
+            .get::<LogTuning>()
+            .err()
+            .unwrap();
+
+        assert!(matches!(error, ConfigError::Deserialize(_)));
+    }
 
     #[test]
     fn query_tuning_parses_budget_fields() {
@@ -1393,7 +1814,7 @@ mod tests {
         db.execute("INSERT (:Person {_id: 1, name: 'Ada'})-[:KNOWS {since: 2020}]->(:Person {_id: 2, name: 'Bob'})")
             .await
             .unwrap();
-        let s = db.state.read().unwrap();
+        let s = db.inner.state.read().unwrap();
         assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().nodes.live.event_count(), 2);
         assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(), 1);
         let ada = Iid::derive("default", "nodes", &Value::Int(1).id_bytes().unwrap());
@@ -1413,7 +1834,7 @@ mod tests {
         db.execute("INSERT (a:Person {_id: 1}), (a)-[:KNOWS]->(b:Person {_id: 2})")
             .await
             .unwrap();
-        let s = db.state.read().unwrap();
+        let s = db.inner.state.read().unwrap();
         assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().nodes.live.event_count(), 2);
         assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(), 1);
     }
@@ -1437,7 +1858,7 @@ mod tests {
         assert!(matches!(err2, EngineError::AlreadyBoundVariable(_)));
         // Atomicity: both statements failed at resolve, so NOTHING was applied —
         // not even the syntactically fine (:P {_id: 9}) / (x:P {_id: 3}) parts.
-        let s = db.state.read().unwrap();
+        let s = db.inner.state.read().unwrap();
         assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().nodes.live.event_count(), 0);
         assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(), 0);
     }
@@ -1453,7 +1874,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let s = db.state.read().unwrap();
+        let s = db.inner.state.read().unwrap();
         // 1 Ada × 2 Bobs = 2 edges.
         assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(), 2);
     }
@@ -1468,7 +1889,7 @@ mod tests {
             .await
             .unwrap();
 
-        let s = db.state.read().unwrap();
+        let s = db.inner.state.read().unwrap();
         assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().nodes.live.event_count(), 3);
         assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(), 1);
     }
@@ -1484,7 +1905,7 @@ mod tests {
             .await
             .unwrap();
 
-        let s = db.state.read().unwrap();
+        let s = db.inner.state.read().unwrap();
         assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().nodes.live.event_count(), 2);
         assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(), 1);
     }
@@ -1503,7 +1924,7 @@ mod tests {
             "{err:?}"
         );
 
-        let s = db.state.read().unwrap();
+        let s = db.inner.state.read().unwrap();
         assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().nodes.live.event_count(), 1);
         assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(), 0);
     }
@@ -1517,7 +1938,7 @@ mod tests {
         db.execute("INSERT (:P {_id: 3})-[:K]->(:P {_id: 4})")
             .await
             .unwrap();
-        let s = db.state.read().unwrap();
+        let s = db.inner.state.read().unwrap();
         let user = Iid::derive("default", "edges", &Value::Int(7).id_bytes().unwrap());
         assert!(s
             .graph(DEFAULT_GRAPH)
@@ -1554,7 +1975,7 @@ mod tests {
         db.execute("INSERT (:_Flush {_id: 0})").await.unwrap();
         for _ in 0..200 {
             {
-                let s = db.state.read().unwrap();
+                let s = db.inner.state.read().unwrap();
                 if !s.graph(DEFAULT_GRAPH).unwrap().edges.tries.is_empty()
                     && !s.graph(DEFAULT_GRAPH).unwrap().nodes.tries.is_empty()
                 {
@@ -1587,7 +2008,7 @@ mod tests {
         db.execute("MATCH (p:P) WHERE p._id = 1 DETACH DELETE p")
             .await
             .unwrap();
-        let s = db.state.read().unwrap();
+        let s = db.inner.state.read().unwrap();
         // Two edge events now exist for the edge (Put flushed + Delete live).
         assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(), 1);
     }
@@ -1609,7 +2030,7 @@ mod tests {
             // a block.
             let db = Db::open(blocks_config(dir.path(), 1)).await.unwrap();
             {
-                let s = db.state.read().unwrap();
+                let s = db.inner.state.read().unwrap();
                 assert_eq!(
                     s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(),
                     1,
@@ -1620,7 +2041,7 @@ mod tests {
         }
         {
             let db = Db::local(dir.path()).await.unwrap();
-            let s = db.state.read().unwrap();
+            let s = db.inner.state.read().unwrap();
             assert_eq!(
                 s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(),
                 0,
@@ -1659,7 +2080,7 @@ mod tests {
                 .unwrap();
             for _ in 0..200 {
                 {
-                    let s = db.state.read().unwrap();
+                    let s = db.inner.state.read().unwrap();
                     if s.graph(DEFAULT_GRAPH).unwrap().nodes.tries.len() == 1
                         && s.graph(DEFAULT_GRAPH).unwrap().edges.tries.len() == 1
                     {
@@ -1669,7 +2090,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
             {
-                let s = db.state.read().unwrap();
+                let s = db.inner.state.read().unwrap();
                 assert_eq!(
                     s.graph(DEFAULT_GRAPH).unwrap().nodes.tries.len(),
                     1,
@@ -1694,7 +2115,7 @@ mod tests {
             db.execute("INSERT (:P {_id: 3})").await.unwrap();
             for _ in 0..200 {
                 {
-                    let s = db.state.read().unwrap();
+                    let s = db.inner.state.read().unwrap();
                     if s.graph(DEFAULT_GRAPH).unwrap().nodes.tries.len() == 2 {
                         break;
                     }
@@ -1702,7 +2123,8 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
             assert_eq!(
-                db.state
+                db.inner
+                    .state
                     .read()
                     .unwrap()
                     .graph(DEFAULT_GRAPH)
@@ -1723,7 +2145,7 @@ mod tests {
             // even though the block-0 edge data/meta objects still sit in
             // the store, now unreachable.
             let db = Db::local(dir.path()).await.unwrap();
-            let s = db.state.read().unwrap();
+            let s = db.inner.state.read().unwrap();
             assert_eq!(
                 s.graph(DEFAULT_GRAPH).unwrap().edges.tries.len(),
                 1,
@@ -2083,14 +2505,14 @@ mod tests {
             db.execute("MATCH (a:P {_id: 3}), (b:P {_id: 2}) INSERT (a)-[:KNOWS]->(b)")
                 .await
                 .unwrap();
-            let now = db.clock.watermark();
+            let now = db.inner.clock.watermark();
             let bounds = TemporalBounds {
                 valid: TemporalDimension::at(now),
                 system: TemporalDimension::at(now),
             };
             let out = edge_adjacency(
-                &db.state,
-                &db.store,
+                &db.inner.state,
+                &db.inner.store,
                 DEFAULT_GRAPH,
                 "KNOWS",
                 &[],
@@ -2105,8 +2527,8 @@ mod tests {
             assert!(!out.is_empty());
             // Ground truth: same answer from a full scan filtered to the anchor.
             let all = edge_adjacency(
-                &db.state,
-                &db.store,
+                &db.inner.state,
+                &db.inner.store,
                 DEFAULT_GRAPH,
                 "KNOWS",
                 &[],
@@ -2125,8 +2547,8 @@ mod tests {
             // live (3→2) out-edge — the live contribution is non-empty and
             // must survive the anchor narrowing.
             let out_cyd = edge_adjacency(
-                &db.state,
-                &db.store,
+                &db.inner.state,
+                &db.inner.store,
                 DEFAULT_GRAPH,
                 "KNOWS",
                 &[],
@@ -2150,8 +2572,8 @@ mod tests {
             // Node 2's in-edges are the dst-side mirror of node 3's
             // out-edges above: one persisted (1→2), one live (3→2).
             let in_bob = edge_adjacency(
-                &db.state,
-                &db.store,
+                &db.inner.state,
+                &db.inner.store,
                 DEFAULT_GRAPH,
                 "KNOWS",
                 &[],
@@ -2165,8 +2587,8 @@ mod tests {
             .unwrap();
             assert!(!in_bob.is_empty());
             let all_in = edge_adjacency(
-                &db.state,
-                &db.store,
+                &db.inner.state,
+                &db.inner.store,
                 DEFAULT_GRAPH,
                 "KNOWS",
                 &[],
@@ -2186,7 +2608,7 @@ mod tests {
             // in lockstep with the edges primary inventory.
             let db = Db::local(dir.path()).await.unwrap();
             {
-                let s = db.state.read().unwrap();
+                let s = db.inner.state.read().unwrap();
                 assert_eq!(
                     s.graph(DEFAULT_GRAPH).unwrap().adj_out.len(),
                     s.graph(DEFAULT_GRAPH).unwrap().edges.tries.len()
@@ -2205,14 +2627,14 @@ mod tests {
             // against RECOVERED data, not just live state. `ada`'s two
             // out-edges (1→2, 1→3) were both persisted in block 0, so this
             // exercises the recovered adj-out family specifically.
-            let now = db.clock.watermark();
+            let now = db.inner.clock.watermark();
             let bounds = TemporalBounds {
                 valid: TemporalDimension::at(now),
                 system: TemporalDimension::at(now),
             };
             let out = edge_adjacency(
-                &db.state,
-                &db.store,
+                &db.inner.state,
+                &db.inner.store,
                 DEFAULT_GRAPH,
                 "KNOWS",
                 &[],
@@ -2229,8 +2651,8 @@ mod tests {
                 "recovered persisted out-edges for node 1 must be non-empty"
             );
             let all = edge_adjacency(
-                &db.state,
-                &db.store,
+                &db.inner.state,
+                &db.inner.store,
                 DEFAULT_GRAPH,
                 "KNOWS",
                 &[],

@@ -46,6 +46,26 @@ async fn append_read_and_reopen() {
 
 #[allow(clippy::unwrap_used)]
 #[tokio::test]
+async fn read_range_obeys_half_open_follower_batch_bounds() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = open(dir.path());
+    log.append(vec![rec(1), rec(2), rec(3), rec(4)])
+        .await
+        .unwrap();
+
+    for (from, to, expected) in [(0, 0, vec![]), (1, 3, vec![2, 3]), (4, 8, vec![])] {
+        let rows = log.read_range(pos(from), pos(to)).await.unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|(_, record)| record.tx_id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+#[tokio::test]
 async fn rolls_segments_and_reads_across_them() {
     let dir = tempfile::tempdir().unwrap();
     {

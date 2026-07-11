@@ -42,7 +42,7 @@ fn config(dir: &Path) -> Result<Config, Box<dyn std::error::Error>> {
 
 async fn two_hop(db: &Db) -> Result<usize, Box<dyn std::error::Error>> {
     let rows = db
-        .query(&format!(
+        .query(format!(
             "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) \
              WHERE a._id = {ANCHOR} RETURN c._id"
         ))
@@ -52,7 +52,7 @@ async fn two_hop(db: &Db) -> Result<usize, Box<dyn std::error::Error>> {
 
 async fn quantified_1_3(db: &Db) -> Result<usize, Box<dyn std::error::Error>> {
     let rows = db
-        .query(&format!(
+        .query(format!(
             "MATCH (a:Person)-[:KNOWS]->{{1,3}}(b:Person) WHERE a._id = {ANCHOR} RETURN b._id"
         ))
         .await?;

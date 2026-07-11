@@ -27,7 +27,9 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{Column, UnnestOptions};
 use datafusion::datasource::MemTable;
 use datafusion::logical_expr::{Expr as DfExpr, Extension, LogicalPlan};
+use datafusion::physical_plan::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use datafusion::prelude::*;
+use futures::TryStreamExt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use varve_gql::ast::{
@@ -635,6 +637,55 @@ pub async fn execute_body_with_limits(
     path_expand_limits: PathExpandLimits,
     params: &BTreeMap<String, Value>,
 ) -> Result<Vec<RecordBatch>, PlanError> {
+    let stream = execute_body_stream_with_limits(
+        body,
+        clause_specs,
+        inputs,
+        functions,
+        path_expand_limits,
+        params,
+    )
+    .await?;
+    let schema = stream.schema();
+    let batches = stream.try_collect::<Vec<_>>().await?;
+    if batches.is_empty() && !schema.fields().is_empty() {
+        Ok(vec![RecordBatch::new_empty(schema)])
+    } else {
+        Ok(batches)
+    }
+}
+
+pub async fn execute_body_stream_with_limits(
+    body: &QueryBody,
+    clause_specs: &[ClauseSpecs],
+    inputs: Vec<Vec<ScanInput>>,
+    functions: &FunctionRegistry,
+    path_expand_limits: PathExpandLimits,
+    params: &BTreeMap<String, Value>,
+) -> Result<SendableRecordBatchStream, PlanError> {
+    match build_body_frame_with_limits(
+        body,
+        clause_specs,
+        inputs,
+        functions,
+        path_expand_limits,
+        params,
+    )? {
+        Some(frame) => Ok(frame.execute_stream().await?),
+        None => Ok(Box::pin(EmptyRecordBatchStream::new(Arc::new(
+            Schema::empty(),
+        )))),
+    }
+}
+
+fn build_body_frame_with_limits(
+    body: &QueryBody,
+    clause_specs: &[ClauseSpecs],
+    inputs: Vec<Vec<ScanInput>>,
+    functions: &FunctionRegistry,
+    path_expand_limits: PathExpandLimits,
+    params: &BTreeMap<String, Value>,
+) -> Result<Option<DataFrame>, PlanError> {
     if clause_specs.len() != inputs.len() {
         return Err(PlanError::Unsupported(
             "internal: clause specs/input length mismatch".into(),
@@ -712,7 +763,7 @@ pub async fn execute_body_with_limits(
                     return Err(PlanError::Unsupported(format!("re-binding variable {var}")));
                 }
                 if matches!(list, Expr::Literal(Literal::Null)) {
-                    return Ok(vec![]);
+                    return Ok(None);
                 }
                 let mut df = acc
                     .take()
@@ -779,7 +830,7 @@ pub async fn execute_body_with_limits(
                     specs_remaining = &specs_remaining[path_len..];
                     continue;
                 }
-                return Ok(vec![]);
+                return Ok(None);
             }
             let path_df = path_dataframe(path, where_clause, specs, path_inputs, &lowering, &[])?;
             clause_df = Some(match clause_df {
@@ -856,7 +907,14 @@ pub async fn execute_body_with_limits(
 
     let df = acc
         .ok_or_else(|| PlanError::Unsupported("first clause must be non-OPTIONAL MATCH".into()))?;
-    project_return_body(df, &body.ret, &all_specs, &value_vars, params, functions).await
+    Ok(Some(project_return_body_frame(
+        df,
+        &body.ret,
+        &all_specs,
+        &value_vars,
+        params,
+        functions,
+    )?))
 }
 
 pub async fn binding_rows(
@@ -965,6 +1023,17 @@ pub async fn union_query_results(
     unions: Vec<(UnionKind, Vec<RecordBatch>)>,
     functions: &FunctionRegistry,
 ) -> Result<Vec<RecordBatch>, PlanError> {
+    Ok(union_query_results_stream(first, unions, functions)
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?)
+}
+
+pub async fn union_query_results_stream(
+    first: Vec<RecordBatch>,
+    unions: Vec<(UnionKind, Vec<RecordBatch>)>,
+    functions: &FunctionRegistry,
+) -> Result<SendableRecordBatchStream, PlanError> {
     let expected_schema = first
         .first()
         .map(|batch| batch.schema())
@@ -986,7 +1055,7 @@ pub async fn union_query_results(
             df = df.distinct()?;
         }
     }
-    Ok(df.collect().await?)
+    Ok(df.execute_stream().await?)
 }
 
 fn same_projected_schema(left: &Schema, right: &Schema) -> bool {
@@ -1853,13 +1922,27 @@ async fn project_return(
 }
 
 async fn project_return_body(
-    mut df: DataFrame,
+    df: DataFrame,
     ret: &ReturnClause,
     specs: &[ScanSpec],
     value_vars: &BTreeSet<String>,
     params: &BTreeMap<String, Value>,
     functions: &FunctionRegistry,
 ) -> Result<Vec<RecordBatch>, PlanError> {
+    collect_preserving_schema(project_return_body_frame(
+        df, ret, specs, value_vars, params, functions,
+    )?)
+    .await
+}
+
+fn project_return_body_frame(
+    mut df: DataFrame,
+    ret: &ReturnClause,
+    specs: &[ScanSpec],
+    value_vars: &BTreeSet<String>,
+    params: &BTreeMap<String, Value>,
+    functions: &FunctionRegistry,
+) -> Result<DataFrame, PlanError> {
     let vars: Vec<&str> = specs.iter().map(|spec| spec.var.as_str()).collect();
     let mut scope = scope_from_schema(df.schema(), &vars);
     scope.value_vars = value_vars.clone();
@@ -1965,7 +2048,7 @@ async fn project_return_body(
         let fetch = ret.limit.map(usize_limit).transpose()?;
         df = df.limit(skip, fetch)?;
     }
-    collect_preserving_schema(df).await
+    Ok(df)
 }
 
 fn order_by_output_expr(

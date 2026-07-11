@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         before.tx_id, before.system_time
     );
     show(
-        &db.query(&format!(
+        &db.query(format!(
             "FOR SYSTEM_TIME AS OF TIMESTAMP '{}' MATCH (p:Product) RETURN p.price AS price",
             before.system_time
         ))

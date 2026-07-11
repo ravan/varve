@@ -74,7 +74,7 @@
 - Changes configuration contracts, with no numeric compatibility form: `[log] group_commit_max_bytes = "8MiB"`, `[cache.memory] max_bytes = "512MiB"`, and `[cache.disk] max_bytes = "50GiB"`.
 - Defaults remain exactly 8 MiB, 512 MiB, and 50 GiB.
 
-- [ ] **Step 1: Write parser contract tests**
+- [x] **Step 1: Write parser contract tests**
 
 `crates/varve-config/src/byte_size.rs`:
 
@@ -116,13 +116,13 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the focused test and confirm RED**
+- [x] **Step 2: Run the focused test and confirm RED**
 
 Run: `rtk cargo test -p varve-config byte_size`
 
 Expected: FAIL because `byte_size` and `ByteSize` do not exist.
 
-- [ ] **Step 3: Implement `ByteSize` and export it**
+- [x] **Step 3: Implement `ByteSize` and export it**
 
 `crates/varve-config/src/byte_size.rs`:
 
@@ -189,7 +189,7 @@ impl<'de> Deserialize<'de> for ByteSize {
 
 Export it from `varve-config/src/lib.rs` with `pub use byte_size::ByteSize;`.
 
-- [ ] **Step 4: Replace the three integer tuning fields and pin factory behavior**
+- [x] **Step 4: Replace the three integer tuning fields and pin factory behavior**
 
 Use `ByteSize` fields and convert only at the constructor seam:
 
@@ -211,7 +211,7 @@ Set `WriterConfig.max_bytes` from `.as_usize()`. Apply the identical type/defaul
 
 Add factory assertions that `"1MiB"` produces a 1 MiB tier and numeric `1048576` returns `ConfigError::Deserialize`.
 
-- [ ] **Step 5: Run focused and full gates**
+- [x] **Step 5: Run focused and full gates**
 
 Run: `rtk cargo test -p varve-config byte_size`
 
@@ -223,7 +223,7 @@ Run: `rtk cargo clippy --workspace --all-targets -- -D warnings`
 
 Expected: all green; existing configs that omit these fields keep the same byte defaults.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 rtk git add crates/varve-config crates/varve-engine/src/db.rs crates/varve-storage
@@ -246,7 +246,7 @@ rtk git commit -m "feat: parse human-readable byte sizes"
 - Strengthens its performance/error interface: once `position >= to`, a backend stops reading/decoding later frames or objects. Corruption strictly at or beyond `to` is outside the requested range and is not surfaced by that call.
 - Keeps range semantics half-open and ordered: `from <= position < to`.
 
-- [ ] **Step 1: Write a local-log regression that corrupts only the excluded suffix**
+- [x] **Step 1: Write a local-log regression that corrupts only the excluded suffix**
 
 Add an in-module test that appends two single-record batches, locates the second frame, corrupts its payload CRC after append, and then asserts:
 
@@ -274,13 +274,13 @@ async fn bounded_read_does_not_decode_a_corrupt_excluded_frame() {
 
 `corrupt_frame_crc` is test-only and computes frame offsets from the same `FRAME_HEADER`/length grammar; it must not hard-code an Arrow or protobuf payload length.
 
-- [ ] **Step 2: Run the local regression and confirm RED**
+- [x] **Step 2: Run the local regression and confirm RED**
 
 Run: `rtk cargo test -p varve-log bounded_read_does_not_decode_a_corrupt_excluded_frame`
 
 Expected: FAIL with `LogError::Corrupt`, because `read_range_sync` currently scans every later frame.
 
-- [ ] **Step 3: Add the early breaks to both durable backends**
+- [x] **Step 3: Add the early breaks to both durable backends**
 
 In `read_range_sync`, insert the first guard at the top of the segment loop:
 
@@ -306,11 +306,11 @@ if position >= to {
 }
 ```
 
-- [ ] **Step 4: Add backend contract cases**
+- [x] **Step 4: Add backend contract cases**
 
 For local and object-store logs, append tx ids 1–4 and assert ranges `0..0`, `1..3`, and `4..8` return `[]`, `[2,3]`, and `[]` respectively. These tests are the follower batching contract.
 
-- [ ] **Step 5: Run gates**
+- [x] **Step 5: Run gates**
 
 Run: `rtk cargo test -p varve-log`
 
@@ -320,7 +320,7 @@ Run: `rtk cargo clippy --workspace --all-targets -- -D warnings`
 
 Expected: all log tests green, including recovery and trim suites.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 rtk git add crates/varve-log
@@ -347,7 +347,7 @@ rtk git commit -m "perf: stop bounded log reads at upper position"
 - Changes `GraphsState` to own `catalog_graphs: BTreeMap<Iid, String>` so catalog create/drop replay works both during startup and after a follower is already running.
 - `recover` uses these functions and deletes its private `catalog_iids` map plus `apply_catalog_replay_event` copy.
 
-- [ ] **Step 1: Write decode-before-mutate and catalog replay tests**
+- [x] **Step 1: Write decode-before-mutate and catalog replay tests**
 
 ```rust
 #[test]
@@ -386,13 +386,13 @@ fn catalog_put_and_delete_change_the_graph_map() {
 
 Test helpers build real `Event`/`LogRecord` values; they do not call the GQL parser or writer resolver.
 
-- [ ] **Step 2: Run and confirm RED**
+- [x] **Step 2: Run and confirm RED**
 
 Run: `rtk cargo test -p varve-engine replay`
 
 Expected: compile failure because the module and interfaces do not exist.
 
-- [ ] **Step 3: Implement full-record decoding**
+- [x] **Step 3: Implement full-record decoding**
 
 ```rust
 pub(crate) fn decode_log_record(record: &LogRecord) -> Result<DecodedLogRecord, EngineError> {
@@ -421,7 +421,7 @@ pub(crate) fn decode_log_record(record: &LogRecord) -> Result<DecodedLogRecord, 
 }
 ```
 
-- [ ] **Step 4: Implement catalog-aware application**
+- [x] **Step 4: Implement catalog-aware application**
 
 `apply_decoded_log_record` iterates decoded effects in envelope order. Before appending a `META_GRAPH` node event, it updates `state.catalog_graphs` and `state.graphs` using the same rules as current recovery: `Put` with label `Graph` and string `_id` creates non-reserved graphs; `Delete|Erase` removes the IID mapping and graph. It then appends the event to `state.graphs[graph].core_mut(table).live`. Unknown target graphs/tables are explicit errors; no GQL is parsed.
 
@@ -436,7 +436,7 @@ pub(crate) struct GraphsState {
 
 During persisted catalog recovery, populate `state.catalog_graphs` through the same private `apply_catalog_event` helper used by live replay.
 
-- [ ] **Step 5: Refactor startup recovery onto the module**
+- [x] **Step 5: Refactor startup recovery onto the module**
 
 Replace the nested effect/event loop in `recover` with:
 
@@ -454,7 +454,7 @@ for (position, record) in log.tail(watermark).await? {
 
 Keep manifest inventory recovery and clock flooring unchanged.
 
-- [ ] **Step 6: Run recovery and workspace gates**
+- [x] **Step 6: Run recovery and workspace gates**
 
 Run: `rtk cargo test -p varve-engine replay`
 
@@ -468,7 +468,7 @@ Run: `rtk cargo clippy --workspace --all-targets -- -D warnings`
 
 Expected: all green; existing recovery tests prove result equivalence, and the new atomicity test proves malformed records do not partially update a running state.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 rtk git add crates/varve-engine
@@ -500,7 +500,7 @@ rtk git commit -m "refactor: share resolved effect replay"
 - Query-only assembly runs `recover`, does not spawn `WriterHandle`, and starts `spawn_follower` at `Recovered.watermark` with `Recovered.next_tx_id` as applied progress.
 - Adds role errors: `RoleDisabled(NodeRole)`, `FollowerFailed(String)`, `LogGap { expected: LogPosition, actual: LogPosition }`, and `InvalidNodeConfig(String)`.
 
-- [ ] **Step 1: Write role validation and shared-local-store follower tests**
+- [x] **Step 1: Write role validation and shared-local-store follower tests**
 
 `crates/varve-engine/tests/query_node.rs`:
 
@@ -575,13 +575,13 @@ async fn node_roles_reject_invalid_combinations() {
 }
 ```
 
-- [ ] **Step 2: Run and confirm RED**
+- [x] **Step 2: Run and confirm RED**
 
 Run: `rtk cargo test -p varve-engine --test query_node`
 
 Expected: compile failure for `NodeRole`, role-aware open, and status.
 
-- [ ] **Step 3: Implement role/progress types and config parsing**
+- [x] **Step 3: Implement role/progress types and config parsing**
 
 `node.rs` owns the public types and crate-private watch state:
 
@@ -604,7 +604,7 @@ impl ProgressState {
 
 Deserialize a private `NodeTuning`, validate it once in `Db::open_with`, and pass a validated `NodeConfig` into assembly. `Db::memory()` and `Db::local()` use `NodeRoles::all()` and therefore preserve the laptop profile without a compatibility branch.
 
-- [ ] **Step 4: Build the bounded follower module**
+- [x] **Step 4: Build the bounded follower module**
 
 `follower.rs`:
 
@@ -670,7 +670,7 @@ pub(crate) async fn apply_next_range(state: &mut FollowerState) -> Result<usize,
 
 `spawn_follower` loops on `apply_next_range`; it immediately polls again after a non-empty batch, sleeps `poll_interval` after an empty batch, exits on shutdown, and publishes the first terminal error to `ProgressState.follower_error` before exiting. `FollowerHandle::drop` sends shutdown; no detached task survives the final `Db` clone.
 
-- [ ] **Step 5: Refactor `Db` assembly and make the handle cloneable**
+- [x] **Step 5: Refactor `Db` assembly and make the handle cloneable**
 
 Move current `Db` fields into `DbInner`; retain `log: Arc<dyn Log>` alongside the existing store/clock/state for status/verification; replace `writer: WriterHandle` with `writer: Option<WriterHandle>`; and add `roles`, `progress: watch::Receiver<ProgressState>`, `basis_timeout`, and `follower: Option<FollowerHandle>`. Branch exactly once during assembly:
 
@@ -699,7 +699,7 @@ let follower = if roles.contains(NodeRole::Writer) {
 
 All existing methods access `self.inner`. `execute` requires `Writer`; `query` requires `Query`; `compact_once` and `gc_once` require `Compactor`.
 
-- [ ] **Step 6: Publish writer progress only after apply succeeds**
+- [x] **Step 6: Publish writer progress only after apply succeeds**
 
 Add `progress: watch::Sender<ProgressState>` to `WriterState`. In `writer::flush`, after `apply` returns `Ok(())`, publish the last staged receipt's `tx_id` and `first.advance(count)` before sending acknowledgements. On append/apply error, leave progress unchanged.
 
@@ -711,11 +711,11 @@ let task_db = db.clone();
 tokio::spawn(async move { task_db.execute("INSERT (:C {_id: 1})").await });
 ```
 
-- [ ] **Step 7: Implement async status**
+- [x] **Step 7: Implement async status**
 
 `Db::status` clones the latest progress, calls `latest_manifest(self.inner.store.as_ref()).await`, and returns `manifest_block_id` plus its replay watermark (or `None`/zero without a manifest). It does not run the conditional-PUT probe.
 
-- [ ] **Step 8: Run focused and regression gates**
+- [x] **Step 8: Run focused and regression gates**
 
 Run: `rtk cargo test -p varve-engine --test query_node -- --test-threads=1`
 
@@ -729,7 +729,7 @@ Run: `rtk cargo clippy --workspace --all-targets -- -D warnings`
 
 Expected: query node catches up without GQL replay, query-node writes are rejected, existing writer durability/concurrency behavior remains green, and `Db: Clone + Debug`.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 rtk git add crates/varve-engine crates/varve/src/lib.rs
@@ -781,7 +781,7 @@ pub async fn union_query_results_stream(
 ```
 - Keeps `execute_body_with_limits` and `union_query_results` as collection helpers for mutation planning/tests; they collect the new stream and contain no second lowering implementation.
 
-- [ ] **Step 1: Write basis timeout/catch-up tests**
+- [x] **Step 1: Write basis timeout/catch-up tests**
 
 Append to `query_node.rs`:
 
@@ -814,11 +814,11 @@ async fn basis_wait_times_out_then_succeeds_after_writer_commit() {
 
 Add a terminal follower-error test with a test log that returns `LogError::Corrupt`; the wait must return `FollowerFailed` immediately instead of waiting for the timeout.
 
-- [ ] **Step 2: Write stream equivalence and empty-schema tests**
+- [x] **Step 2: Write stream equivalence and empty-schema tests**
 
 In `varve-plan/tests/exec_test.rs`, execute the same ordered query through collecting and streaming entry points, collect the stream with `TryStreamExt::try_collect`, and assert identical schemas/rows. Add an unknown-label query and assert its stream has a stable (possibly empty) schema and yields zero rows rather than failing to construct Arrow IPC.
 
-- [ ] **Step 3: Run and confirm RED**
+- [x] **Step 3: Run and confirm RED**
 
 Run: `rtk cargo test -p varve-engine --test query_node basis_`
 
@@ -826,7 +826,7 @@ Run: `rtk cargo test -p varve-plan stream_`
 
 Expected: compile failure for basis/query-builder/stream interfaces.
 
-- [ ] **Step 4: Refactor final projection into a lazy DataFrame**
+- [x] **Step 4: Refactor final projection into a lazy DataFrame**
 
 Split `project_return_body` into a synchronous `project_return_body_frame -> Result<DataFrame, PlanError>` containing the existing aggregate/project/distinct/order/limit lowering, and a collecting wrapper. Split `execute_body_with_limits` the same way: one private `build_body_frame_with_limits -> Result<Option<DataFrame>, PlanError>`, where `None` is the existing empty-input outcome.
 
@@ -881,11 +881,11 @@ pub async fn execute_body_stream_with_limits(
 
 `execute_body_with_limits` collects this stream. `union_query_results_stream` builds the existing union DataFrame and calls `execute_stream`; distinct union remains a DataFusion operator. Union arms may remain materialized because their schema compatibility check requires each arm's projected schema.
 
-- [ ] **Step 5: Implement progress waits**
+- [x] **Step 5: Implement progress waits**
 
 `wait_for_basis` clones the watch receiver, checks its current value before awaiting, loops on `changed()`, returns `FollowerFailed` if the state carries an error or the channel closes, and wraps the loop in `tokio::time::timeout`. Satisfaction is `applied.tx_id >= n` for `TxId(n)` and `applied.log_position >= position` for `At(position)`.
 
-- [ ] **Step 6: Implement the owned query builder**
+- [x] **Step 6: Implement the owned query builder**
 
 `Query` owns a cloned `Db`, so its `IntoFuture` is `Send + 'static`. `Query::stream` validates the Query role, awaits an optional basis, then calls a private `Db::query_stream_impl(gql, params)`. The current `query_with` body moves into that private function and uses `execute_body_stream_with_limits` for non-UNION queries. `IntoFuture` collects with `TryStreamExt::try_collect` and maps DataFusion errors through `PlanError`.
 
@@ -910,11 +910,11 @@ impl std::future::IntoFuture for Query {
 
 Use the actual public `PlanError` DataFusion variant name from the pinned code if it differs; test expectations and returned error semantics do not change.
 
-- [ ] **Step 7: Update all current call sites without aliases**
+- [x] **Step 7: Update all current call sites without aliases**
 
 Convert `db.query_with(gql, &params).await` to `db.query(gql).params(params.clone()).await`. Existing no-param `.query(gql).await` remains source-compatible by virtue of `IntoFuture`, but it now exercises the builder.
 
-- [ ] **Step 8: Run query, traversal, and full gates**
+- [x] **Step 8: Run query, traversal, and full gates**
 
 Run: `rtk cargo test -p varve-plan`
 
@@ -928,7 +928,7 @@ Run: `rtk cargo clippy --workspace --all-targets -- -D warnings`
 
 Expected: stream/collect equivalence, bounded basis behavior, and all existing query semantics green.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 rtk git add crates/varve-plan crates/varve-engine crates/varve crates/varve-testkit
@@ -958,7 +958,7 @@ rtk git commit -m "feat: add basis-aware streaming queries"
 - Produces: `pub async fn Db::verify(&self) -> Result<VerifyReport, EngineError>`; valid on Writer or Query roles and strictly read-only.
 - `compact_once` and `gc_once` require `NodeRole::Compactor`; `execute` and `publish_writer` require Writer. Query-only nodes therefore cannot mutate inventory.
 
-- [ ] **Step 1: Write advertisement and role-gate tests**
+- [x] **Step 1: Write advertisement and role-gate tests**
 
 ```rust
 #[tokio::test]
@@ -983,21 +983,21 @@ async fn writer_advertisement_round_trips_through_the_store() {
 }
 ```
 
-- [ ] **Step 2: Write verification success and corruption tests**
+- [x] **Step 2: Write verification success and corruption tests**
 
 Create a local database with a forced block flush. `verify` must report one or more tries/pages/events and the log tail count. Then truncate one referenced data object to fewer bytes than its meta page range and assert `verify` returns `EngineError::Storage` or `EngineError::Index`, never a panic and never `Ok`.
 
-- [ ] **Step 3: Run and confirm RED**
+- [x] **Step 3: Run and confirm RED**
 
 Run: `rtk cargo test -p varve-engine --test admin`
 
 Expected: compile failure for advertisement and verify interfaces.
 
-- [ ] **Step 4: Implement the advertisement methods**
+- [x] **Step 4: Implement the advertisement methods**
 
 Serialize with `serde_json::to_vec`, store via `ObjectStore::put`, and read with `ObjectStore::get`. Detect absence without string-matching errors by first listing the exact `v1/writer.json` prefix and requiring an exact key before GET. Validate addresses with `url::Url` in the server task; the engine stores the supplied opaque address.
 
-- [ ] **Step 5: Implement full latest-snapshot verification**
+- [x] **Step 5: Implement full latest-snapshot verification**
 
 `verify.rs` performs these deterministic checks in manifest table/trie order:
 
@@ -1017,7 +1017,7 @@ pub(crate) async fn verify_database(
 
 No verification step calls `delete`, `put`, `append`, `trim`, or the capability probe.
 
-- [ ] **Step 6: Run admin and regression gates**
+- [x] **Step 6: Run admin and regression gates**
 
 Run: `rtk cargo test -p varve-engine --test admin -- --test-threads=1`
 
@@ -1029,7 +1029,7 @@ Run: `rtk cargo clippy --workspace --all-targets -- -D warnings`
 
 Expected: reports are correct, corruption is loud, query-node inventory mutation is rejected, and compaction/GC behavior is unchanged for the default all-role embedded profile.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 rtk git add Cargo.toml Cargo.lock crates/varve-engine crates/varve/src/lib.rs
@@ -1074,7 +1074,7 @@ rtk git commit -m "feat: add node status advertisement and verification"
 - `batches_to_json` is a thin adapter over `varve::rows`; there is one Arrow-to-serde row implementation.
 - JSON scalar conversion accepts null, bool, signed i64, finite f64, UTF-8 string, and bytes encoded only as `{ "$bytes": "<base64-standard>" }`. Arrays, other objects, unsigned integers above `i64::MAX`, NaN, and infinity are errors.
 
-- [ ] **Step 1: Write round-trip and rejection tests first**
+- [x] **Step 1: Write round-trip and rejection tests first**
 
 `crates/varve-server/tests/api.rs`:
 
@@ -1121,7 +1121,7 @@ fn arrow_batches_become_explicit_null_json_rows() {
 
 `crates/varve/tests/rows.rs` constructs the same batch, calls `varve::rows`, and asserts the collected `JsonRow` contains the explicit null. This directly pins the embedded ergonomic surface instead of relying only on the server adapter.
 
-- [ ] **Step 2: Run and confirm RED**
+- [x] **Step 2: Run and confirm RED**
 
 Run: `rtk cargo test -p varve-server --test api`
 
@@ -1129,13 +1129,13 @@ Run: `rtk cargo test -p varve --test rows`
 
 Expected: package/module compile failure.
 
-- [ ] **Step 3: Create the crate and error type**
+- [x] **Step 3: Create the crate and error type**
 
 `varve-server` is a library now; Task 10 adds the binary. Dependencies are `varve`, `varve-engine`, `varve-types`, `varve-config`, `serde`, `serde_json`, `base64`, `arrow`, `arrow-json`, `thiserror`, and `tokio`. Add `[lints] workspace = true`.
 
 `ServerError` has transparent engine/row/base64/config/registry variants plus `InvalidRequest(String)`, `Unauthorized`, `Forbidden`, `NotAcceptable(String)`, `MissingWriterAdvertisement`, `Protocol(String)`, and `Io(std::io::Error)`. The row variant is `Rows(#[from] varve::RowError)`; `varve::RowError` owns Arrow/JSON failures. Library code returns typed errors; HTTP mapping arrives in Task 9.
 
-- [ ] **Step 4: Implement exact basis and parameter conversion**
+- [x] **Step 4: Implement exact basis and parameter conversion**
 
 Use `base64::engine::general_purpose::STANDARD.decode` only when an object has exactly the `$bytes` key. Use `serde_json::Number::as_i64` before `as_f64` and reject `!value.is_finite()`.
 
@@ -1150,11 +1150,11 @@ let packed = value
 Ok(BasisToken::At(LogPosition::from_u64(packed)))
 ```
 
-- [ ] **Step 5: Implement JSON row encoding with pinned arrow-json**
+- [x] **Step 5: Implement JSON row encoding with pinned arrow-json**
 
 In `varve::rows`, build `WriterBuilder::new().with_explicit_nulls(true).build::<_, JsonArray>(&mut bytes)`, call `write_batches`, call `finish`, deserialize the resulting array into `Vec<JsonRow>`, and wrap its `IntoIter`. `batches_to_json` collects that iterator under `rows`. Empty batches return `{"rows":[]}`.
 
-- [ ] **Step 6: Run gates**
+- [x] **Step 6: Run gates**
 
 Run: `rtk cargo test -p varve-server --test api`
 
@@ -1166,7 +1166,7 @@ Run: `rtk cargo clippy --workspace --all-targets -- -D warnings`
 
 Expected: DTO JSON shapes and scalar rules are pinned.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 rtk git add Cargo.toml Cargo.lock crates/varve crates/varve-server
@@ -1199,7 +1199,7 @@ rtk git commit -m "feat: define server wire contract"
 - Produces builtin `prometheus` metrics selected by `[metrics] backend = "prometheus"` with request counter (`method,route,status`), duration histogram (`method,route`), applied tx/log gauges, manifest watermark gauge, and follower health gauge.
 - Produces: `pub struct ServerRegistries { pub frontend: Registry<dyn ProtocolFrontend>, pub authenticator: Registry<dyn Authenticator>, pub metrics: Registry<dyn MetricsSink> }` and `ServerRegistries::with_builtins()`. At this task the frontend registry is empty; Task 10 registers `http` behind the `http` Cargo feature.
 
-- [ ] **Step 1: Write static-auth contract tests**
+- [x] **Step 1: Write static-auth contract tests**
 
 ```rust
 #[test]
@@ -1226,31 +1226,31 @@ fn static_auth_config_rejects_empty_and_duplicate_tokens() {
 }
 ```
 
-- [ ] **Step 2: Write isolated Prometheus registry tests**
+- [x] **Step 2: Write isolated Prometheus registry tests**
 
 Create one `PrometheusMetrics`, observe a query 200 and tx 421, set a known `NodeStatus`, encode, and assert the exact metric names and labels occur. Create a second instance and prove registration does not collide; never use the global Prometheus registry.
 
-- [ ] **Step 3: Run and confirm RED**
+- [x] **Step 3: Run and confirm RED**
 
 Run: `rtk cargo test -p varve-server --test auth --test metrics`
 
 Expected: compile failure for interfaces/factories.
 
-- [ ] **Step 4: Implement constant-time static authentication**
+- [x] **Step 4: Implement constant-time static authentication**
 
 Store token bytes privately. For each configured token, compare equal-length byte slices with `subtle::ConstantTimeEq::ct_eq`; do not return early on the first candidate. Aggregate the match and return the associated subject only after all entries were compared. `Debug` for the backend prints token count, never token material.
 
 The factory reads only `cfg.child("static")`, validates the vector, and maps build failures to `RegistryError::Build { kind: "authenticator", name: "static", source }`.
 
-- [ ] **Step 5: Implement per-instance Prometheus metrics**
+- [x] **Step 5: Implement per-instance Prometheus metrics**
 
 Construct `prometheus::Registry::new()`, register cloned `IntCounterVec`, `HistogramVec`, and `IntGauge` collectors once, update with `with_label_values`, and encode with `TextEncoder::encode(&registry.gather(), &mut Vec<u8>)`. Convert UTF-8/Prometheus errors into `ServerError::Protocol` without panics.
 
-- [ ] **Step 6: Implement the registries and shutdown token**
+- [x] **Step 6: Implement the registries and shutdown token**
 
 Use the established `varve_config::Registry`/`ComponentFactory` pattern. `ServerRegistries::with_builtins()` registers static auth and Prometheus metrics; `frontend` starts as `Registry::new("protocol-frontend")`. `Shutdown::channel()` returns `(ShutdownTrigger, Shutdown)` and `readiness_channel()` returns the reporter/waiter pair for the binary and process tests.
 
-- [ ] **Step 7: Run gates**
+- [x] **Step 7: Run gates**
 
 Run: `rtk cargo test -p varve-server --test auth --test metrics`
 
@@ -1262,7 +1262,7 @@ Run: `rtk cargo clippy --workspace --all-targets -- -D warnings`
 
 Expected: auth/metrics registries are isolated, explicit, and green.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 rtk git add Cargo.toml Cargo.lock crates/varve-server
@@ -1296,7 +1296,7 @@ rtk git commit -m "feat: add auth and metrics registries"
 - `GET /metrics`: Prometheus text with encoder content type.
 - Every response includes `X-Content-Type-Options: nosniff`; 401 includes `WWW-Authenticate: Bearer`.
 
-- [ ] **Step 1: Write in-process HTTP route contracts**
+- [x] **Step 1: Write in-process HTTP route contracts**
 
 Use `tower::ServiceExt::oneshot` with a `Db::memory()` context and static token. Pin these cases:
 
@@ -1332,29 +1332,29 @@ async fn tx_then_json_query_round_trips() {
 
 Add exact status tests for malformed GQL/params (400), unsupported Accept (406), basis timeout (408), query-node tx with advertisement (421), missing query-node advertisement (503), and internal failure (500 without internal secrets).
 
-- [ ] **Step 2: Write Arrow stream validity and chunking tests**
+- [x] **Step 2: Write Arrow stream validity and chunking tests**
 
 Request Arrow with enough output rows for at least two record batches. Consume `Body::into_data_stream`, assert at least the schema chunk and one data chunk arrive, concatenate them, decode with `arrow::ipc::reader::StreamReader::try_new(Cursor::new(bytes), None)`, and assert schema/row values.
 
-- [ ] **Step 3: Run and confirm RED**
+- [x] **Step 3: Run and confirm RED**
 
 Run: `rtk cargo test -p varve-server --test http_api --test arrow_stream`
 
 Expected: compile failure for router and HTTP modules.
 
-- [ ] **Step 4: Implement auth/metrics middleware and error mapping**
+- [x] **Step 4: Implement auth/metrics middleware and error mapping**
 
 Build a public router containing only `/healthz`, merge a protected router for all other routes, then apply `middleware::from_fn_with_state` to the protected router. The middleware extracts exactly one `Authorization: Bearer <token>` credential, authenticates it, inserts `Principal` into request extensions, times the call, records method/static route/status, and sets `nosniff`.
 
 Map errors centrally to stable codes/statuses: `invalid_request`/400, `unauthorized`/401, `not_acceptable`/406, `basis_timeout`/408, `misdirected_request`/421, `writer_unavailable`/503, `follower_failed`/503, and `internal`/500. Error bodies never include bearer tokens, storage credentials, or Rust debug formatting.
 
-- [ ] **Step 5: Implement handlers against engine interfaces only**
+- [x] **Step 5: Implement handlers against engine interfaces only**
 
 Query handler converts params, applies optional basis/timeout to the builder, and calls `Query::stream`. JSON collects batches then calls `batches_to_json`; Arrow passes the stream to `arrow_ipc_response`. Tx handler calls `db.execute_as(&request.gql, &params, &principal.subject)` and the implementation extends `Submission`/`LogRecord.user`; embedded `execute`/`execute_with` use an empty user.
 
 Status calls `db.status` plus the startup probe from `FrontendContext`. Metrics calls `set_progress` before `encode`. Compact/GC/verify convert report fields to DTOs.
 
-- [ ] **Step 6: Implement batch-backpressured Arrow IPC bodies**
+- [x] **Step 6: Implement batch-backpressured Arrow IPC bodies**
 
 `encoding.rs` defines a private `SharedBuffer(Arc<Mutex<Vec<u8>>>)` implementing `std::io::Write`. Create `StreamWriter::try_new(SharedBuffer::clone(), stream.schema().as_ref())`, drain the schema bytes to a bounded `mpsc::channel<Result<Bytes, std::io::Error>>(2)`, then for each asynchronously received batch call `writer.write(&batch)`, drain/send that batch's bytes, and finally call `finish` and drain/send the continuation marker. Await each channel send before requesting the next batch; this is the HTTP backpressure point.
 
@@ -1370,11 +1370,11 @@ Response::builder()
 
 If query planning fails, return an ordinary error before headers. If execution/encoding fails after headers, send an error item so the client observes a truncated/failed Arrow stream rather than a valid partial result.
 
-- [ ] **Step 7: Enforce request size and content negotiation**
+- [x] **Step 7: Enforce request size and content negotiation**
 
 Apply `DefaultBodyLimit::max(context.max_body_bytes)` to JSON routes. Accept absent/`*/*`/`application/json` as JSON and the Arrow media type as Arrow; parse comma-separated Accept values and ignore parameters such as `q=1.0`. Do not use substring matching that accepts `application/jsonish`.
 
-- [ ] **Step 8: Run gates**
+- [x] **Step 8: Run gates**
 
 Run: `rtk cargo test -p varve-server --test http_api --test arrow_stream -- --test-threads=1`
 
@@ -1386,7 +1386,7 @@ Run: `rtk cargo clippy --workspace --all-targets -- -D warnings`
 
 Expected: all route, auth, status, 421, JSON, and Arrow stream contracts green; authenticated user is present in the durable log test.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 rtk git add Cargo.toml Cargo.lock crates/varve-engine crates/varve-server
@@ -1417,21 +1417,21 @@ rtk git commit -m "feat: serve authenticated HTTP and Arrow streams"
 - Startup prints one machine-readable line to stdout after bind: `VARVED_LISTENING <socket-address>`. Process tests use it when `[server.http] listen = "127.0.0.1:0"`.
 - Shutdown stops accepting requests, lets in-flight HTTP work finish for up to 10 seconds, then drops the last `Db` and exits nonzero on server failure.
 
-- [ ] **Step 1: Write frontend config/registry tests**
+- [x] **Step 1: Write frontend config/registry tests**
 
 Pin: builtin frontend names are `["http"]` with default features; an invalid socket address fails build; numeric `max_body_bytes` fails; query nodes may omit advertised address; writer nodes may not.
 
-- [ ] **Step 2: Write a real rustls handshake test**
+- [x] **Step 2: Write a real rustls handshake test**
 
 Start `HttpFrontend` on `127.0.0.1:0` with the checked-in self-signed test pair, wait for its bound-address channel, call `/healthz` with a reqwest client configured with the test cert as a root, assert HTTPS 200, trigger shutdown, and assert `serve` returns `Ok(())`.
 
-- [ ] **Step 3: Run and confirm RED**
+- [x] **Step 3: Run and confirm RED**
 
 Run: `rtk cargo test -p varve-server --test frontend --test tls`
 
 Expected: compile failure for frontend factory/binary/TLS serve.
 
-- [ ] **Step 4: Implement `HttpFrontendFactory`**
+- [x] **Step 4: Implement `HttpFrontendFactory`**
 
 Deserialize `[server.http]` into `HttpConfig`, validate the TLS pair and URL, and return `Arc<HttpFrontend>`. `HttpFrontend::serve` first calls `context.db.publish_writer` when Writer is enabled, then builds the router and binds with `axum_server::bind` or:
 
@@ -1445,15 +1445,15 @@ axum_server::bind_rustls(listen, tls)
 
 Drive graceful shutdown with `axum_server::Handle::graceful_shutdown(Some(Duration::from_secs(10)))` when `Shutdown::cancelled()` resolves. Concurrently await `handle.listening()`, publish the actual socket through `context.readiness.listening(format!("{addr}"))`, and let the binary print `VARVED_LISTENING` from its `Readiness` waiter.
 
-- [ ] **Step 5: Complete `ServerRegistries::with_builtins`**
+- [x] **Step 5: Complete `ServerRegistries::with_builtins`**
 
 Under `#[cfg(feature = "http")]`, register `HttpFrontendFactory`; no dummy frontend exists when the feature is off. Assert names and build a frontend from a complete `BuildContext`.
 
-- [ ] **Step 6: Implement binary assembly and signals**
+- [x] **Step 6: Implement binary assembly and signals**
 
 Use clap derive for `--config`, `tracing_subscriber::EnvFilter` defaulting to `info,varve=debug`, `tokio::signal::ctrl_c`, and Unix SIGTERM under `cfg(unix)`. Build raw engine registries through `Registries::with_builtins()` and server registries separately; insert the cloned `Db` into the frontend `BuildContext`. Spawn `ProtocolFrontend::serve`, await `Readiness::wait`, print the ready line, then wait for signal/server termination. Query-only HTTP frontends never publish.
 
-- [ ] **Step 7: Run binary/TLS/no-default-feature gates**
+- [x] **Step 7: Run binary/TLS/no-default-feature gates**
 
 Run: `rtk cargo test -p varve-server --test frontend --test tls -- --test-threads=1`
 
@@ -1467,7 +1467,7 @@ Run: `rtk cargo clippy --workspace --all-targets -- -D warnings`
 
 Expected: TLS handshake green, no-default library compiles without HTTP/TLS, and help documents `--config`.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 rtk git add Cargo.toml Cargo.lock crates/varve-server
@@ -1507,25 +1507,25 @@ async fn verify(&self) -> Result<VerifyResponse, CliError>;
 - A remote tx/admin mutation receiving 421 must parse `ErrorResponse.writer`, validate its absolute URL, replay the request once to that writer, and never follow a second 421. Queries remain on the originally selected query node.
 - Adds `CliError` variants for IO/JSON/Arrow/engine/HTTP/status/API/invalid input/redirect loop. Display messages exclude bearer values and response headers.
 
-- [ ] **Step 1: Write embedded/remote parity tests**
+- [x] **Step 1: Write embedded/remote parity tests**
 
 For embedded, execute a parameterized insert, query it, call status/verify, and assert report fields. For remote, start the in-process router from Task 9 and assert the same query batches and tx response.
 
-- [ ] **Step 2: Write one-hop 421 routing tests**
+- [x] **Step 2: Write one-hop 421 routing tests**
 
 Start one writer router and one query-only router sharing a local store. Point `RemoteClient` at the query router, call `execute`, assert it succeeds through the advertised writer, then issue `query` with the returned basis and assert the query request was served by the original query router (use separate request counters). Add a fake second 421 and assert `CliError::RedirectLoop`.
 
-- [ ] **Step 3: Run and confirm RED**
+- [x] **Step 3: Run and confirm RED**
 
 Run: `rtk cargo test -p varve-cli --test client --test remote -- --test-threads=1`
 
 Expected: package/interface compile failure.
 
-- [ ] **Step 4: Implement the embedded adapter**
+- [x] **Step 4: Implement the embedded adapter**
 
 Convert wire params through `params_from_json`; use `db.query(request.gql).params(params)` with optional basis/timeout; collect the returned batches. Use `db.execute_as(&request.gql, &params, "cli:embedded")` for tx. Convert status/probe/admin reports with `StatusResponse::from_engine`, `TxResponse::from_receipt`, `CompactionResponse::from_report`, `GcResponse::from_report`, and `VerifyResponse::from_report`, the same constructors used by server handlers.
 
-- [ ] **Step 5: Implement the remote adapter and Arrow decoder**
+- [x] **Step 5: Implement the remote adapter and Arrow decoder**
 
 All requests attach `.bearer_auth(&self.token)` and `.error_for_status` is not used until 421/error bodies have been decoded. Query sets `Accept: application/vnd.apache.arrow.stream`; after a 2xx response, read the byte stream into a bounded growing `Vec<u8>` capped by a CLI `max_response_bytes` default of 256 MiB, then decode:
 
@@ -1536,11 +1536,11 @@ reader.collect::<Result<Vec<RecordBatch>, _>>().map_err(CliError::from)
 
 The CLI buffers results because table/JSONL rendering needs a complete client-side result; this does not change server backpressure or the embedded streaming interface.
 
-- [ ] **Step 6: Implement exactly-one writer reroute**
+- [x] **Step 6: Implement exactly-one writer reroute**
 
 Factor one private `send_mutation<T: DeserializeOwned>(&self, path: &str, body: &impl Serialize, allow_redirect: bool)` method. On 421, require `writer`, create a temporary base URL, send once with `allow_redirect = false`, and preserve the same bearer token/body. Do not configure reqwest automatic redirects for 421.
 
-- [ ] **Step 7: Run gates**
+- [x] **Step 7: Run gates**
 
 Run: `rtk cargo test -p varve-cli --test client --test remote -- --test-threads=1`
 
@@ -1550,7 +1550,7 @@ Run: `rtk cargo clippy --workspace --all-targets -- -D warnings`
 
 Expected: embedded/remote parity and one-hop writer routing green.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 rtk git add Cargo.toml Cargo.lock crates/varve-cli
@@ -1580,7 +1580,7 @@ rtk git commit -m "feat: add embedded and remote CLI clients"
 - Query results render with Arrow 58 `pretty_format_batches`; tx output is `tx <id> @ <RFC3339-micros>`, followed by nonzero side-effect counts.
 - The shell remembers the last successful `TxResponse.basis` and attaches it to every later query in that shell, giving remote read-your-writes by default.
 
-- [ ] **Step 1: Write a scripted shell round-trip**
+- [x] **Step 1: Write a scripted shell round-trip**
 
 ```rust
 #[tokio::test]
@@ -1604,31 +1604,31 @@ async fn shell_executes_tx_then_basis_query_and_prints_table() {
 
 Add multiline accumulation, parse-error reset, `:status`, EOF, and Ctrl-C (`ReadlineError::Interrupted`) tests. Ctrl-C clears an in-progress buffer; Ctrl-D exits cleanly.
 
-- [ ] **Step 2: Write clap help/selector tests**
+- [x] **Step 2: Write clap help/selector tests**
 
 Use `Cli::try_parse_from` to assert `shell` appears and `--dir` conflicts with `--url`; assert remote without token returns a user-facing configuration error before any network call. Task 13 extends the same test to import/export/admin after those variants exist.
 
-- [ ] **Step 3: Run and confirm RED**
+- [x] **Step 3: Run and confirm RED**
 
 Run: `rtk cargo test -p varve-cli --test shell --test cli_help`
 
 Expected: compile failure for shell/main/output.
 
-- [ ] **Step 4: Implement deterministic table/receipt output**
+- [x] **Step 4: Implement deterministic table/receipt output**
 
 `format_batches` calls `arrow::util::pretty::pretty_format_batches`. Empty results print `(0 rows)`. Receipt output prints side-effect fields in this fixed order when nonzero: nodes created/deleted, relationships created/deleted, properties set/removed, labels added/removed.
 
-- [ ] **Step 5: Implement statement buffering and dispatch**
+- [x] **Step 5: Implement statement buffering and dispatch**
 
 Use `varve_gql::parse_program` to classify a program. Exactly one query statement routes to `CommandClient::query`; one or more mutation statements route to `execute`; mixed/empty programs print the parser/shape error and do not issue a client call. Build `QueryRequest` with the remembered basis and default timeout.
 
 Do not infer query-vs-mutation from leading text; `USE`, whitespace, and comments make that unsafe.
 
-- [ ] **Step 6: Implement rustyline and clap entry point**
+- [x] **Step 6: Implement rustyline and clap entry point**
 
 Use `rustyline::DefaultEditor::new`, add non-command non-empty lines to history, and map Interrupted/Eof as specified. `#[tokio::main]` builds the selected client, runs the subcommand, prints typed errors to stderr, and exits 2 for CLI/input errors or 1 for runtime/server errors.
 
-- [ ] **Step 7: Run shell/help gates**
+- [x] **Step 7: Run shell/help gates**
 
 Run: `rtk cargo test -p varve-cli --test shell --test cli_help`
 
@@ -1640,7 +1640,7 @@ Run: `rtk cargo clippy --workspace --all-targets -- -D warnings`
 
 Expected: scripted shell round-trip/table output and CLI grammar green.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 rtk git add Cargo.toml Cargo.lock crates/varve-cli
@@ -1671,7 +1671,7 @@ rtk git commit -m "feat: add varve shell"
 - Export uses arrow-json 58 `LineDelimited` with explicit nulls and writes through a buffered writer; it does not serialize `RecordBatch` debug output.
 - Admin output is stable human-readable key/value text; `--json` emits the exact server DTO.
 
-- [ ] **Step 1: Write import contract tests**
+- [x] **Step 1: Write import contract tests**
 
 ```rust
 #[tokio::test]
@@ -1694,17 +1694,17 @@ async fn jsonl_import_uses_one_parameterized_tx_per_line() {
 Add invalid JSON/non-object/empty object/invalid identifier/nested value tests; assert the client saw no request for the failing line.
 Extend `cli_help.rs` to assert `import`, `export`, and `admin` now appear and each subcommand rejects simultaneous `--dir`/`--url`.
 
-- [ ] **Step 2: Write export/admin tests**
+- [x] **Step 2: Write export/admin tests**
 
 Export a batch containing null/string/int/bytes and assert two valid JSON lines with explicit nulls and base64 bytes. For every admin subcommand, assert the matching client method is called once and both human and `--json` output include all report fields.
 
-- [ ] **Step 3: Run and confirm RED**
+- [x] **Step 3: Run and confirm RED**
 
 Run: `rtk cargo test -p varve-cli --test transfer --test admin`
 
 Expected: compile failure for transfer/admin modules.
 
-- [ ] **Step 4: Implement deterministic JSONL import**
+- [x] **Step 4: Implement deterministic JSONL import**
 
 Read with `BufRead::read_line` so errors carry line numbers and files do not load wholly into memory. Convert each object into a `BTreeMap`, validate identifiers with `is_ascii_alphabetic|_` for the first byte and `is_ascii_alphanumeric|_` thereafter, generate `$pN` names in sorted key order, build/parse the statement, then call `execute`. Return:
 
@@ -1717,7 +1717,7 @@ pub struct ImportReport {
 
 If the engine parser rejects a reserved identifier, wrap that error with the input line number; do not maintain a second reserved-word list.
 
-- [ ] **Step 5: Implement Arrow-to-JSONL export**
+- [x] **Step 5: Implement Arrow-to-JSONL export**
 
 Call `CommandClient::query`, then:
 
@@ -1731,11 +1731,11 @@ writer.finish()?;
 
 Use the exact arrow-json 58 accepted iterator/reference form; keep the emitted line contract unchanged if the generic call needs adaptation.
 
-- [ ] **Step 6: Implement admin dispatch and output**
+- [x] **Step 6: Implement admin dispatch and output**
 
 Map `status`, `compact`, `gc`, and `verify` directly to the interface. Query-node compact/GC is transparently rerouted once by `RemoteClient`; embedded query-only profiles return the role error. Human output uses fixed field order and packed log positions.
 
-- [ ] **Step 7: Run gates**
+- [x] **Step 7: Run gates**
 
 Run: `rtk cargo test -p varve-cli --test transfer --test admin`
 
@@ -1747,7 +1747,7 @@ Run: `rtk cargo clippy --workspace --all-targets -- -D warnings`
 
 Expected: import/export/admin contracts green; JSONL never bypasses tx/query interfaces.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 rtk git add crates/varve-cli
@@ -1771,7 +1771,7 @@ rtk git commit -m "feat: add CLI transfer and admin commands"
 - Child stderr is captured and included on startup/test failure; `Drop` sends kill and waits so no process survives a test.
 - Uses a static test bearer token and `v1/writer.json` written by the writer process.
 
-- [ ] **Step 1: Write the three-node basis-token test**
+- [x] **Step 1: Write the three-node basis-token test**
 
 `process_consistency.rs`:
 
@@ -1796,31 +1796,31 @@ async fn writer_receipt_is_immediately_readable_from_both_query_processes() {
 
 Set follower polling to 200 ms so the basis request normally has to wait; do not assert that an unbased first read is stale because scheduling may already have applied it.
 
-- [ ] **Step 2: Write eventual-consistency and 421 tests**
+- [x] **Step 2: Write eventual-consistency and 421 tests**
 
 After another writer tx, query without basis in a bounded 5-second retry loop until both query nodes return the row. POST the tx to each query node and assert 421 plus the exact writer address advertised by the writer process.
 
-- [ ] **Step 3: Write a Rust Arrow-stream client test**
+- [x] **Step 3: Write a Rust Arrow-stream client test**
 
 Insert enough rows for multiple output batches, call `/v1/query` with the Arrow Accept header, consume `reqwest::Response::bytes_stream` incrementally, require non-empty data, decode the concatenated bytes with Arrow 58 `StreamReader`, and assert all rows/schema. Do not assert network chunk count because HTTP implementations may coalesce application chunks; Task 9's in-process body test pins the multi-chunk producer. This is the exit criterion's Rust client verification.
 
-- [ ] **Step 4: Write concurrent read-scale test**
+- [x] **Step 4: Write concurrent read-scale test**
 
 `process_scale_out.rs` starts two tasks, one per query node, continuously issuing a bounded aggregate/traversal read while a third task sends the deterministic `social_graph(200, 1_000, 42)` node statements and edge programs to the writer. Each reader attaches the most recently published atomic basis when present. Assert both readers completed at least 20 successful queries, saw monotonically nondecreasing row counts, and end at the same final count while the writer ingested.
 
-- [ ] **Step 5: Run and confirm RED**
+- [x] **Step 5: Run and confirm RED**
 
 Run: `rtk cargo test -p varve-server --test process_consistency --test process_scale_out -- --test-threads=1`
 
 Expected: process harness/test compile failure or missing behavioral contracts.
 
-- [ ] **Step 6: Implement the process harness**
+- [x] **Step 6: Implement the process harness**
 
 Use `env!("CARGO_BIN_EXE_varved")`, write three complete TOML files with shared `[log.local]`/`[storage.local]`, distinct roles, authenticated server config, and writer advertised address. Because the writer's actual port is assigned at bind time, reserve a loopback port before writing its config, release it immediately before spawn, and fail loudly if the child cannot bind. Query nodes may use port zero because they do not advertise.
 
 Read readiness with a dedicated thread per child stdout, parse only the `VARVED_LISTENING` prefix, and use a 10-second channel timeout. Store child handles in creation order and kill in reverse order.
 
-- [ ] **Step 7: Run process tests repeatedly and gate**
+- [x] **Step 7: Run process tests repeatedly and gate**
 
 Run: `rtk cargo test -p varve-server --test process_consistency -- --test-threads=1`
 
@@ -1834,7 +1834,7 @@ Run: `rtk cargo clippy --workspace --all-targets -- -D warnings`
 
 Expected: two consecutive consistency runs and the concurrent scale-out run are green without orphaned children.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 rtk git add crates/varve-server
@@ -1868,7 +1868,7 @@ rtk git commit -m "test: prove cross-process query consistency"
 - Produces `just compose-demo`: build/up, wait health, load the reduced deterministic Slice 6 fixture over HTTP, verify basis reads/Arrow on both query nodes, pipe a shell query through `varve`, run status/verify, and always tear down volumes.
 - CI adds a non-scheduled `container-image` job running `docker build`; the full Compose demo remains explicit/local because the existing backend matrix already exercises live Garage in CI.
 
-- [ ] **Step 1: Write/validate deployment configuration before the image exists**
+- [x] **Step 1: Write/validate deployment configuration before the image exists**
 
 `deploy/garage.toml` uses the same one-node sqlite layout and fixed test-only RPC secret as `varve-testkit::backends`. `garage-init.sh` must:
 
@@ -1905,7 +1905,7 @@ Run: `rtk docker compose config`
 
 Expected before Dockerfile/config completion: FAIL on missing files or invalid Compose expansion.
 
-- [ ] **Step 2: Add exact Varve node configs**
+- [x] **Step 2: Add exact Varve node configs**
 
 Writer config uses:
 
@@ -1946,7 +1946,7 @@ backend = "prometheus"
 
 Query config is identical except `roles = ["query"]` and omits `advertised_address`. Each query process has its own in-memory query cache; no disk cache directory is shared between stores/processes.
 
-- [ ] **Step 3: Add the multi-stage image**
+- [x] **Step 3: Add the multi-stage image**
 
 Builder: `rust:1.93-bookworm`, copy manifests/source, `cargo build --locked --release -p varve-server --bin varved`. Runtime: `gcr.io/distroless/cc-debian12:nonroot`, copy the binary, `USER nonroot`, expose 8080, and use entrypoint `[/usr/local/bin/varved]`. Compose supplies `--config /etc/varve/varve.toml`.
 
@@ -1954,17 +1954,17 @@ Run: `rtk docker build -t varve:slice9 .`
 
 Expected: one release `varved` image builds with the committed lockfile.
 
-- [ ] **Step 4: Add the HTTP fixture driver**
+- [x] **Step 4: Add the HTTP fixture driver**
 
 `http_fixture` takes `--writer`, repeated `--query`, and `--token`; generates `social_graph(200, 1_000, 42)`; posts `node_statements(100)` and `edge_programs(100)` to the writer; retains the final basis; queries the two-hop and `{1,3}` forms from every query URL with that basis; requests Arrow from at least one query URL and decodes it. Any mismatch exits nonzero.
 
-- [ ] **Step 5: Add the teardown-safe demo script/recipe**
+- [x] **Step 5: Add the teardown-safe demo script/recipe**
 
 `scripts/compose_demo.sh` uses `set -eu`, installs an EXIT trap `rtk docker compose down -v --remove-orphans`, starts with `rtk docker compose up -d --build`, polls all three `/healthz` endpoints, runs `rtk cargo run -p varve-testkit --bin http_fixture -- --writer http://127.0.0.1:8080 --query http://127.0.0.1:8081 --query http://127.0.0.1:8082 --token varve-demo-token`, pipes `MATCH (p:Person) RETURN p.name LIMIT 3;` and `:quit` to `rtk cargo run -p varve-cli --bin varve -- shell --url http://127.0.0.1:8081 --token varve-demo-token`, then runs remote `admin status` and `admin verify`.
 
 The `just compose-demo` recipe invokes this script through `rtk proxy sh scripts/compose_demo.sh` so the repository RTK rule remains visible.
 
-- [ ] **Step 6: Run the real Compose exit demo**
+- [x] **Step 6: Run the real Compose exit demo**
 
 Run: `rtk docker compose config`
 
@@ -1972,7 +1972,7 @@ Run: `rtk proxy sh scripts/compose_demo.sh`
 
 Expected: Garage initializes, writer and two query nodes become healthy, fixture queries and Arrow decode pass on both query nodes, shell prints a table, verify succeeds, and teardown removes the stack/volumes.
 
-- [ ] **Step 7: Add and run image CI/local gates**
+- [x] **Step 7: Add and run image CI/local gates**
 
 Add `container-image` job with checkout + `docker build --tag varve-ci .`. Then run:
 
@@ -1984,7 +1984,7 @@ Run: `rtk cargo clippy --workspace --all-targets -- -D warnings`
 
 Expected: Rust/demo helper and image definition green.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 rtk git add Dockerfile .dockerignore docker-compose.yml deploy scripts/compose_demo.sh crates/varve-testkit justfile .github/workflows/ci.yml
@@ -2007,7 +2007,7 @@ rtk git commit -m "feat: add Garage scale-out Compose demo"
 - `STATUS.md` becomes the next-session source of truth: Slice 9 COMPLETE, Slice 10 planning next, final test counts, demo command, dependency pins, query role/basis semantics, HTTP routes/media/auth/TLS, CLI commands, Compose topology, and deviations.
 - Every unchecked Slice 9 roadmap task box is changed to `[x]`; exit-criterion prose remains intact.
 
-- [ ] **Step 1: Run formatting and lint gates**
+- [x] **Step 1: Run formatting and lint gates**
 
 Run: `rtk cargo fmt --all --check`
 
@@ -2015,7 +2015,7 @@ Run: `rtk cargo clippy --workspace --all-targets -- -D warnings`
 
 Expected: zero warnings/errors.
 
-- [ ] **Step 2: Run the serial whole workspace and focused role/server suites**
+- [x] **Step 2: Run the serial whole workspace and focused role/server suites**
 
 Run: `rtk cargo test --workspace -- --test-threads=1`
 
@@ -2025,7 +2025,7 @@ Run: `rtk cargo test -p varve-cli -- --test-threads=1`
 
 Expected: all green; record exact passed test/suite counts in `STATUS.md`.
 
-- [ ] **Step 3: Verify dependency unification and feature surfaces**
+- [x] **Step 3: Verify dependency unification and feature surfaces**
 
 Run: `rtk cargo tree -p datafusion | rtk proxy rg ' arrow v|object_store v'`
 
@@ -2035,7 +2035,7 @@ Run: `rtk cargo check -p varve-server --no-default-features`
 
 Expected: exactly one Arrow 58 and object_store 0.13; reqwest remains 0.12 for Varve direct use; server core library compiles without HTTP/TLS.
 
-- [ ] **Step 4: Run HTTP/Arrow/TLS/CLI demonstrations**
+- [x] **Step 4: Run HTTP/Arrow/TLS/CLI demonstrations**
 
 Run: `rtk cargo test -p varve-server --test arrow_stream --test tls -- --test-threads=1`
 
@@ -2045,13 +2045,13 @@ Run: `rtk cargo run -p varve-cli --bin varve -- --help`
 
 Expected: Arrow client and TLS handshake pass; both binaries document their complete surfaces.
 
-- [ ] **Step 5: Run the Compose scale-out exit demo**
+- [x] **Step 5: Run the Compose scale-out exit demo**
 
 Run: `rtk proxy sh scripts/compose_demo.sh`
 
 Expected: reduced Slice 6 fixture loads over HTTP; two query nodes answer basis reads; Arrow stream decodes; CLI shell round-trips; concurrent/read scale proof remains covered by Task 14; status and verify succeed.
 
-- [ ] **Step 6: Update README, STATUS, and roadmap**
+- [x] **Step 6: Update README, STATUS, and roadmap**
 
 README includes embedded vs remote shell examples, tx/query curl examples with bearer auth and basis, Arrow Accept example, TLS config, JSONL import/export, admin commands, and `just compose-demo`.
 
@@ -2067,7 +2067,7 @@ In `STATUS.md`:
 
 Tick all six Slice 9 roadmap task boxes.
 
-- [ ] **Step 7: Re-run doc-sensitive final gate**
+- [x] **Step 7: Re-run doc-sensitive final gate**
 
 Run: `rtk cargo fmt --all --check`
 
@@ -2079,7 +2079,7 @@ Run: `rtk git diff --check`
 
 Expected: green; only intentional Slice 9 code/deployment/docs changes remain.
 
-- [ ] **Step 8: Commit closeout**
+- [x] **Step 8: Commit closeout**
 
 ```bash
 rtk git add README.md docs/plans/STATUS.md docs/plans/varve-v1-roadmap.md
@@ -2090,19 +2090,19 @@ rtk git commit -m "docs: close Slice 9 server CLI and query nodes"
 
 ## Slice Exit Checklist
 
-- [ ] Query-only `Db` opens from the latest manifest watermark, consumes bounded log ranges, and applies decoded resolved effects without any GQL re-execution.
-- [ ] `Db` is a cloneable role-aware handle; Writer/Query/Compactor methods are explicitly gated and query follower shutdown/terminal errors are observable.
-- [ ] Basis by tx id and `at:<packed-log-position>` waits until applied, times out at the configured bound, and makes a writer receipt immediately readable from both query processes.
-- [ ] Streaming query tests prove DataFusion `RecordBatchStream` collection equivalence and valid chunked Arrow IPC over HTTP from a Rust client.
-- [ ] The `varve` facade exposes the serde-friendly `rows(&[RecordBatch]) -> Result<RowIter, RowError>` iterator and HTTP JSON uses that single conversion path.
-- [ ] `varved` serves authenticated `POST /v1/query`, `POST /v1/tx`, `GET /healthz`, `GET /metrics`, `GET /v1/status`, and admin compact/gc/verify; JSON/Arrow negotiation, 421 writer routing, body limits, error mapping, and rustls are tested.
-- [ ] `ProtocolFrontend`, `Authenticator`, and `MetricsSink` are interfaces backed by explicit registries; builtin names are `http`, `static`, and `prometheus`.
-- [ ] `varve shell` round-trips against embedded and remote nodes with table output and automatic last-tx basis.
-- [ ] `varve import`/`export` use JSONL through normal tx/query paths; `varve admin status|compact|gc|verify` works embedded and remote.
-- [ ] Multi-stage/distroless image builds; Compose runs pinned Garage + one writer + two query nodes and advertises the writer through `v1/writer.json`.
-- [ ] The reduced deterministic Slice 6 fixture runs end-to-end over HTTP; both query nodes serve concurrent reads while the writer ingests, and converge without a basis.
-- [ ] Human byte sizes are live for group commit and cache limits; bounded local/object log reads stop at their upper bound.
-- [ ] `rtk cargo fmt --all --check`, workspace clippy with warnings denied, serial workspace tests, focused process tests, TLS/Arrow tests, dependency-unification checks, image build, and `just compose-demo` are green.
-- [ ] `README.md` documents server/CLI/Compose use.
-- [ ] `docs/plans/STATUS.md` records Slice 9 complete, demo/test facts, closed deferred items, dependency pins/adaptations, and Slice 10 as the next entry point.
-- [ ] All Slice 9 boxes in `docs/plans/varve-v1-roadmap.md` are ticked and the closeout is committed.
+- [x] Query-only `Db` opens from the latest manifest watermark, consumes bounded log ranges, and applies decoded resolved effects without any GQL re-execution.
+- [x] `Db` is a cloneable role-aware handle; Writer/Query/Compactor methods are explicitly gated and query follower shutdown/terminal errors are observable.
+- [x] Basis by tx id and `at:<packed-log-position>` waits until applied, times out at the configured bound, and makes a writer receipt immediately readable from both query processes.
+- [x] Streaming query tests prove DataFusion `RecordBatchStream` collection equivalence and valid chunked Arrow IPC over HTTP from a Rust client.
+- [x] The `varve` facade exposes the serde-friendly `rows(&[RecordBatch]) -> Result<RowIter, RowError>` iterator and HTTP JSON uses that single conversion path.
+- [x] `varved` serves authenticated `POST /v1/query`, `POST /v1/tx`, `GET /healthz`, `GET /metrics`, `GET /v1/status`, and admin compact/gc/verify; JSON/Arrow negotiation, 421 writer routing, body limits, error mapping, and rustls are tested.
+- [x] `ProtocolFrontend`, `Authenticator`, and `MetricsSink` are interfaces backed by explicit registries; builtin names are `http`, `static`, and `prometheus`.
+- [x] `varve shell` round-trips against embedded and remote nodes with table output and automatic last-tx basis.
+- [x] `varve import`/`export` use JSONL through normal tx/query paths; `varve admin status|compact|gc|verify` works embedded and remote.
+- [x] Multi-stage/distroless image builds; Compose runs pinned Garage + one writer + two query nodes and advertises the writer through `v1/writer.json`.
+- [x] The reduced deterministic Slice 6 fixture runs end-to-end over HTTP; both query nodes serve concurrent reads while the writer ingests, and converge without a basis.
+- [x] Human byte sizes are live for group commit and cache limits; bounded local/object log reads stop at their upper bound.
+- [x] `rtk cargo fmt --all --check`, workspace clippy with warnings denied, serial workspace tests, focused process tests, TLS/Arrow tests, dependency-unification checks, image build, and `just compose-demo` are green.
+- [x] `README.md` documents server/CLI/Compose use.
+- [x] `docs/plans/STATUS.md` records Slice 9 complete, demo/test facts, closed deferred items, dependency pins/adaptations, and Slice 10 as the next entry point.
+- [x] All Slice 9 boxes in `docs/plans/varve-v1-roadmap.md` are ticked and the closeout is committed.

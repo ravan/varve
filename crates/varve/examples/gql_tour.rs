@@ -63,13 +63,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let params = BTreeMap::from([("city".to_string(), Value::Str("London".to_string()))]);
     show(
         "params",
-        &db.query_with(
+        &db.query(
             "USE tour; MATCH (p:Person) \
              WHERE p.city = $city \
              RETURN p.name AS name \
              ORDER BY name ASC",
-            &params,
         )
+        .params(params.clone())
         .await?,
     )?;
 

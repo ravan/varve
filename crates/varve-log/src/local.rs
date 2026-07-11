@@ -276,10 +276,16 @@ fn read_range_sync(
     }
     let mut out = Vec::new();
     for (first, path) in list_segments(&inner.dir)? {
+        if LogPosition::from_u64(first) >= to {
+            break;
+        }
         let mut position = LogPosition::from_u64(first);
         let bytes = fs::read(&path)?;
         let mut off = 0usize;
         while bytes.len() - off >= FRAME_HEADER {
+            if position >= to {
+                return Ok(out);
+            }
             let len =
                 u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
                     as usize;
@@ -438,5 +444,62 @@ impl ComponentFactory<dyn Log> for LocalLogFactory {
                 }
             })?;
         Ok(Arc::new(log))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Seek as _, SeekFrom, Write as _};
+
+    fn record(tx_id: u64) -> LogRecord {
+        LogRecord {
+            tx_id,
+            system_time_us: tx_id as i64,
+            user: String::new(),
+            effects: vec![],
+        }
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn corrupt_frame_crc(dir: &Path, frame_index: usize) {
+        let (_, path) = list_segments(dir).unwrap().into_iter().next().unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let mut off = 0usize;
+        for index in 0..=frame_index {
+            let len = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
+            if index == frame_index {
+                let crc = u32::from_le_bytes(bytes[off + 4..off + 8].try_into().unwrap());
+                let mut file = OpenOptions::new().write(true).open(path).unwrap();
+                file.seek(SeekFrom::Start((off + 4) as u64)).unwrap();
+                file.write_all(&(crc ^ 1).to_le_bytes()).unwrap();
+                file.sync_all().unwrap();
+                return;
+            }
+            off += FRAME_HEADER + len;
+        }
+        panic!("frame {frame_index} not found");
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn bounded_read_does_not_decode_a_corrupt_excluded_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = LocalLog::open(dir.path(), DEFAULT_SEGMENT_MAX_BYTES).unwrap();
+        log.append(vec![record(1)]).await.unwrap();
+        log.append(vec![record(2)]).await.unwrap();
+        corrupt_frame_crc(dir.path(), 1);
+
+        let rows = log
+            .read_range(LogPosition::ZERO, LogPosition::ZERO.advance(1).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.tx_id, 1);
+        assert!(matches!(
+            log.read_range(LogPosition::ZERO, LogPosition::ZERO.advance(2).unwrap())
+                .await,
+            Err(LogError::Corrupt { .. })
+        ));
     }
 }

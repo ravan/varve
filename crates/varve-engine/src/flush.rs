@@ -331,6 +331,7 @@ fn crash_point(_point: &str) {}
 mod tests {
     use crate::clock::{Clock, MonotonicClock};
     use crate::db::{EngineError, TxReceipt};
+    use crate::node::ProgressState;
     use crate::scan::merged_snapshot;
     use crate::state::{GraphsState, TableKind, DEFAULT_GRAPH};
     use crate::writer::{spawn_writer, Submission, WriterConfig, WriterHandle, WriterState};
@@ -338,7 +339,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
-    use tokio::sync::oneshot;
+    use tokio::sync::{oneshot, watch};
     use varve_index::LabelFilter;
     use varve_log::{Log, MemoryLog};
     use varve_storage::{
@@ -353,6 +354,7 @@ mod tests {
     ) -> (WriterHandle, Arc<RwLock<GraphsState>>, Arc<MemoryLog>) {
         let log = Arc::new(MemoryLog::new());
         let state = Arc::new(RwLock::new(GraphsState::new()));
+        let (progress, _progress_rx) = watch::channel(ProgressState::running(0, LogPosition::ZERO));
         let writer_state = WriterState {
             state: Arc::clone(&state),
             store,
@@ -364,6 +366,7 @@ mod tests {
             next_tx_id: 0,
             next_block_id: 0,
             durable_watermark: LogPosition::ZERO,
+            progress,
         };
         let cfg = WriterConfig {
             window: Duration::ZERO,
@@ -387,6 +390,7 @@ mod tests {
             statements: program.statements,
             params: BTreeMap::new(),
             graph,
+            user: String::new(),
             ack,
         });
         rx

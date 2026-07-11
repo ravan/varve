@@ -224,7 +224,7 @@ async fn exists_respects_temporal_bounds() {
         .unwrap();
 
     let earlier = db
-        .query(&format!(
+        .query(format!(
             "MATCH (a:Person)
              FOR SYSTEM_TIME AS OF TIMESTAMP '{}'
              WHERE EXISTS {{ (a)-[:KNOWS]->(:Person) }}
@@ -255,7 +255,7 @@ async fn filter_exists_respects_enclosing_match_temporal_bounds() {
         .unwrap();
 
     let rows = db
-        .query(&format!(
+        .query(format!(
             "MATCH (a:Person)
              FOR SYSTEM_TIME AS OF TIMESTAMP '{}'
              FILTER EXISTS {{ (a)-[:KNOWS]->(:Person) }}

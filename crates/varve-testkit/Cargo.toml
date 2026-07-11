@@ -27,6 +27,13 @@ chrono = { workspace = true }
 # for both test files to share, so arrow is a normal dep, not dev-only.
 arrow = { workspace = true }
 thiserror = { workspace = true }
+# The `http_fixture` demo binary (src/bin/http_fixture.rs) drives the Compose
+# deployment's HTTP frontends: reqwest for the wire, serde_json for the small
+# JSON DTOs, clap for its arg surface. Runtime deps (not dev-only) because they
+# back a real binary target.
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
 
 [dev-dependencies]
 bytes = { workspace = true }

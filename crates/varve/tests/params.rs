@@ -55,10 +55,8 @@ async fn param_in_where() {
 
     let params = one_param("name", Value::Str("Ada".to_string()));
     let batches = db
-        .query_with(
-            "MATCH (n:P) WHERE n.name = $name RETURN n.name AS name",
-            &params,
-        )
+        .query("MATCH (n:P) WHERE n.name = $name RETURN n.name AS name")
+        .params(params.clone())
         .await
         .unwrap();
 
@@ -90,10 +88,8 @@ async fn param_as_iid_fast_path() {
 
     let params = one_param("id", Value::Int(1));
     let batches = db
-        .query_with(
-            "MATCH (n:P) WHERE n._id = $id RETURN n.name AS name",
-            &params,
-        )
+        .query("MATCH (n:P) WHERE n._id = $id RETURN n.name AS name")
+        .params(params.clone())
         .await
         .unwrap();
 
@@ -108,10 +104,8 @@ async fn missing_param_is_error() {
         .unwrap();
 
     let query_err = db
-        .query_with(
-            "MATCH (n:P) WHERE n.name = $name RETURN n.name AS name",
-            &BTreeMap::new(),
-        )
+        .query("MATCH (n:P) WHERE n.name = $name RETURN n.name AS name")
+        .params(BTreeMap::new())
         .await
         .unwrap_err();
     assert!(query_err.to_string().contains("missing parameter '$name'"));
@@ -133,7 +127,8 @@ async fn param_in_return() {
 
     let params = one_param("value", Value::Str("hello".to_string()));
     let batches = db
-        .query_with("MATCH (n:P) RETURN $value AS value", &params)
+        .query("MATCH (n:P) RETURN $value AS value")
+        .params(params.clone())
         .await
         .unwrap();
 
@@ -147,7 +142,8 @@ async fn byte_array_param_in_expression_is_unsupported() {
     let params = one_param("value", Value::Bytes(vec![1, 2, 3]));
 
     let err = db
-        .query_with("MATCH (n:P) RETURN $value AS value", &params)
+        .query("MATCH (n:P) RETURN $value AS value")
+        .params(params.clone())
         .await
         .unwrap_err();
 

@@ -1,0 +1,21 @@
+# Keep the build context lean: only the workspace manifests + source are
+# needed for `cargo build --locked`. Everything below is either rebuilt in the
+# image, VCS metadata, or local tooling state that must never reach the layer.
+target/
+**/target/
+.git/
+.gitignore
+refs/
+.worktrees/
+.venv/
+__pycache__/
+.tokensave/
+.agents/
+.claude/
+.superpowers/
+.github/
+docs/
+fuzz/
+resources/
+.DS_Store
+skills-lock.json

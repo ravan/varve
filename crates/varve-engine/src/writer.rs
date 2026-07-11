@@ -14,6 +14,7 @@ use crate::db::{
     bounds_per_clause, scan_inputs_for, validate_user_graph_name, EngineError, Overlay,
     SideEffects, TxReceipt,
 };
+use crate::node::ProgressState;
 use crate::scan::{incident_edges, AdjDirection};
 use crate::state::{
     GraphsState, PersistedTrie, TableKind, DEFAULT_GRAPH, EDGES_TABLE, META_GRAPH, NODES_TABLE,
@@ -27,7 +28,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use varve_gql::ast::{
     Clause, Direction, Expr, GraphStmt, InsertStmt, LabelSpec, MatchPart, MutKind, MutateStmt,
     NodePattern, QueryBody, RemoveItem, RemoveStmt, ReturnClause, SetItem, SetStmt, SortItem,
@@ -46,6 +47,7 @@ pub(crate) struct Submission {
     pub statements: Vec<Statement>,
     pub params: BTreeMap<String, Value>,
     pub graph: String,
+    pub user: String,
     pub ack: oneshot::Sender<Result<TxReceipt, EngineError>>,
 }
 
@@ -121,6 +123,7 @@ pub(crate) struct WriterState {
     /// Exclusive end of the durably-appended log prefix — becomes the next
     /// flushed block's manifest watermark (decision 6).
     pub durable_watermark: LogPosition,
+    pub progress: watch::Sender<ProgressState>,
 }
 
 /// One staged-but-not-yet-durable transaction: its log record, the per-table
@@ -313,7 +316,7 @@ async fn run_batch(
                 flush(state, std::mem::take(&mut staged)).await;
                 staged_bytes = 0;
             }
-            match resolve_program(state, sub.statements, &sub.params, &sub.graph).await {
+            match resolve_program(state, sub.statements, &sub.params, &sub.graph, &sub.user).await {
                 Ok((record, events, receipt, graph)) => {
                     staged_bytes += record.wire_len();
                     staged.push(Staged {
@@ -487,6 +490,7 @@ async fn resolve_program(
     statements: Vec<Statement>,
     params: &BTreeMap<String, Value>,
     graph: &str,
+    user: &str,
 ) -> Result<(LogRecord, Effects, TxReceipt, String), EngineError> {
     if statements.is_empty() {
         return Err(EngineError::NotAMutation);
@@ -579,7 +583,7 @@ async fn resolve_program(
     let record = LogRecord {
         tx_id,
         system_time_us: system.as_micros(),
-        user: String::new(),
+        user: user.to_string(),
         effects: table_effects,
     };
     let receipt = TxReceipt {
@@ -1715,6 +1719,13 @@ async fn flush(state: &mut WriterState, mut staged: Vec<Staged>) {
                 state.durable_watermark = end;
             }
             let applied = apply(state, &mut staged);
+            if applied.is_ok() {
+                if let (Some(last), Ok(end)) = (staged.last(), first.advance(count)) {
+                    state
+                        .progress
+                        .send_replace(ProgressState::running(last.receipt.tx_id, end));
+                }
+            }
             for s in staged {
                 let _ = s.ack.send(match &applied {
                     Ok(()) => Ok(s.receipt),
@@ -1768,13 +1779,92 @@ fn apply(state: &WriterState, staged: &mut [Staged]) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::clock::MonotonicClock;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Mutex;
+    use std::task::{Context, Poll, Wake, Waker};
+    use tokio::sync::Notify;
     use varve_log::{LogError, MemoryLog};
     use varve_types::LogPosition;
 
     struct CountingLog {
         inner: MemoryLog,
         appends: AtomicUsize,
+    }
+
+    struct BlockingAppendLog {
+        inner: MemoryLog,
+        appends: AtomicUsize,
+        entered: Mutex<Option<oneshot::Sender<()>>>,
+        release: Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl Log for BlockingAppendLog {
+        async fn append(&self, records: Vec<LogRecord>) -> Result<LogPosition, LogError> {
+            self.appends.fetch_add(1, AtomicOrdering::SeqCst);
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                let _ = entered.send(());
+            }
+            self.release.notified().await;
+            self.inner.append(records).await
+        }
+
+        async fn read_range(
+            &self,
+            from: LogPosition,
+            to: LogPosition,
+        ) -> Result<Vec<(LogPosition, LogRecord)>, LogError> {
+            self.inner.read_range(from, to).await
+        }
+
+        async fn trim(&self, up_to: LogPosition) -> Result<(), LogError> {
+            self.inner.trim(up_to).await
+        }
+    }
+
+    struct WakeOrder {
+        order: AtomicUsize,
+        next: Arc<AtomicUsize>,
+        notified: Arc<Notify>,
+    }
+
+    impl WakeOrder {
+        fn new(next: Arc<AtomicUsize>, notified: Arc<Notify>) -> Arc<Self> {
+            Arc::new(Self {
+                order: AtomicUsize::new(0),
+                next,
+                notified,
+            })
+        }
+
+        fn order(&self) -> usize {
+            self.order.load(AtomicOrdering::SeqCst)
+        }
+
+        fn record(&self) {
+            if self.order() == 0 {
+                let order = self.next.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                let _ = self.order.compare_exchange(
+                    0,
+                    order,
+                    AtomicOrdering::SeqCst,
+                    AtomicOrdering::SeqCst,
+                );
+            }
+            self.notified.notify_one();
+        }
+    }
+
+    impl Wake for WakeOrder {
+        fn wake(self: Arc<Self>) {
+            self.record();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.record();
+        }
     }
 
     impl CountingLog {
@@ -1832,8 +1922,16 @@ mod tests {
         }
     }
 
-    fn spawn(log: Arc<dyn Log>, cfg: WriterConfig) -> (WriterHandle, Arc<RwLock<GraphsState>>) {
+    fn spawn_with_progress(
+        log: Arc<dyn Log>,
+        cfg: WriterConfig,
+    ) -> (
+        WriterHandle,
+        Arc<RwLock<GraphsState>>,
+        watch::Receiver<ProgressState>,
+    ) {
         let state = Arc::new(RwLock::new(GraphsState::new()));
+        let (progress, progress_rx) = watch::channel(ProgressState::running(0, LogPosition::ZERO));
         let writer_state = WriterState {
             state: Arc::clone(&state),
             store: varve_storage::memory_store(),
@@ -1845,8 +1943,14 @@ mod tests {
             next_tx_id: 0,
             next_block_id: 0,
             durable_watermark: LogPosition::ZERO,
+            progress,
         };
-        (spawn_writer(writer_state, cfg), state)
+        (spawn_writer(writer_state, cfg), state, progress_rx)
+    }
+
+    fn spawn(log: Arc<dyn Log>, cfg: WriterConfig) -> (WriterHandle, Arc<RwLock<GraphsState>>) {
+        let (writer, state, _progress) = spawn_with_progress(log, cfg);
+        (writer, state)
     }
 
     /// try_send keeps submission order deterministic (mpsc is FIFO).
@@ -1863,6 +1967,7 @@ mod tests {
             statements: program.statements,
             params: BTreeMap::new(),
             graph,
+            user: String::new(),
             ack,
         });
         rx
@@ -1891,6 +1996,88 @@ mod tests {
             records.iter().map(|(_, r)| r.tx_id).collect::<Vec<_>>(),
             vec![1, 2, 3, 4, 5]
         );
+    }
+
+    #[tokio::test]
+    async fn group_progress_is_published_before_the_first_acknowledgement() {
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let log = Arc::new(BlockingAppendLog {
+            inner: MemoryLog::new(),
+            appends: AtomicUsize::new(0),
+            entered: Mutex::new(Some(entered_tx)),
+            release: Notify::new(),
+        });
+        let (sender, _live, mut progress) = spawn_with_progress(
+            Arc::clone(&log) as Arc<dyn Log>,
+            WriterConfig {
+                window: Duration::from_secs(1),
+                max_bytes: 8 * 1024 * 1024,
+                ..WriterConfig::default()
+            },
+        );
+        let mut acks = (1..=5)
+            .map(|i| submit(&sender, &format!("INSERT (:P {{_id: {i}}})")))
+            .collect::<Vec<_>>();
+        entered_rx.await.unwrap();
+
+        let next_order = Arc::new(AtomicUsize::new(0));
+        let notified = Arc::new(Notify::new());
+        let progress_wake = WakeOrder::new(Arc::clone(&next_order), Arc::clone(&notified));
+        let progress_waker = Waker::from(Arc::clone(&progress_wake));
+        let mut progress_context = Context::from_waker(&progress_waker);
+        let mut changed = Box::pin(progress.changed());
+        assert!(matches!(
+            changed.as_mut().poll(&mut progress_context),
+            Poll::Pending
+        ));
+
+        let ack_wakes = acks
+            .iter_mut()
+            .map(|ack| {
+                let wake = WakeOrder::new(Arc::clone(&next_order), Arc::clone(&notified));
+                let waker = Waker::from(Arc::clone(&wake));
+                let mut context = Context::from_waker(&waker);
+                assert!(matches!(Pin::new(ack).poll(&mut context), Poll::Pending));
+                wake
+            })
+            .collect::<Vec<_>>();
+
+        log.release.notify_one();
+        while progress_wake.order() == 0 || ack_wakes.iter().any(|wake| wake.order() == 0) {
+            notified.notified().await;
+        }
+
+        assert!(
+            ack_wakes
+                .iter()
+                .all(|ack_wake| progress_wake.order() < ack_wake.order()),
+            "progress wake {} must precede acknowledgement wakes {:?}",
+            progress_wake.order(),
+            ack_wakes
+                .iter()
+                .map(|wake| wake.order())
+                .collect::<Vec<_>>()
+        );
+
+        assert!(matches!(
+            changed.as_mut().poll(&mut progress_context),
+            Poll::Ready(Ok(()))
+        ));
+        drop(changed);
+        assert_eq!(progress.borrow().applied.tx_id, 5);
+        assert_eq!(
+            progress.borrow().applied.log_position,
+            LogPosition::from_u64(5)
+        );
+        for (ack, wake) in acks.iter_mut().zip(&ack_wakes) {
+            let waker = Waker::from(Arc::clone(wake));
+            let mut context = Context::from_waker(&waker);
+            assert!(matches!(
+                Pin::new(ack).poll(&mut context),
+                Poll::Ready(Ok(Ok(_)))
+            ));
+        }
+        assert_eq!(log.appends.load(AtomicOrdering::SeqCst), 1);
     }
 
     #[tokio::test]

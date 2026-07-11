@@ -61,7 +61,7 @@ async fn timed_lookup(root: &Path, cache_dir: &Path) -> Duration {
     let start = Instant::now();
     let db = Db::open(config(root, cache_dir)).await.expect("open");
     let batches = db
-        .query(&format!(
+        .query(format!(
             "MATCH (p:Person) WHERE p._id = {LOOKUP_ID} RETURN p.name"
         ))
         .await

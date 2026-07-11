@@ -354,20 +354,20 @@ Final verification: `rtk cargo fmt --all --check`; `rtk cargo clippy --workspace
 
 **Sessions:** 2–3. **Depends:** slices 5, 7.
 
-- [ ] Query-node role in `varve-engine`: open in `query` role → tail log from latest
+- [x] Query-node role in `varve-engine`: open in `query` role → tail log from latest
       manifest watermark, apply effect events to own live index (no GQL re-execution);
       basis tokens: query waits (bounded, configurable) until `tx_id` applied.
-- [ ] `varve-server` (`varved` binary): axum; `POST /v1/query` (JSON body; response JSON or
+- [x] `varve-server` (`varved` binary): axum; `POST /v1/query` (JSON body; response JSON or
       Arrow IPC stream by `Accept`), `POST /v1/tx`, `GET /healthz`, `GET /metrics`
       (Prometheus), `GET /v1/status` (role, log position, watermark, probe verdict);
       bearer-token auth behind `Authenticator` trait; rustls TLS option; writes to a
       query node → 421 + writer address from `v1/writer.json`.
-- [ ] `varve-cli` (`varve` binary): `shell` REPL (embedded dir or remote URL; table output),
+- [x] `varve-cli` (`varve` binary): `shell` REPL (embedded dir or remote URL; table output),
       `import`/`export` (JSONL via normal tx path), `admin status|compact|gc|verify`.
-- [ ] `ProtocolFrontend` trait + registry entry for http (Bolt/pgwire are roadmap slots).
-- [ ] Docker: multi-stage build, single static-ish binary image; docker-compose demo:
+- [x] `ProtocolFrontend` trait + registry entry for http (Bolt/pgwire are roadmap slots).
+- [x] Docker: multi-stage build, single static-ish binary image; docker-compose demo:
       Garage + 1 writer + 2 query nodes.
-- [ ] Read-your-writes integration test across processes: write to writer, immediately query
+- [x] Read-your-writes integration test across processes: write to writer, immediately query
       both query nodes with basis token ⇒ correct; without token ⇒ eventually consistent.
 
 **Exit criteria:** compose demo runs the slice-6 fixture workload end-to-end over HTTP;

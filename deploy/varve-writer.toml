@@ -1,0 +1,38 @@
+# Writer node: owns the log tail (writer + query + compactor roles) and is the
+# only node that accepts mutations. Query nodes redirect writes here via
+# `advertised_address`.
+#
+# The token/credentials here are TEST/DEMO-ONLY fixed material for the Compose
+# demo, not production secrets.
+[node]
+roles = ["writer", "query", "compactor"]
+
+[log]
+backend = "object-store"
+group_commit_window_ms = 15
+group_commit_max_bytes = "8MiB"
+
+[storage]
+backend = "s3"
+[storage.s3]
+endpoint = "http://garage:3900"
+bucket = "varve"
+region = "garage"
+access_key_id = "GK000000000000000000000000"
+secret_access_key = "0000000000000000000000000000000000000000000000000000000000000000"
+path_style = true
+
+[server]
+backend = "http"
+[server.http]
+listen = "0.0.0.0:8080"
+advertised_address = "http://writer:8080"
+max_body_bytes = "8MiB"
+
+[auth]
+backend = "static"
+[auth.static]
+tokens = [{ subject = "compose-demo", token = "varve-demo-token" }]
+
+[metrics]
+backend = "prometheus"

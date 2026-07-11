@@ -59,7 +59,7 @@ async fn fixture_two_hop_and_quantified_match_oracle() {
     );
 
     let rows = db
-        .query(&format!(
+        .query(format!(
             "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) WHERE a._id = {anchor} RETURN c._id AS _id"
         ))
         .await
@@ -75,7 +75,7 @@ async fn fixture_two_hop_and_quantified_match_oracle() {
     assert_eq!(got2, want2, "2-hop friend-of-friend vs oracle");
 
     let rows13 = db
-        .query(&format!(
+        .query(format!(
             "MATCH (a:Person)-[:KNOWS]->{{1,3}}(b:Person) WHERE a._id = {anchor} RETURN b._id AS _id"
         ))
         .await

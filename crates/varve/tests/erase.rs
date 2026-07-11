@@ -30,7 +30,7 @@ async fn erase_hides_history_at_every_system_time() {
 
     for system_time in [inserted.system_time, updated.system_time] {
         let history = db
-            .query(&format!(
+            .query(format!(
                 "FOR SYSTEM_TIME AS OF TIMESTAMP '{}' MATCH (p:Person {{_id: 1}}) RETURN p.name",
                 system_time
             ))
@@ -77,7 +77,7 @@ async fn detach_erase_erases_incident_edges() {
         .unwrap();
 
     let old_edge = db
-        .query(&format!(
+        .query(format!(
             "FOR SYSTEM_TIME AS OF TIMESTAMP '{}' MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.name",
             inserted.system_time
         ))
@@ -109,7 +109,7 @@ async fn erase_then_reinsert_same_id_is_fresh_entity() {
         .unwrap();
 
     let old_history = db
-        .query(&format!(
+        .query(format!(
             "FOR SYSTEM_TIME AS OF TIMESTAMP '{}' MATCH (p:Person {{_id: 1}}) RETURN p.name",
             first.system_time
         ))
@@ -118,7 +118,7 @@ async fn erase_then_reinsert_same_id_is_fresh_entity() {
     assert_eq!(rows(&old_history), 0);
 
     let after_erase = db
-        .query(&format!(
+        .query(format!(
             "FOR SYSTEM_TIME AS OF TIMESTAMP '{}' MATCH (p:Person {{_id: 1}}) RETURN p.name",
             erased.system_time
         ))

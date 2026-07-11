@@ -1,9 +1,14 @@
 #![allow(clippy::unwrap_used)] // tests may use unwrap; crate-level allow covers helper fns
 use arrow::array::{Array, Int64Array, StringArray, TimestampMicrosecondArray};
+use futures::TryStreamExt;
+use std::collections::BTreeMap;
 use varve_gql::ast::{Clause, Expr, Statement};
 use varve_index::{Event, LiveTable, Op};
-use varve_plan::run_query;
-use varve_types::{Doc, Iid, Instant, Value};
+use varve_plan::{
+    execute_body_stream_with_limits, execute_body_with_limits, matching_snapshot, run_query,
+    scan_specs, FunctionRegistry, PathExpandLimits, ScanInput,
+};
+use varve_types::{Doc, Iid, Instant, TemporalBounds, TemporalDimension, Value};
 
 const NOW: Instant = Instant::from_micros(100);
 
@@ -72,6 +77,71 @@ async fn unknown_label_returns_empty() {
     let live = setup();
     let q = query_stmt("MATCH (r:Robot) RETURN r.name");
     assert!(run_query(&q, &live, NOW).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn stream_matches_collected_ordered_query() {
+    let live = setup();
+    let q = query_stmt("MATCH (p:Person) RETURN p.name AS name ORDER BY name");
+    let specs = scan_specs(&q.first, "default", 10).unwrap();
+    let bounds = TemporalBounds {
+        valid: TemporalDimension::at(NOW),
+        system: TemporalDimension::at(NOW),
+    };
+    let pattern = q.single_node().unwrap();
+    let batch = matching_snapshot(pattern, &live, &bounds).unwrap().unwrap();
+    let functions = FunctionRegistry::with_builtins();
+    let params = BTreeMap::new();
+
+    let collected = execute_body_with_limits(
+        &q.first,
+        &specs,
+        vec![vec![ScanInput::Batch(Some(batch.clone()))]],
+        &functions,
+        PathExpandLimits::default(),
+        &params,
+    )
+    .await
+    .unwrap();
+    let streamed = execute_body_stream_with_limits(
+        &q.first,
+        &specs,
+        vec![vec![ScanInput::Batch(Some(batch))]],
+        &functions,
+        PathExpandLimits::default(),
+        &params,
+    )
+    .await
+    .unwrap()
+    .try_collect::<Vec<_>>()
+    .await
+    .unwrap();
+
+    assert_eq!(collected, streamed);
+}
+
+#[tokio::test]
+async fn stream_unknown_label_has_stable_empty_schema() {
+    let q = query_stmt("MATCH (r:Robot) RETURN r.name");
+    let specs = scan_specs(&q.first, "default", 10).unwrap();
+    let functions = FunctionRegistry::with_builtins();
+    let params = BTreeMap::new();
+
+    let stream = execute_body_stream_with_limits(
+        &q.first,
+        &specs,
+        vec![vec![ScanInput::Batch(None)]],
+        &functions,
+        PathExpandLimits::default(),
+        &params,
+    )
+    .await
+    .unwrap();
+    let schema = stream.schema();
+    let batches = stream.try_collect::<Vec<_>>().await.unwrap();
+
+    assert!(schema.fields().is_empty());
+    assert!(batches.is_empty());
 }
 
 #[tokio::test]
