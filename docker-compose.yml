@@ -1,0 +1,95 @@
+# Garage-backed scale-out demo: one writer + two query-only nodes over a shared
+# object-store log and S3 storage backend, all pointing at a single-node Garage
+# cluster. `just compose-demo` builds this, loads a fixture over HTTP, verifies
+# cross-node basis reads + Arrow, and always tears the stack (incl. volumes)
+# down. Credentials/tokens here are TEST/DEMO-ONLY (see deploy/*.toml).
+
+# Single source of truth for the Garage image tag (matches
+# varve-testkit::backends::GARAGE_IMAGE). Referenced by BOTH the `garage`
+# service's `image:` and the `garage-init` build's GARAGE_IMAGE build arg so
+# the server and the CLI baked into the init image can never drift apart.
+x-garage-image: &garage_image dxflrs/garage:v1.0.1
+
+# Shared build for the three varved nodes: built once, tagged, reused.
+x-varved: &varved
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: varve:slice9
+  command: ["--config", "/etc/varve/varve.toml"]
+  environment:
+    RUST_LOG: info
+  depends_on:
+    garage-init:
+      condition: service_completed_successfully
+  restart: "no"
+
+services:
+  garage:
+    # Pinned in ONE place: see x-garage-image above.
+    image: *garage_image
+    volumes:
+      - ./deploy/garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+    restart: "no"
+
+  # One-shot: forms the single-node layout, creates bucket `varve`, imports the
+  # fixed demo key, grants it, writes /shared/ready, then exits 0. Built from a
+  # shell-capable alpine carrying the static garage binary (the upstream image
+  # has no shell).
+  garage-init:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.garage-init
+      args:
+        GARAGE_IMAGE: *garage_image
+    image: varve-garage-init:slice9
+    volumes:
+      - ./deploy/garage.toml:/etc/garage.toml:ro
+      # Shares the node's metadata dir so the garage CLI can read the node key
+      # (`node_key`, written by the running node) and authenticate its RPC
+      # connection. The CLI drives the node over RPC — it does not touch the
+      # sqlite db here — so there is no metadata contention.
+      - garage-meta:/var/lib/garage/meta
+      - shared:/shared
+    depends_on:
+      garage:
+        condition: service_started
+    restart: "no"
+
+  writer:
+    <<: *varved
+    volumes:
+      - ./deploy/varve-writer.toml:/etc/varve/varve.toml:ro
+    ports:
+      - "8080:8080"
+
+  query-1:
+    <<: *varved
+    volumes:
+      - ./deploy/varve-query.toml:/etc/varve/varve.toml:ro
+    ports:
+      - "8081:8080"
+    depends_on:
+      garage-init:
+        condition: service_completed_successfully
+      writer:
+        condition: service_started
+
+  query-2:
+    <<: *varved
+    volumes:
+      - ./deploy/varve-query.toml:/etc/varve/varve.toml:ro
+    ports:
+      - "8082:8080"
+    depends_on:
+      garage-init:
+        condition: service_completed_successfully
+      writer:
+        condition: service_started
+
+volumes:
+  garage-meta:
+  garage-data:
+  shared:

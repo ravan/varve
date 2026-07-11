@@ -155,7 +155,7 @@ async fn bitemporal_history_survives_flush_and_restart() {
 
     // Time travel to before the correction — served from the flushed block.
     let before = db
-        .query(&format!(
+        .query(format!(
             "FOR SYSTEM_TIME AS OF TIMESTAMP '{}' MATCH (c:City) RETURN c.name AS name",
             v1.system_time
         ))

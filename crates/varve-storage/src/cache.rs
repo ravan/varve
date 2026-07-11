@@ -8,7 +8,7 @@ use bytes::Bytes;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
-use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{BuildContext, ByteSize, ComponentFactory, ConfigSection, RegistryError};
 
 /// `range: None` = the whole object; `Some((start, end))` = a half-open
 /// byte range — distinct cache entries.
@@ -182,11 +182,11 @@ impl ObjectStore for CachedStore {
 #[derive(serde::Deserialize)]
 struct MemoryCacheConfig {
     #[serde(default = "default_memory_max_bytes")]
-    max_bytes: usize,
+    max_bytes: ByteSize,
 }
 
-fn default_memory_max_bytes() -> usize {
-    512 * 1024 * 1024
+fn default_memory_max_bytes() -> ByteSize {
+    ByteSize::from_bytes(512 * 1024 * 1024)
 }
 
 /// Registry factory: listed as `"memory"` in `[cache] tiers`, tuned by the
@@ -207,7 +207,7 @@ impl ComponentFactory<dyn CacheTier> for MemoryCacheFactory {
             .child("memory")
             .unwrap_or_else(ConfigSection::empty)
             .get()?;
-        Ok(Arc::new(MemoryCache::new(config.max_bytes)))
+        Ok(Arc::new(MemoryCache::new(config.max_bytes.as_usize())))
     }
 }
 
@@ -216,6 +216,45 @@ mod tests {
     use super::*;
     use crate::{memory_store, ObjectStore, StorageError};
     use std::ops::Range;
+    use varve_config::{Config, ConfigError};
+
+    #[test]
+    fn memory_factory_builds_a_one_mibibyte_tier() {
+        let config = Config::from_toml_str("[cache.memory]\nmax_bytes = \"1MiB\"\n").unwrap();
+        let cache = MemoryCacheFactory
+            .build(&config.section("cache").unwrap(), &BuildContext::empty())
+            .unwrap();
+        let first = CacheKey {
+            path: "first".into(),
+            range: None,
+        };
+        let second = CacheKey {
+            path: "second".into(),
+            range: None,
+        };
+        let at_limit = Bytes::from(vec![0; 1024 * 1024]);
+        cache.insert(first.clone(), at_limit.clone());
+        assert_eq!(cache.get(&first), Some(at_limit));
+
+        cache.insert(second.clone(), Bytes::from_static(b"x"));
+
+        assert_eq!(cache.get(&first), None);
+        assert_eq!(cache.get(&second), Some(Bytes::from_static(b"x")));
+    }
+
+    #[test]
+    fn memory_factory_rejects_numeric_byte_sizes() {
+        let config = Config::from_toml_str("[cache.memory]\nmax_bytes = 1048576\n").unwrap();
+        let error = MemoryCacheFactory
+            .build(&config.section("cache").unwrap(), &BuildContext::empty())
+            .err()
+            .unwrap();
+
+        assert!(matches!(
+            error,
+            RegistryError::Config(ConfigError::Deserialize(_))
+        ));
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 

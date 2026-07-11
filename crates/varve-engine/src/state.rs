@@ -3,6 +3,7 @@ use std::sync::Arc;
 use varve_index::block::PageMeta;
 use varve_index::LiveTable;
 use varve_storage::TrieEntry;
+use varve_types::Iid;
 
 pub(crate) const DEFAULT_GRAPH: &str = "default";
 pub(crate) const META_GRAPH: &str = "__meta";
@@ -101,6 +102,7 @@ impl TableState {
 
 pub(crate) struct GraphsState {
     pub graphs: BTreeMap<String, TableState>,
+    pub catalog_graphs: BTreeMap<Iid, String>,
 }
 
 impl GraphsState {
@@ -108,7 +110,10 @@ impl GraphsState {
         let mut graphs = BTreeMap::new();
         graphs.insert(DEFAULT_GRAPH.to_string(), TableState::new());
         graphs.insert(META_GRAPH.to_string(), TableState::new());
-        GraphsState { graphs }
+        GraphsState {
+            graphs,
+            catalog_graphs: BTreeMap::new(),
+        }
     }
 
     pub fn graph(&self, graph: &str) -> Option<&TableState> {

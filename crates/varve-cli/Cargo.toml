@@ -1,0 +1,36 @@
+[package]
+name = "varve-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "varve"
+path = "src/main.rs"
+
+[dependencies]
+varve = { path = "../varve" }
+varve-gql = { path = "../varve-gql" }
+varve-server = { path = "../varve-server", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+arrow = { workspace = true }
+arrow-json = { workspace = true }
+base64 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+url = { workspace = true }
+clap = { workspace = true }
+rustyline = { workspace = true }
+
+[dev-dependencies]
+varve-server = { path = "../varve-server", default-features = false, features = [
+    "http",
+] }
+axum = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

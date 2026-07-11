@@ -72,32 +72,43 @@ impl ObjectStoreLog {
 fn decode_object(key: &str, bytes: &[u8]) -> Result<Vec<LogRecord>, LogError> {
     let mut records = Vec::new();
     let mut off = 0usize;
-    while off < bytes.len() {
-        if bytes.len() - off < FRAME_HEADER {
-            return Err(corrupt(key, off, "truncated frame header"));
-        }
-        let len = u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
-            as usize;
-        let crc = u32::from_le_bytes([
-            bytes[off + 4],
-            bytes[off + 5],
-            bytes[off + 6],
-            bytes[off + 7],
-        ]);
-        if bytes.len() - off - FRAME_HEADER < len {
-            return Err(corrupt(key, off, "truncated frame payload"));
-        }
-        let payload = &bytes[off + FRAME_HEADER..off + FRAME_HEADER + len];
-        if crc32c::crc32c(payload) != crc {
-            return Err(corrupt(key, off, "CRC mismatch"));
-        }
-        records.push(LogRecord::from_wire(payload)?);
-        off += FRAME_HEADER + len;
+    while let Some(record) = decode_frame(key, bytes, &mut off)? {
+        records.push(record);
     }
     if records.is_empty() {
         return Err(corrupt(key, 0, "empty log object"));
     }
     Ok(records)
+}
+
+fn decode_frame(key: &str, bytes: &[u8], off: &mut usize) -> Result<Option<LogRecord>, LogError> {
+    if *off == bytes.len() {
+        return Ok(None);
+    }
+    if bytes.len() - *off < FRAME_HEADER {
+        return Err(corrupt(key, *off, "truncated frame header"));
+    }
+    let len = u32::from_le_bytes([
+        bytes[*off],
+        bytes[*off + 1],
+        bytes[*off + 2],
+        bytes[*off + 3],
+    ]) as usize;
+    let crc = u32::from_le_bytes([
+        bytes[*off + 4],
+        bytes[*off + 5],
+        bytes[*off + 6],
+        bytes[*off + 7],
+    ]);
+    if bytes.len() - *off - FRAME_HEADER < len {
+        return Err(corrupt(key, *off, "truncated frame payload"));
+    }
+    let payload = &bytes[*off + FRAME_HEADER..*off + FRAME_HEADER + len];
+    if crc32c::crc32c(payload) != crc {
+        return Err(corrupt(key, *off, "CRC mismatch"));
+    }
+    *off += FRAME_HEADER + len;
+    Ok(Some(LogRecord::from_wire(payload)?))
 }
 
 fn corrupt(key: &str, off: usize, reason: &str) -> LogError {
@@ -158,7 +169,17 @@ impl Log for ObjectStoreLog {
             }
             let bytes = self.store.get(key).await?;
             let mut position = *first;
-            for record in decode_object(key, &bytes)? {
+            let mut off = 0usize;
+            if bytes.is_empty() {
+                return Err(corrupt(key, 0, "empty log object"));
+            }
+            loop {
+                if position >= to {
+                    break;
+                }
+                let Some(record) = decode_frame(key, &bytes, &mut off)? else {
+                    break;
+                };
                 if position >= from && position < to {
                     out.push((position, record));
                 }
@@ -205,5 +226,59 @@ impl ComponentFactory<dyn Log> for ObjectStoreLogFactory {
                     .into(),
             })?;
         Ok(Arc::new(ObjectStoreLog::new(store)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use varve_storage::memory_store;
+
+    fn record(tx_id: u64) -> LogRecord {
+        LogRecord {
+            tx_id,
+            system_time_us: tx_id as i64,
+            user: String::new(),
+            effects: vec![],
+        }
+    }
+
+    #[allow(clippy::unwrap_used)]
+    async fn corrupt_frame_crc(store: &Arc<dyn ObjectStore>, frame_index: usize) {
+        let key = keys::log_key(LogPosition::ZERO);
+        let mut bytes = store.get(&key).await.unwrap().to_vec();
+        let mut off = 0usize;
+        for index in 0..=frame_index {
+            let len = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
+            if index == frame_index {
+                let crc = u32::from_le_bytes(bytes[off + 4..off + 8].try_into().unwrap());
+                bytes[off + 4..off + 8].copy_from_slice(&(crc ^ 1).to_le_bytes());
+                store.put(&key, Bytes::from(bytes)).await.unwrap();
+                return;
+            }
+            off += FRAME_HEADER + len;
+        }
+        panic!("frame {frame_index} not found");
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn bounded_read_does_not_decode_a_corrupt_excluded_object_frame() {
+        let store = memory_store();
+        let log = ObjectStoreLog::new(Arc::clone(&store));
+        log.append(vec![record(1), record(2)]).await.unwrap();
+        corrupt_frame_crc(&(Arc::clone(&store) as Arc<dyn ObjectStore>), 1).await;
+
+        let rows = log
+            .read_range(LogPosition::ZERO, LogPosition::ZERO.advance(1).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.tx_id, 1);
+        assert!(matches!(
+            log.read_range(LogPosition::ZERO, LogPosition::ZERO.advance(2).unwrap())
+                .await,
+            Err(LogError::Corrupt { .. })
+        ));
     }
 }

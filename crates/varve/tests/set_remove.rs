@@ -98,7 +98,7 @@ async fn set_prop_updates_current_state_only() {
     assert_eq!(strings(&current, "name"), vec!["Adele"]);
 
     let before_valid = db
-        .query(&format!(
+        .query(format!(
             "FOR VALID_TIME AS OF TIMESTAMP '{}' MATCH (n:Person {{_id: 1}}) RETURN n.name AS name",
             inserted.system_time
         ))
@@ -107,7 +107,7 @@ async fn set_prop_updates_current_state_only() {
     assert_eq!(strings(&before_valid, "name"), vec!["Ada"]);
 
     let before_system = db
-        .query(&format!(
+        .query(format!(
             "FOR SYSTEM_TIME AS OF TIMESTAMP '{}' MATCH (n:Person {{_id: 1}}) RETURN n.name AS name",
             inserted.system_time
         ))

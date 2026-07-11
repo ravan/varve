@@ -1,0 +1,39 @@
+# Query-only node: follows the shared object-store log and serves reads. It
+# holds no writer role and advertises no address; writes it receives are
+# redirected to the writer it discovers from the shared log. Each query process
+# keeps its OWN in-memory query cache — no cache directory is shared between
+# processes.
+#
+# The token/credentials here are TEST/DEMO-ONLY fixed material for the Compose
+# demo, not production secrets.
+[node]
+roles = ["query"]
+
+[log]
+backend = "object-store"
+group_commit_window_ms = 15
+group_commit_max_bytes = "8MiB"
+
+[storage]
+backend = "s3"
+[storage.s3]
+endpoint = "http://garage:3900"
+bucket = "varve"
+region = "garage"
+access_key_id = "GK000000000000000000000000"
+secret_access_key = "0000000000000000000000000000000000000000000000000000000000000000"
+path_style = true
+
+[server]
+backend = "http"
+[server.http]
+listen = "0.0.0.0:8080"
+max_body_bytes = "8MiB"
+
+[auth]
+backend = "static"
+[auth.static]
+tokens = [{ subject = "compose-demo", token = "varve-demo-token" }]
+
+[metrics]
+backend = "prometheus"

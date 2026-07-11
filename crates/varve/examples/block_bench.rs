@@ -44,7 +44,7 @@ fn insert_statement(batch: usize) -> String {
 async fn point_lookup(db: &Db) -> Result<i64, Box<dyn std::error::Error>> {
     use arrow::array::Int64Array;
     let batches = db
-        .query(&format!(
+        .query(format!(
             "MATCH (b:Bench) WHERE b._id = {PROBE_ID} RETURN b.v AS v"
         ))
         .await?;

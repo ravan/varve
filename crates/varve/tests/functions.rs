@@ -58,7 +58,7 @@ async fn string_predicate_operators_in_where() {
         ("n.name CONTAINS 'Love'", vec!["Ada Lovelace"]),
     ] {
         let batches = db
-            .query(&format!(
+            .query(format!(
                 "MATCH (n:Person) WHERE {predicate} RETURN n.name AS name"
             ))
             .await

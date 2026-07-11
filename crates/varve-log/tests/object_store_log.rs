@@ -151,6 +151,22 @@ async fn read_range_filters_and_skips_disjoint_objects() {
 }
 
 #[tokio::test]
+async fn read_range_obeys_half_open_follower_batch_bounds() {
+    let log = ObjectStoreLog::new(memory_store());
+    log.append(vec![rec(1), rec(2), rec(3), rec(4)])
+        .await
+        .unwrap();
+
+    for (from, to, expected) in [(0, 0, vec![]), (1, 3, vec![2, 3]), (4, 8, vec![])] {
+        let rows = log
+            .read_range(LogPosition::from_u64(from), LogPosition::from_u64(to))
+            .await
+            .unwrap();
+        assert_eq!(tx_ids(&rows), expected);
+    }
+}
+
+#[tokio::test]
 async fn trim_is_a_noop_and_positions_never_regress() {
     let log = ObjectStoreLog::new(memory_store());
     log.append(vec![rec(1), rec(2)]).await.unwrap();

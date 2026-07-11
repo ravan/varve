@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{BuildContext, ByteSize, ComponentFactory, ConfigSection, RegistryError};
 use xxhash_rust::xxh3::xxh3_128;
 
 const MAGIC: &[u8; 4] = b"VCA1";
@@ -272,11 +272,11 @@ impl CacheTier for DiskCache {
 struct DiskCacheConfig {
     dir: String,
     #[serde(default = "default_disk_max_bytes")]
-    max_bytes: u64,
+    max_bytes: ByteSize,
 }
 
-fn default_disk_max_bytes() -> u64 {
-    50 * 1024 * 1024 * 1024
+fn default_disk_max_bytes() -> ByteSize {
+    ByteSize::from_bytes(50 * 1024 * 1024 * 1024)
 }
 
 /// Registry factory: listed as `"disk"` in `[cache] tiers`; `[cache.disk]`
@@ -302,7 +302,13 @@ impl ComponentFactory<dyn CacheTier> for DiskCacheFactory {
                 .into(),
         })?;
         let config: DiskCacheConfig = section.get()?;
-        match DiskCache::open(Path::new(&config.dir), config.max_bytes) {
+        let max_bytes =
+            u64::try_from(config.max_bytes.as_usize()).map_err(|_| RegistryError::Build {
+                kind: "cache",
+                name: "disk".into(),
+                source: "disk cache max_bytes exceeds u64".to_string().into(),
+            })?;
+        match DiskCache::open(Path::new(&config.dir), max_bytes) {
             Ok(cache) => Ok(Arc::new(cache)),
             Err(e) => Err(RegistryError::Build {
                 kind: "cache",
@@ -319,6 +325,51 @@ mod tests {
     use crate::cache::{CacheKey, CacheTier};
     use bytes::Bytes;
     use std::time::Duration;
+    use varve_config::{Config, ConfigError};
+
+    #[test]
+    fn disk_factory_builds_a_one_mibibyte_tier() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::from_toml_str(&format!(
+            "[cache.disk]\ndir = {:?}\nmax_bytes = \"1MiB\"\n",
+            dir.path().display().to_string()
+        ))
+        .unwrap();
+        let cache = DiskCacheFactory
+            .build(&config.section("cache").unwrap(), &BuildContext::empty())
+            .unwrap();
+        let at_limit = key("at-limit", None);
+        let at_limit_value = Bytes::from(vec![0; 1024 * 1024 - encode_key(&at_limit).len()]);
+        cache.insert(at_limit.clone(), at_limit_value.clone());
+        assert_eq!(cache.get(&at_limit), Some(at_limit_value));
+
+        let over_limit = key("over-limit", None);
+        let over_limit_value =
+            Bytes::from(vec![0; 1024 * 1024 + 1 - encode_key(&over_limit).len()]);
+        cache.insert(over_limit.clone(), over_limit_value);
+
+        assert_eq!(cache.get(&over_limit), None);
+        assert!(cache.get(&at_limit).is_some());
+    }
+
+    #[test]
+    fn disk_factory_rejects_numeric_byte_sizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::from_toml_str(&format!(
+            "[cache.disk]\ndir = {:?}\nmax_bytes = 1048576\n",
+            dir.path().display().to_string()
+        ))
+        .unwrap();
+        let error = DiskCacheFactory
+            .build(&config.section("cache").unwrap(), &BuildContext::empty())
+            .err()
+            .unwrap();
+
+        assert!(matches!(
+            error,
+            RegistryError::Config(ConfigError::Deserialize(_))
+        ));
+    }
 
     fn key(path: &str, range: Option<(u64, u64)>) -> CacheKey {
         CacheKey {

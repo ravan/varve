@@ -32,7 +32,7 @@ async fn assert_reinsert_visible_and_history_hidden(
     assert_eq!(rows(&current), 1);
 
     let fresh = db
-        .query(&format!(
+        .query(format!(
             "MATCH (p:P {{_id: 1}}) WHERE p.token = '{fresh_token}' RETURN p.token"
         ))
         .await
@@ -40,7 +40,7 @@ async fn assert_reinsert_visible_and_history_hidden(
     assert_eq!(rows(&fresh), 1);
 
     let old = db
-        .query(&format!(
+        .query(format!(
             "MATCH (p:P {{_id: 1}}) WHERE p.token = '{old_token}' RETURN p.token"
         ))
         .await
@@ -49,7 +49,7 @@ async fn assert_reinsert_visible_and_history_hidden(
 
     for system_time in [inserted_system_time, erased_system_time] {
         let history = db
-            .query(&format!(
+            .query(format!(
                 "FOR SYSTEM_TIME AS OF TIMESTAMP '{}' MATCH (p:P {{_id: 1}}) RETURN p.token",
                 system_time
             ))

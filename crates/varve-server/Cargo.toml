@@ -1,0 +1,53 @@
+[package]
+name = "varve-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["http", "tls"]
+http = ["dep:axum-server", "dep:url"]
+tls = ["http", "dep:rustls", "axum-server/tls-rustls-no-provider"]
+
+[[bin]]
+name = "varved"
+path = "src/bin/varved.rs"
+required-features = ["http"]
+
+[dependencies]
+varve = { path = "../varve" }
+varve-engine = { path = "../varve-engine" }
+varve-types = { path = "../varve-types" }
+varve-config = { path = "../varve-config" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+arrow = { workspace = true }
+arrow-json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+prometheus = { workspace = true }
+subtle = { workspace = true }
+axum = { workspace = true }
+axum-server = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+tokio-stream = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+datafusion = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+http-body-util = { workspace = true }
+tempfile = { workspace = true }
+varve-log = { path = "../varve-log" }
+varve-testkit = { path = "../varve-testkit" }
+reqwest = { workspace = true }
+
+[lints]
+workspace = true
