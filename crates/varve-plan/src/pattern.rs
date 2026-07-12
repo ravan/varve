@@ -257,12 +257,11 @@ fn path_scan_specs(
     params: &BTreeMap<String, Value>,
 ) -> Result<Vec<ScanSpec>, PlanError> {
     if path.var.is_some() {
-        // A path variable binds the sequence of a single quantified hop
-        // (`p = (a)-[:K*1..3]->(b)`); anything else has no v1 meaning.
-        let single_quantified = path.hops.len() == 1 && path.hops[0].0.quantifier.is_some();
-        if !single_quantified {
+        // A path variable binds the sequence of a single hop. An
+        // unquantified hop is normalized to a 1..1 expansion below.
+        if path.hops.len() != 1 {
             return Err(PlanError::Unsupported(
-                "path variables need a single quantified hop in v1".into(),
+                "path variables need a single hop in v1".into(),
             ));
         }
     }
@@ -497,9 +496,17 @@ fn edge_spec(
 ) -> Result<ScanSpec, PlanError> {
     let var = element_var(edge.var.as_deref(), idx);
     let kind = match edge.quantifier {
-        None => SpecKind::Edge {
+        None if path_var.is_none() => SpecKind::Edge {
             label: edge.label.clone(),
             direction: edge.direction,
+        },
+        None => SpecKind::Expand {
+            label: edge.label.clone(),
+            direction: edge.direction,
+            min: 1,
+            max: 1,
+            props: edge.props.clone(),
+            path_var,
         },
         Some(q) => {
             let max = q.max.unwrap_or(max_path_depth);
@@ -2519,11 +2526,8 @@ mod tests {
     }
 
     #[test]
-    fn scan_specs_rejects_path_var_on_non_single_quantified_hop() {
-        // A path variable is only meaningful (in v1) over a single
-        // quantified hop (`p = (a)-[:K*1..3]->(b)`); this path var sits on
-        // a single but *unquantified* hop, so it must be rejected.
-        let stmt = query("MATCH p = (a:A)-[:K]->(b:A) RETURN p");
+    fn scan_specs_rejects_path_var_on_multiple_hops() {
+        let stmt = query("MATCH p = (a:A)-[:K]->(b:A)-[:K]->(c:A) RETURN p");
         let err = scan_specs_for_stmt(
             &stmt,
             DEFAULT_GRAPH,
@@ -2533,7 +2537,7 @@ mod tests {
         .unwrap_err();
         assert!(
             err.to_string()
-                .contains("path variables need a single quantified hop in v1"),
+                .contains("path variables need a single hop in v1"),
             "unexpected error: {err}"
         );
     }

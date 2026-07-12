@@ -517,6 +517,26 @@ async fn aliased_path_variable_keeps_path_list() {
 }
 
 #[tokio::test]
+async fn unquantified_path_variable_keeps_path_list() {
+    let db = people_db().await;
+    db.execute(
+        "MATCH (a:Person {_id: 1}), (b:Person {_id: 2}) \
+         INSERT (a)-[:KNOWS]->(b)",
+    )
+    .await
+    .unwrap();
+
+    let batches = db
+        .query("MATCH p = (a:Person)-[:KNOWS]->(b:Person) RETURN p")
+        .await
+        .unwrap();
+
+    let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+    assert_eq!(rows, 1);
+    assert!(batches[0].column_by_name("p").is_some());
+}
+
+#[tokio::test]
 async fn order_by_can_reference_expanded_bare_element_output() {
     let db = people_db().await;
 
