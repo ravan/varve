@@ -70,19 +70,24 @@ async fn garage_refuses_cas_failover() {
     }
     let backend = backends::start("garage").await;
     let toml = cas_toml(&backend);
-    let err = Db::open(Config::from_toml_str(&toml).unwrap())
+    let config = Config::from_toml_str(&toml).expect("cas-failover config toml must parse");
+    let err = Db::open(config)
         .await
         .expect_err("garage lacks real conditional-write semantics; cas-failover must refuse");
+    // Bind the probe verdict itself so a live-backend regression names WHAT
+    // the probe saw, not just that some error occurred.
+    let reason = match err {
+        EngineError::CasUnsupported { reason } => reason,
+        other => {
+            panic!("expected EngineError::CasUnsupported naming the probe verdict, got {other:?}")
+        }
+    };
     assert!(
-        matches!(err, EngineError::CasUnsupported { .. }),
-        "expected EngineError::CasUnsupported, got {err:?}"
+        reason.contains("precondition ignored"),
+        "the refusal must name the probe's actual reason (D5 header-blind create-if-absent), \
+         got: {reason}"
     );
-    let message = err.to_string();
-    assert!(
-        message.contains("precondition ignored"),
-        "the refusal must name the probe's actual reason, got: {message}"
-    );
-    eprintln!("[garage] refused cas-failover: {message}");
+    eprintln!("[garage] refused cas-failover: {reason}");
 }
 
 async fn minio_takeover_over_a_live_bucket() {
