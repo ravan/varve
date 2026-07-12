@@ -23,7 +23,7 @@
   import Star from '@lucide/svelte/icons/star';
   import SunMoon from '@lucide/svelte/icons/sun-moon';
   import { setMode } from 'mode-watcher';
-  import { onMount, type Snippet } from 'svelte';
+  import { onMount, tick, type Snippet } from 'svelte';
 
   let {
     connection,
@@ -79,8 +79,9 @@
     activePanel = null;
   }
 
-  function runSaved(item: HistoryEntry | Favorite): void {
+  async function runSaved(item: HistoryEntry | Favorite): Promise<void> {
     activePanel = null;
+    await tick();
     onRunSaved(item);
   }
 
@@ -208,7 +209,7 @@
         {:else if activePanel === 'History'}
           <HistoryPanel {workspace} onRun={runSaved} />
         {:else if activePanel === 'Favorites'}
-          <FavoritesPanel {workspace} onRun={runSaved} />
+          <FavoritesPanel {workspace} parametersDraft={workspace.queryParametersDraft} onRun={runSaved} />
         {:else if activePanel === 'Settings'}
           <SettingsPanel {workspace} />
         {:else}

@@ -157,6 +157,11 @@
     active = activeController !== null;
   });
 
+  $effect(() => {
+    const validation = parametersValidation;
+    workspace.setQueryParametersDraft(validation.ok ? validation.value : null);
+  });
+
   function cancelQuery(): void {
     activeController?.abort();
   }
