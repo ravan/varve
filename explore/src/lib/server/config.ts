@@ -1,6 +1,6 @@
 const DEFAULT_TARGET = 'http://127.0.0.1:8080';
 const DEFAULT_DISPLAY_NAME = 'Local Varve';
-const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_MAX_REQUEST_BYTES = 16 * 1024 * 1024;
@@ -17,6 +17,10 @@ export interface ServerConfig {
 }
 
 function parseHttpUrl(value: string, variable: string): URL {
+  if (value.includes('#')) {
+    throw new Error(`${variable} must not contain a fragment delimiter`);
+  }
+
   let url: URL;
   try {
     url = new URL(value);
@@ -37,6 +41,10 @@ function parseHttpUrl(value: string, variable: string): URL {
 }
 
 function parseWriterOrigin(value: string): string {
+  if (value.includes('?') || value.includes('#')) {
+    throw new Error('VARVE_ALLOWED_WRITER_ORIGINS entries must not contain delimiters');
+  }
+
   const url = parseHttpUrl(value, 'VARVE_ALLOWED_WRITER_ORIGINS');
   if (url.pathname !== '/' || url.search !== '') {
     throw new Error('VARVE_ALLOWED_WRITER_ORIGINS entries must be origins');
@@ -89,9 +97,9 @@ export function loadServerConfig(environment: Environment): ServerConfig {
     displayName: environment.VARVE_DISPLAY_NAME?.trim() || DEFAULT_DISPLAY_NAME,
     allowedWriterOrigins,
     timeoutMs: parseBoundedInteger(
-      environment.VARVE_TIMEOUT_MS,
-      'VARVE_TIMEOUT_MS',
-      DEFAULT_TIMEOUT_MS,
+      environment.VARVE_REQUEST_TIMEOUT_MS,
+      'VARVE_REQUEST_TIMEOUT_MS',
+      DEFAULT_REQUEST_TIMEOUT_MS,
       MAX_TIMEOUT_MS,
     ),
     maxRequestBytes: parseBoundedInteger(

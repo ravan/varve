@@ -12,7 +12,7 @@ describe('loadServerConfig', () => {
     ).toThrow('VARVE_URL');
   });
 
-  it('normalizes writer origins and supplies bounded defaults', () => {
+  it('normalizes writer origins and supplies exact bounded defaults', () => {
     const config = loadServerConfig({
       NODE_ENV: 'production',
       VARVE_URL: 'https://query.example.test/',
@@ -22,8 +22,8 @@ describe('loadServerConfig', () => {
     expect(config.allowedWriterOrigins).toEqual(
       new Set(['https://query.example.test', 'https://writer.example.test']),
     );
-    expect(config.timeoutMs).toBeGreaterThan(0);
-    expect(config.maxRequestBytes).toBeGreaterThan(0);
+    expect(config.timeoutMs).toBe(60_000);
+    expect(config.maxRequestBytes).toBe(1024 * 1024);
     expect(config.production).toBe(true);
   });
 
@@ -31,6 +31,7 @@ describe('loadServerConfig', () => {
     for (const target of [
       'https://user:secret@query.example.test',
       'https://query.example.test/#internal',
+      'https://query.example.test#',
     ]) {
       expect(() =>
         loadServerConfig({ NODE_ENV: 'production', VARVE_URL: target }),
@@ -43,6 +44,8 @@ describe('loadServerConfig', () => {
       'file:///tmp/writer',
       'https://user:secret@writer.example.test',
       'https://writer.example.test/path',
+      'https://writer.example.test?',
+      'https://writer.example.test#',
       'not a URL',
     ]) {
       expect(() =>
@@ -57,9 +60,9 @@ describe('loadServerConfig', () => {
 
   it('rejects malformed or out-of-range numeric settings', () => {
     for (const [name, value] of [
-      ['VARVE_TIMEOUT_MS', '0'],
-      ['VARVE_TIMEOUT_MS', '120001'],
-      ['VARVE_TIMEOUT_MS', '1.5'],
+      ['VARVE_REQUEST_TIMEOUT_MS', '0'],
+      ['VARVE_REQUEST_TIMEOUT_MS', '120001'],
+      ['VARVE_REQUEST_TIMEOUT_MS', '1.5'],
       ['VARVE_MAX_REQUEST_BYTES', '0'],
       ['VARVE_MAX_REQUEST_BYTES', '16777217'],
       ['VARVE_MAX_REQUEST_BYTES', 'many'],
@@ -77,7 +80,7 @@ describe('loadServerConfig', () => {
     const config = loadServerConfig({
       NODE_ENV: 'development',
       VARVE_DISPLAY_NAME: 'Development Varve',
-      VARVE_TIMEOUT_MS: '2500',
+      VARVE_REQUEST_TIMEOUT_MS: '2500',
       VARVE_MAX_REQUEST_BYTES: '2048',
     });
 
@@ -86,5 +89,20 @@ describe('loadServerConfig', () => {
     expect(config.timeoutMs).toBe(2500);
     expect(config.maxRequestBytes).toBe(2048);
     expect(config.production).toBe(false);
+  });
+
+  it('does not recognize the obsolete timeout variable', () => {
+    expect(
+      loadServerConfig({ NODE_ENV: 'development', VARVE_TIMEOUT_MS: '2500' }).timeoutMs,
+    ).toBe(60_000);
+  });
+
+  it('preserves an allowed target path and query for upstream use', () => {
+    expect(
+      loadServerConfig({
+        NODE_ENV: 'production',
+        VARVE_URL: 'https://query.example.test/internal?tenant=secret',
+      }).target.href,
+    ).toBe('https://query.example.test/internal?tenant=secret');
   });
 });
