@@ -50,3 +50,10 @@ docs:
 # Serve the docs site locally with live reload.
 docs-serve:
     mdbook serve docs/book --open
+
+# Slice 11 task 13: regenerate docs/book/src/ops/configuration.md from the
+# real config schema (varve-testkit/src/config_reference.rs). Run this and
+# commit the result whenever a serde default in a [section] key changes;
+# config_reference_doc.rs fails `just check`/`just docs` otherwise.
+docs-gen:
+    cargo run -p varve-testkit --bin config_reference > docs/book/src/ops/configuration.md

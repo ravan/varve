@@ -150,16 +150,32 @@ fn default_roles() -> Vec<NodeRole> {
     NodeRoles::all().iter().collect()
 }
 
+/// Query-node follower poll interval (`[node] tail_poll_interval_ms`),
+/// shared with the generated configuration reference
+/// (`varve-testkit/src/config_reference.rs`) so the docs page cannot drift
+/// from this default.
+pub const DEFAULT_TAIL_POLL_INTERVAL_MS: u64 = 50;
+
 fn default_tail_poll_interval_ms() -> u64 {
-    50
+    DEFAULT_TAIL_POLL_INTERVAL_MS
 }
+
+/// Max records the follower applies per poll batch
+/// (`[node] tail_batch_records`); shared with the generated configuration
+/// reference.
+pub const DEFAULT_TAIL_BATCH_RECORDS: u64 = 1024;
 
 fn default_tail_batch_records() -> u64 {
-    1024
+    DEFAULT_TAIL_BATCH_RECORDS
 }
 
+/// How long a query waits for its requested basis before timing out
+/// (`[node] basis_timeout_ms`); shared with the generated configuration
+/// reference.
+pub const DEFAULT_BASIS_TIMEOUT_MS: u64 = 5000;
+
 fn default_basis_timeout_ms() -> u64 {
-    5000
+    DEFAULT_BASIS_TIMEOUT_MS
 }
 
 fn default_submission_queue_len() -> usize {

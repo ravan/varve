@@ -36,8 +36,15 @@ struct HttpConfig {
 fn default_listen() -> String {
     "0.0.0.0:8080".into()
 }
+
+/// Max accepted request body size (`[server.http] max_body_bytes`); shared
+/// with the generated configuration reference
+/// (`varve-testkit/src/config_reference.rs`) so the docs page cannot drift
+/// from this default.
+pub const DEFAULT_MAX_BODY_BYTES: ByteSize = ByteSize::from_bytes(8 * 1024 * 1024);
+
 fn default_max_body_bytes() -> ByteSize {
-    ByteSize::from_bytes(8 * 1024 * 1024)
+    DEFAULT_MAX_BODY_BYTES
 }
 
 pub(crate) struct HttpFrontendFactory;

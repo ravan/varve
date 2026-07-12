@@ -4346,6 +4346,7 @@ dependencies = [
  "varve-index",
  "varve-log",
  "varve-plan",
+ "varve-server",
  "varve-storage",
  "varve-types",
 ]

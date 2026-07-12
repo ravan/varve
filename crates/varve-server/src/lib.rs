@@ -13,7 +13,7 @@ pub use frontend::{
     ShutdownTrigger,
 };
 #[cfg(feature = "http")]
-pub use http::{http_router, HttpContext, HttpFrontend};
+pub use http::{http_router, HttpContext, HttpFrontend, DEFAULT_MAX_BODY_BYTES};
 #[cfg(feature = "otel")]
 pub use metrics::OtlpMetrics;
 pub use metrics::{MetricsSink, PrometheusMetrics};
