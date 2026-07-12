@@ -46,6 +46,7 @@
   let activeController = $state<AbortController | null>(null);
   let requestError = $state<ErrorCopy | null>(null);
   let componentMounted = false;
+  let finalizeActiveExecution: (() => void) | null = null;
 
   let parametersValidation = $derived(validateParameters(parametersInput));
   let basisValidation = $derived(parseBasis(basisInput));
@@ -119,11 +120,16 @@
     });
 
     return () => {
-      componentMounted = false;
-      activeController?.abort();
-      activeController = null;
-      editor?.destroy();
-      editor = null;
+      const controller = activeController;
+      try {
+        finalizeActiveExecution?.();
+      } finally {
+        componentMounted = false;
+        controller?.abort();
+        activeController = null;
+        editor?.destroy();
+        editor = null;
+      }
     };
   });
 
@@ -174,6 +180,44 @@
     let effectCount = 0;
     let responseValue: unknown;
     let rawResponseValue: unknown;
+    let finalized = false;
+
+    const finalizeOnCleanup = () => {
+      outcome = 'cancelled';
+      responseValue = { code: 'cancelled' satisfies ExplorerErrorCode };
+      rawResponseValue = undefined;
+      finalizeExecution();
+    };
+    finalizeActiveExecution = finalizeOnCleanup;
+
+    function finalizeExecution(): void {
+      if (finalized) return;
+      finalized = true;
+      const finishedAt = Date.now();
+      const durationMs = Math.max(0, finishedAt - startedAt);
+      workspace.replaceFrame({
+        ...runningFrame,
+        state: outcome,
+        finishedAt,
+        durationMs,
+        response: responseValue,
+        ...(rawResponseValue === undefined ? {} : { rawResponse: rawResponseValue }),
+      });
+      workspace.recordHistory({
+        gql,
+        mode,
+        params,
+        finishedAt,
+        durationMs,
+        rowCount,
+        effectCount,
+        outcome,
+        runCount: 1,
+      });
+      workspace.observeExecution(gql, outcome, finishedAt);
+      if (activeController === controller) activeController = null;
+      if (finalizeActiveExecution === finalizeOnCleanup) finalizeActiveExecution = null;
+    }
 
     try {
       const request: QueryRequest = { gql, params };
@@ -217,31 +261,7 @@
         if (failure.code === 'unauthorized') void connection.refresh();
       }
     } finally {
-      if (componentMounted) {
-        const finishedAt = Date.now();
-        const durationMs = Math.max(0, finishedAt - startedAt);
-        workspace.replaceFrame({
-          ...runningFrame,
-          state: outcome,
-          finishedAt,
-          durationMs,
-          response: responseValue,
-          ...(rawResponseValue === undefined ? {} : { rawResponse: rawResponseValue }),
-        });
-        workspace.recordHistory({
-          gql,
-          mode,
-          params,
-          finishedAt,
-          durationMs,
-          rowCount,
-          effectCount,
-          outcome,
-          runCount: 1,
-        });
-        workspace.observeExecution(gql, outcome, finishedAt);
-        activeController = null;
-      }
+      if (componentMounted) finalizeExecution();
     }
   }
 
