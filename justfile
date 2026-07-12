@@ -25,3 +25,6 @@ s3-matrix backends="garage,seaweedfs,minio":
 # Routed through `rtk proxy` so the repo's RTK rule stays visible.
 compose-demo:
     rtk proxy sh scripts/compose_demo.sh
+
+fuzz target="parse" secs="60":
+    cargo +nightly fuzz run {{target}} -- -max_total_time={{secs}} -rss_limit_mb=4096

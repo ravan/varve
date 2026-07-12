@@ -754,6 +754,17 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "regenerates the committed fuzz seed corpus"]
+    fn write_block_meta_fuzz_seed() {
+        let events = [put(1, 5, 3, us(30), 0), put(1, 7, 4, EOT, 1)];
+        let block = encode_block(&table(&events), 16).unwrap();
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/block_meta");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("valid.bin"), &block.meta).unwrap();
+    }
+
+    #[test]
     fn empty_table_encodes_no_pages() {
         let block = encode_block(&LiveTable::new(), 4).unwrap();
         assert!(block.pages.is_empty());
