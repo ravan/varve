@@ -246,7 +246,7 @@ it('observes schema from successful executions and favorites only', () => {
   });
 });
 
-it('serializes schema version 1 and excludes secrets, raw responses, and active frame bodies', () => {
+it('serializes schema version 1 without any frame response or raw body', () => {
   let state = addFrame(emptyWorkspace(), completedFrame('complete'));
   state = addFrame(
     state,
@@ -265,7 +265,7 @@ it('serializes schema version 1 and excludes secrets, raw responses, and active 
   };
 
   expect(value.version).toBe(1);
-  expect(value.workspace.frames[0]).toHaveProperty('response');
+  expect(value.workspace.frames[0]).not.toHaveProperty('response');
   expect(value.workspace.frames[0]).not.toHaveProperty('rawResponse');
   expect(value.workspace.frames[1]).not.toHaveProperty('response');
   expect(value.workspace.frames[1]).not.toHaveProperty('rawResponse');
@@ -296,7 +296,7 @@ it('restores v1 storage within frame and history limits', () => {
   expect(restored.history).toHaveLength(100);
 });
 
-it('sanitizes unsafe fields while decoding v1 storage', () => {
+it('resets the whole workspace when v1 storage contains unsafe fields', () => {
   const workspace = {
     ...emptyWorkspace(),
     frames: [
@@ -308,12 +308,67 @@ it('sanitizes unsafe fields while decoding v1 storage', () => {
   };
 
   const restored = deserializeWorkspace(JSON.stringify({ version: 1, workspace }));
-  const frame = restored.frames[0] as ExecutionFrame & { authToken?: string };
 
-  expect(frame.rawResponse).toBeUndefined();
-  expect(frame.response).toEqual({ rows: [] });
-  expect(JSON.stringify(restored)).not.toContain('stored-token');
-  expect(JSON.stringify(restored)).not.toContain('stored-raw');
+  expect(restored).toEqual(emptyWorkspace());
+});
+
+it.each(['token', 'RAW', 'rawResponse', 'Authorization', 'credential', 'clientSecret'])(
+  'resets v1 storage containing nested forbidden key %s',
+  (key) => {
+    const record = JSON.parse(
+      serializeWorkspace(recordHistory(emptyWorkspace(), historyEntry())),
+    ) as {
+      workspace: Record<string, unknown>;
+    };
+    record.workspace.extra = { nested: { [key]: 'unsafe' } };
+
+    expect(deserializeWorkspace(JSON.stringify(record))).toEqual(emptyWorkspace());
+  },
+);
+
+it.each(['__proto__', 'constructor', 'prototype'])(
+  'resets v1 storage containing prototype-pollution key %s',
+  (key) => {
+    const record = JSON.parse(
+      serializeWorkspace(recordHistory(emptyWorkspace(), historyEntry())),
+    ) as {
+      workspace: { history: { params: Record<string, unknown> }[] };
+    };
+    Object.defineProperty(record.workspace.history[0].params, key, {
+      enumerable: true,
+      value: 'unsafe',
+    });
+
+    expect(deserializeWorkspace(JSON.stringify(record))).toEqual(emptyWorkspace());
+  },
+);
+
+it('drops entries with invalid Varve parameters instead of serializing arbitrary values', () => {
+  const validHistory = historyEntry({ gql: 'RETURN $value', params: { value: 1 } });
+  const invalidHistory = historyEntry({
+    gql: 'RETURN $value',
+    params: { value: ['arbitrary'] } as unknown as QueryParameters,
+  });
+  const nonFiniteHistory = historyEntry({
+    gql: 'RETURN $value',
+    params: { value: Number.NaN },
+  });
+  const invalidFavorite = favorite({
+    params: { bytes: { $bytes: 'not base64' } } as QueryParameters,
+  });
+  const state = {
+    ...emptyWorkspace(),
+    history: [validHistory, invalidHistory, nonFiniteHistory],
+    favorites: [invalidFavorite],
+  };
+
+  const record = JSON.parse(serializeWorkspace(state)) as {
+    workspace: { history: HistoryEntry[]; favorites: Favorite[]; frames: ExecutionFrame[] };
+  };
+
+  expect(record.workspace.history).toEqual([validHistory]);
+  expect(record.workspace.favorites).toEqual([]);
+  expect(record.workspace.frames).toEqual([]);
 });
 
 it('resets safely for incompatible, malformed, or invalid storage', () => {
