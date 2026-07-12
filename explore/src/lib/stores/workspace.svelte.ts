@@ -11,6 +11,7 @@ import {
   deserializeWorkspace,
   duplicateFavorite as duplicateFavoriteTransition,
   emptyWorkspace,
+  isSensitiveParameterKey,
   observeExecution as observeExecutionTransition,
   recordHistory as recordHistoryTransition,
   removeFrame as removeFrameTransition,
@@ -118,7 +119,8 @@ export function createWorkspaceStore(storage: StorageLike) {
       if (sourceId === undefined || inspection?.sourceId === sourceId) inspection = null;
     },
     setQueryParametersDraft(params: QueryParameters | null): void {
-      queryParametersDraft = params === null || hasSensitiveParameter(params) ? null : params;
+      queryParametersDraft =
+        params === null || Object.keys(params).some(isSensitiveParameterKey) ? null : params;
     },
     addFrame(frame: ExecutionFrame): void {
       apply(addFrameTransition(snapshot(), frame));
@@ -157,19 +159,6 @@ export function createWorkspaceStore(storage: StorageLike) {
       apply(clearWorkspaceTransition(snapshot(), confirmed));
     },
   };
-}
-
-function hasSensitiveParameter(params: QueryParameters): boolean {
-  return Object.keys(params).some((key) => {
-    const normalized = key.toLowerCase().replaceAll('_', '').replaceAll('-', '');
-    return (
-      normalized.includes('token') ||
-      normalized.includes('session') ||
-      normalized.includes('authorization') ||
-      normalized.includes('credential') ||
-      normalized.includes('secret')
-    );
-  });
 }
 
 export type WorkspaceStore = ReturnType<typeof createWorkspaceStore>;

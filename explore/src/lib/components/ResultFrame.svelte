@@ -13,7 +13,11 @@
   import type { NormalizedQueryResponse, NormalizedTxReceipt } from '$lib/logic/results';
   import { extractGraph, type GraphExtraction } from '$lib/logic/graph';
   import { extractQueryShape } from '$lib/logic/gql';
-  import type { ExecutionFrame, ResultTab } from '$lib/logic/workspace';
+  import {
+    isSensitiveParameterKey,
+    type ExecutionFrame,
+    type ResultTab,
+  } from '$lib/logic/workspace';
   import type { WorkspaceStore } from '$lib/stores/workspace.svelte';
   import type { ExplorerErrorCode } from '$lib/types';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
@@ -71,6 +75,11 @@
   }
 
   function addToFavorites(): void {
+    if (Object.keys(frame.params).some(isSensitiveParameterKey)) {
+      toast.error('Sensitive parameters cannot be saved to favorites');
+      return;
+    }
+
     const now = Date.now();
     const firstLine = frame.gql.trim().split(/\r?\n/, 1)[0] || 'Saved query';
     workspace.addFavorite({

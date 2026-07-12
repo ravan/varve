@@ -9,6 +9,7 @@ import {
   deserializeWorkspace,
   duplicateFavorite,
   emptyWorkspace,
+  isSensitiveParameterKey,
   observeExecution,
   recordHistory,
   removeFrame,
@@ -20,6 +21,26 @@ import {
   type Favorite,
   type HistoryEntry,
 } from './workspace';
+
+it.each([
+  'token',
+  'authToken',
+  'SESSION_ID',
+  'Authorization',
+  'auth-orization',
+  'api-credential',
+  'creden_tial',
+  'clientSecret',
+])('identifies sensitive parameter key %s despite case or separators', (key) => {
+  expect(isSensitiveParameterKey(key)).toBe(true);
+});
+
+it.each(['name', 'position', 'basis', 'accountId'])(
+  'does not identify safe parameter key %s as sensitive',
+  (key) => {
+    expect(isSensitiveParameterKey(key)).toBe(false);
+  },
+);
 
 function historyEntry(overrides: Partial<HistoryEntry> = {}): HistoryEntry {
   return {

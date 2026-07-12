@@ -8,6 +8,18 @@ export const WORKSPACE_STORAGE_KEY = 'varve-explorer-workspace';
 
 const HISTORY_LIMIT = 100;
 const COMPLETED_UNPINNED_FRAME_LIMIT = 25;
+const SENSITIVE_PARAMETER_KEY_PARTS = [
+  'token',
+  'session',
+  'authorization',
+  'credential',
+  'secret',
+] as const;
+
+export function isSensitiveParameterKey(key: string): boolean {
+  const normalized = key.toLowerCase().replaceAll('_', '').replaceAll('-', '');
+  return SENSITIVE_PARAMETER_KEY_PARTS.some((part) => normalized.includes(part));
+}
 
 export interface StorageLike {
   getItem(key: string): string | null;
@@ -745,14 +757,7 @@ function isForbiddenKey(key: string): boolean {
   const lower = key.toLowerCase();
   if (lower === '__proto__' || lower === 'constructor' || lower === 'prototype') return true;
   const normalized = lower.replaceAll('_', '').replaceAll('-', '');
-  return (
-    normalized === 'raw' ||
-    normalized === 'rawresponse' ||
-    normalized.includes('token') ||
-    normalized.includes('authorization') ||
-    normalized.includes('credential') ||
-    normalized.includes('secret')
-  );
+  return normalized === 'raw' || normalized === 'rawresponse' || isSensitiveParameterKey(key);
 }
 
 function hasExactKeys(
