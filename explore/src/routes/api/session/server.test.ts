@@ -12,10 +12,7 @@ it('deletes the session with matching cookie options and returns 204', async () 
   } as Parameters<typeof DELETE>[0]);
 
   expect(deleteCookie).toHaveBeenCalledOnce();
-  expect(deleteCookie).toHaveBeenCalledWith(
-    SESSION_COOKIE_NAME,
-    sessionCookieOptions(dev),
-  );
+  expect(deleteCookie).toHaveBeenCalledWith(SESSION_COOKIE_NAME, sessionCookieOptions(dev));
   expect(response.status).toBe(204);
   expect(await response.text()).toBe('');
 });

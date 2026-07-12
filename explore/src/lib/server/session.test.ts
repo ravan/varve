@@ -1,10 +1,5 @@
 import { expect, it } from 'vitest';
-import {
-  SESSION_COOKIE_NAME,
-  decodeSession,
-  encodeSession,
-  sessionCookieOptions,
-} from './session';
+import { SESSION_COOKIE_NAME, decodeSession, encodeSession, sessionCookieOptions } from './session';
 
 it('round-trips empty and punctuation-bearing bearer tokens', () => {
   for (const token of ['', 'abc.def/+_=-']) {
