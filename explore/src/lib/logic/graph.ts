@@ -1,5 +1,5 @@
 import type { NamedPathShape, QueryPatternShape, QueryShape, RelationshipDirection } from './gql';
-import type { NormalizedCell } from './results';
+import { isCanonicalBytesObject, type NormalizedCell } from './results';
 
 export interface GraphNode {
   readonly id: string;
@@ -83,6 +83,7 @@ export function extractGraph(
     let mappedTopology = false;
 
     for (const path of shape.paths) {
+      if (!returnAliases.has(path.alias)) continue;
       const column = requireSingleReturnAlias(returnAliases, path.alias, 'named path');
       const patternIndex = findPathPattern(shape.patterns, path);
       pathPatternIndexes.add(patternIndex);
@@ -281,16 +282,12 @@ function requireIdentity(value: unknown): OpaqueIdentity {
   if (typeof value === 'string') {
     return { key: `string:${JSON.stringify(value)}`, id: value };
   }
-  if (isBytesIdentity(value)) {
+  if (isCanonicalBytesObject(value)) {
     return { key: `bytes:${JSON.stringify(value.$bytes)}`, id: `bytes:${value.$bytes}` };
   }
   throw new UnsupportedTopology(
     'Graph identity must be an opaque string or exact {$bytes: string} value.',
   );
-}
-
-function isBytesIdentity(value: unknown): value is { $bytes: string } {
-  return isRecord(value) && Object.keys(value).length === 1 && typeof value.$bytes === 'string';
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
