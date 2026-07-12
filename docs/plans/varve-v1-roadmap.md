@@ -414,13 +414,19 @@ corruption, no acked loss; Grafana-ready metrics documented.
       Tasks 5-6: 5 targets, 5-way nightly matrix; arrow-rs IPC panics guarded by catch_unwind +
       framing-allocation bounded, gates on RSS; deeper record-batch-descriptor over-reservation
       is production-safe/clean-Err + owned post-v1 follow-up.)*
-- [ ] Benchmark suite: criterion micro (resolution, trie ops, parse) + end-to-end social
+- [x] Benchmark suite: criterion micro (resolution, trie ops, parse) + end-to-end social
       workload (ingest rate, point read, 2-hop, AS-OF historical, query-node scale-out 1→4);
-      compare against spec §13 targets; publish `docs/benchmarks/v1.md` report.
-- [ ] Docs site (mdBook under `docs/book/`): getting started (laptop 5-min), GQL reference
+      compare against spec §13 targets; publish `docs/benchmarks/v1.md` report. *(Slice 11
+      Tasks 7-10: `just bench-micro`/`bench-scale-out`, `social_bench` example, report at
+      `docs/benchmarks/v1.md` with honest verdicts — MET: write-batched 41.5k events/s, warm point
+      0.38 ms, AS-OF 0.94×; INDICATIVE: scale-out 152/282/530 QPS single-box; NOT MEASURED: 1M-node
+      2-hop, object-store-log tx/s — explicitly not extrapolated.)*
+- [x] Docs site (mdBook under `docs/book/`): getting started (laptop 5-min), GQL reference
       with temporal extensions + deviations list, capability matrix per backend
       (Garage/Ceph/SeaweedFS/MinIO/AWS), ops guide (profiles, config reference generated
-      from code, failover modes, sizing), architecture overview.
+      from code, failover modes, sizing), architecture overview. *(Slice 11 Tasks 11-13:
+      mdbook 0.5.4 site `docs/book/` + CI `docs` job; getting-started verified live; config
+      reference GENERATED from code with a drift test; ops/metrics moved into the book.)*
 - [ ] Release engineering: `cargo dist` (or equiv) for macOS arm64 + linux x86_64/arm64
       (musl) binaries; Docker images; `varve` + subcrates published to crates.io;
       CHANGELOG; `v1.0.0` tag; README quickstart.

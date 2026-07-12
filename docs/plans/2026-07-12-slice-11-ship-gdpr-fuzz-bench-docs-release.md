@@ -1161,7 +1161,7 @@ name = "resolution"
 harness = false
 ```
 
-- [ ] **Step 1: Write `crates/varve-index/benches/resolution.rs`**
+- [x] **Step 1: Write `crates/varve-index/benches/resolution.rs`**
 
 ```rust
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
@@ -1190,7 +1190,7 @@ criterion_group!(benches, bench_resolve);
 criterion_main!(benches);
 ```
 
-- [ ] **Step 2: Write `crates/varve-types/benches/trie.rs`**
+- [x] **Step 2: Write `crates/varve-types/benches/trie.rs`**
 
 ```rust
 use criterion::{criterion_group, criterion_main, Criterion};
@@ -1225,7 +1225,7 @@ criterion_main!(benches);
   `Iid::derive("default", "nodes", &Value::Int(id).id_bytes().unwrap())`; adapt the byte-arg
   spelling accordingly.)
 
-- [ ] **Step 3: Write `crates/varve-gql/benches/parse.rs`**
+- [x] **Step 3: Write `crates/varve-gql/benches/parse.rs`**
 
 ```rust
 use criterion::{criterion_group, criterion_main, Criterion};
@@ -1258,11 +1258,11 @@ criterion_main!(benches);
   `clippy.toml` allows unwrap in tests, and benches are non-library targets; if clippy still
   flags it, add `#![allow(clippy::unwrap_used)]` at the top of the bench file.)
 
-- [ ] **Step 4: Run** `cargo bench -p varve-types -p varve-gql -p varve-index -- --quick` →
+- [x] **Step 4: Run** `cargo bench -p varve-types -p varve-gql -p varve-index -- --quick` →
   all benches execute and report. Then `cargo clippy --workspace --all-targets -- -D warnings`
   (benches are now compiled by the standard gate).
 
-- [ ] **Step 5: justfile recipe + commit**
+- [x] **Step 5: justfile recipe + commit**
 
 ```make
 bench-micro:
@@ -1304,7 +1304,7 @@ over the deterministic 10k-node/60k-edge social fixture on the durable local pro
 | AS-OF historical 2-hop (p50) | X.XX ms (N.NNx of current) |
 ```
 
-- [ ] **Step 1: Write the example.** Structure (mirroring `traversal_bench.rs`):
+- [x] **Step 1: Write the example.** Structure (mirroring `traversal_bench.rs`):
   1. Temp dir; open with the traversal-bench config (durable local log + store, flush via
      `max_block_rows`).
   2. Ingest `social_graph(10_000, 60_000, 42)` via `node_statements(...)` +
@@ -1324,11 +1324,11 @@ over the deterministic 10k-node/60k-edge social fixture on the durable local pro
   7. Print the markdown table; exit nonzero if any query errors (no perf asserts — targets are
      tracked, not gated).
 
-- [ ] **Step 2: Run** `cargo run --release --example social_bench -p varve` → table prints,
+- [x] **Step 2: Run** `cargo run --release --example social_bench -p varve` → table prints,
   numbers plausible vs. STATUS.md slice-4/6 records (39.8k events/s ingest, 7.6 ms warm point,
   16.2 ms warm 2-hop on this machine).
 
-- [ ] **Step 3: Gate + commit**
+- [x] **Step 3: Gate + commit**
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p varve
@@ -1355,7 +1355,7 @@ that measures aggregate read QPS against 1, 2, and 4 query nodes of ONE cluster 
   `start()` becomes `Self::start_with_query_nodes(2).await` (existing tests unchanged).
   `query_urls()` keeps returning all query-node URLs in creation order.
 
-- [ ] **Step 1: Generalize the harness.** In `process_cluster.rs`, replace the hardcoded
+- [x] **Step 1: Generalize the harness.** In `process_cluster.rs`, replace the hardcoded
   `for index in 1..=2` loop with `for index in 1..=query_nodes`, behind:
 
 ```rust
@@ -1371,7 +1371,7 @@ pub async fn start_with_query_nodes(query_nodes: usize) -> Result<ProcessCluster
   Run the existing suites to prove no regression:
   `cargo test -p varve-server --test process_consistency --test process_scale_out -- --test-threads=1` → 4 passed.
 
-- [ ] **Step 2: Write the env-gated bench test** (`tests/scale_out_bench.rs`; skips by default
+- [x] **Step 2: Write the env-gated bench test** (`tests/scale_out_bench.rs`; skips by default
   so `just check` stays fast):
 
 ```rust
@@ -1457,7 +1457,7 @@ async fn read_qps_scales_from_one_to_four_query_nodes() {
   so `assert_eq!(count, expected)` still must hold — followers have converged, enforced by the
   basis-pinned pre-check).
 
-- [ ] **Step 3: Run it**
+- [x] **Step 3: Run it**
 
 ```bash
 VARVE_SCALE_BENCH=1 cargo test -p varve-server --release --test scale_out_bench -- --nocapture --test-threads=1
@@ -1466,7 +1466,7 @@ VARVE_SCALE_BENCH=1 cargo test -p varve-server --release --test scale_out_bench 
   Expected: table with QPS growing with n (record actual numbers for Task 10; no assert on the
   slope). Also `cargo test -p varve-server --test scale_out_bench` (no env) → skips in <1 s.
 
-- [ ] **Step 4: justfile + commit**
+- [x] **Step 4: justfile + commit**
 
 ```make
 bench-scale-out:
@@ -1495,7 +1495,7 @@ numbers side-by-side with the spec targets, honest gaps called out.
   `traversal_bench`, and (optional S3 numbers) `just s3-matrix` / MinIO via docker.
 - Produces: the report Task 12's book links and Task 17's acceptance pass cites.
 
-- [ ] **Step 1: Run the suite and capture outputs** (release mode, quiet machine):
+- [x] **Step 1: Run the suite and capture outputs** (release mode, quiet machine):
 
 ```bash
 just bench-micro
@@ -1507,7 +1507,7 @@ cargo run --release --example social_bench -p varve
 just bench-scale-out
 ```
 
-- [ ] **Step 2: Write the report** with this exact structure (fill measured values):
+- [x] **Step 2: Write the report** with this exact structure (fill measured values):
 
 ```markdown
 # Varve v1 benchmark report
@@ -1541,7 +1541,7 @@ Date: 2026-07-XX. Commit: <sha>. Reproduce: commands listed per section.
   numbers — re-measure). Where a spec target cannot be honestly claimed (e.g. 1M-node graph not
   ingested), the report says so explicitly rather than extrapolating silently.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/benchmarks/v1.md
@@ -1569,7 +1569,7 @@ build the book.
   version in the commit message and PIN it in CI with `--version <resolved>`).
 - Produces: `mdbook build docs/book` green; chapter files Tasks 12–13 fill in.
 
-- [ ] **Step 1: Install mdbook + scaffold.** `book.toml`:
+- [x] **Step 1: Install mdbook + scaffold.** `book.toml`:
 
 ```toml
 [book]
@@ -1607,7 +1607,7 @@ create-missing = false
 
   `create-missing = false` forces every listed file to exist — create the stubs now.
 
-- [ ] **Step 2: Write `introduction.md`** (one page: what Varve is, sovereignty stance, the
+- [x] **Step 2: Write `introduction.md`** (one page: what Varve is, sovereignty stance, the
   varve metaphor, links to spec/roadmap in-repo) **and `getting-started.md`** with BOTH paths,
   each verified by actually running it:
   - **From source (works today):** `git clone … && cargo run --release -p varve-cli -- shell
@@ -1621,12 +1621,12 @@ create-missing = false
     `varved --config varve.toml`, `varve shell --url http://127.0.0.1:8080 --token …` — run it
     once to verify the TOML is exact.
 
-- [ ] **Step 3: Write `architecture.md`:** condensed spec §3/§5/§9/§12 — roles diagram
+- [x] **Step 3: Write `architecture.md`:** condensed spec §3/§5/§9/§12 — roles diagram
   (writer/query/compactor over one log + object store), the event model and derived `_system_to`,
   blocks/tries/manifest-as-commit-point, group commit, epoch fencing, determinism. Target ~2
   pages; link the full design spec for depth. No stale numbers.
 
-- [ ] **Step 4: CI job + justfile.** In `ci.yml`:
+- [x] **Step 4: CI job + justfile.** In `ci.yml`:
 
 ```yaml
   docs:
@@ -1653,7 +1653,7 @@ docs-serve:
   Validate: `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"` and
   `just docs` → build succeeds with stubs.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add docs/book .github/workflows/ci.yml justfile .gitignore
@@ -1683,7 +1683,7 @@ slice-9/10 contracts for ops.
   Task 4 (failover hardening wording).
 - Produces: complete book minus configuration page.
 
-- [ ] **Step 1: `gql/reference.md`** — the practical core per spec §8 as shipped: statement list
+- [x] **Step 1: `gql/reference.md`** — the practical core per spec §8 as shipped: statement list
   (INSERT / MATCH / OPTIONAL MATCH / WHERE / FILTER / LET / FOR / ORDER BY / SKIP / LIMIT /
   OFFSET / UNION [ALL] / RETURN [DISTINCT] / aggregation / SET / REMOVE / DELETE [DETACH] /
   ERASE [DETACH] / CREATE·DROP GRAPH / USE / parameters / CASE / EXISTS / CAST), each with one
@@ -1691,13 +1691,13 @@ slice-9/10 contracts for ops.
   parse (spot-check any uncertain one against `parse_program` in a scratch test, then delete the
   scratch).
 
-- [ ] **Step 2: `gql/temporal.md`** — `FOR VALID_TIME/SYSTEM_TIME AS OF | FROM/TO | BETWEEN |
+- [x] **Step 2: `gql/temporal.md`** — `FOR VALID_TIME/SYSTEM_TIME AS OF | FROM/TO | BETWEEN |
   ALL` (whichever subset shipped — the slice-2/7 tests are the truth), `INSERT … VALID FROM/TO`,
   defaults (valid AS OF now, system AS OF latest), `valid_from()/valid_to()/system_from()`
   functions, ERASE vs DELETE semantics (delete = bitemporal tombstone, erase = history gone at
   every axis + physical bytes after compaction+GC — link the Task 2/3 proofs by test name).
 
-- [ ] **Step 3: `gql/deviations.md`** — honest conformance page: v1 deviations recorded in
+- [x] **Step 3: `gql/deviations.md`** — honest conformance page: v1 deviations recorded in
   STATUS decisions (edge label REQUIRED; one linear path per MATCH; quantified-edge-with-var
   unsupported; catalog+data statements cannot mix in one program; reserved-word list; multi-label
   MATCH limits; `max_path_depth` cap) + TCK standing: adapted openCypher TCK, 445/511 adapted
@@ -1705,7 +1705,7 @@ slice-9/10 contracts for ops.
   the ANTLR differential oracle. Copy the CURRENT numbers from the tck gate output, not from
   this plan.
 
-- [ ] **Step 4: `backends.md`** — matrix table:
+- [x] **Step 4: `backends.md`** — matrix table:
 
 | Backend | Version tested (CI pin) | Probe verdict | `cas-failover` | CI cadence |
 |---|---|---|---|---|
@@ -1719,7 +1719,7 @@ slice-9/10 contracts for ops.
   Plus per-backend config snippets (`[storage.s3]` endpoint/path-style examples) and the
   sovereignty paragraph (plain PUT/GET/LIST always sufficient; CAS strictly optional).
 
-- [ ] **Step 5: ops pages.**
+- [x] **Step 5: ops pages.**
   - `ops/README.md`: one-paragraph orientation + links.
   - `ops/profiles.md`: laptop (memory/local), durable single node (local log+store), sovereign
     scale-out (object-store log + s3 store, 1 writer + N query nodes, Compose demo pointer),
@@ -1732,7 +1732,7 @@ slice-9/10 contracts for ops.
   - `ops/metrics.md`: MOVE the existing `docs/ops/metrics.md` content here verbatim (it is
     already Grafana-ready); fix any relative links; leave the pointer stub behind.
 
-- [ ] **Step 6: `reference/http-api.md` + `reference/cli.md`** — the frozen slice-9 wire
+- [x] **Step 6: `reference/http-api.md` + `reference/cli.md`** — the frozen slice-9 wire
   contract: route/auth matrix (`/healthz` public; bearer for `/metrics`, `/v1/status`,
   `/v1/query`, `/v1/tx`, `/v1/admin/*`), 421 writer redirect, basis forms (`tx_id` /
   `at:<packed>` / `basis_timeout_ms`), JSON vs `application/vnd.apache.arrow.stream` content
@@ -1741,7 +1741,7 @@ slice-9/10 contracts for ops.
   `shell`, `import --label [--graph]`, `export --query [--basis]`, `admin
   status|compact|gc|verify [--json]`, JSONL format incl. `{"$bytes": base64}`.
 
-- [ ] **Step 7: Build + commit**
+- [x] **Step 7: Build + commit**
 
 ```bash
 just docs   # zero warnings, zero missing files
@@ -1777,7 +1777,7 @@ cannot silently rot.
   `just docs-gen` = `cargo run -p varve-testkit --bin config_reference >
   docs/book/src/ops/configuration.md`.
 
-- [ ] **Step 1: Write the failing drift test**
+- [x] **Step 1: Write the failing drift test**
 
 ```rust
 use std::path::Path;
@@ -1796,7 +1796,7 @@ fn committed_configuration_page_matches_the_generator() {
 }
 ```
 
-- [ ] **Step 2: Implement `render()`.** Data model + full section list (this enumeration IS the
+- [x] **Step 2: Implement `render()`.** Data model + full section list (this enumeration IS the
   content contract; every row carries section, key, type, default, one-line description):
 
 ```rust
@@ -1839,7 +1839,7 @@ pub fn render() -> String { /* header + per-section markdown tables */ }
   the exported const in the generator (`default: varve_log::DEFAULT_SEGMENT_MAX_BYTES.to_string()`)
   rather than a literal.
 
-- [ ] **Step 3: Generate + run**
+- [x] **Step 3: Generate + run**
 
 ```bash
 cargo run -p varve-testkit --bin config_reference > docs/book/src/ops/configuration.md
@@ -1849,7 +1849,7 @@ just docs
 
   All three green. Add the `docs-gen` justfile recipe.
 
-- [ ] **Step 4: Gate + commit**
+- [x] **Step 4: Gate + commit**
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p varve-testkit
