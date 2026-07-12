@@ -204,6 +204,92 @@
   font-weight: 650;
 }
 
+.result-frame {
+  min-width: 0;
+}
+
+.result-gql,
+.raw-result pre {
+  min-width: max-content;
+  margin: 0;
+  padding: 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.result-gql {
+  min-width: 0;
+  max-height: 10rem;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in oklab, var(--muted) 55%, transparent);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.result-table-scroll [data-slot='scroll-area-viewport'] {
+  max-height: 32rem;
+}
+
+.result-cell {
+  max-width: 32rem;
+}
+
+.result-value {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: baseline;
+  gap: 0.45rem;
+}
+
+.result-value__type {
+  flex: none;
+  color: var(--muted-foreground);
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.result-value__content {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.result-value--missing .result-value__content {
+  color: var(--muted-foreground);
+  font-style: italic;
+}
+
+.result-value--null .result-value__content {
+  color: oklch(0.558 0.288 302.321);
+  font-family: var(--font-mono);
+}
+
+.result-value--boolean .result-value__content,
+.result-value--number .result-value__content,
+.result-value--bytes .result-value__content,
+.result-value--array .result-value__content,
+.result-value--object .result-value__content {
+  font-family: var(--font-mono);
+}
+
+.result-value--boolean .result-value__content {
+  color: oklch(0.623 0.214 259.815);
+}
+
+.result-value--number .result-value__content {
+  color: oklch(0.627 0.194 149.214);
+}
+
+.result-value--bytes .result-value__content {
+  color: var(--data);
+}
+
 @media (max-width: 899px) {
   .app-shell {
     grid-template-columns: minmax(0, 1fr);
@@ -220,6 +306,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .result-skeleton {
+    animation: none !important;
+  }
+
   .query-editor *,
   .query-editor *::before,
   .query-editor *::after {

@@ -26,7 +26,7 @@
   } from '@codemirror/view';
   import Play from '@lucide/svelte/icons/play';
   import Square from '@lucide/svelte/icons/square';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
 
   let {
     connection,
@@ -151,6 +151,16 @@
     activeController?.abort();
   }
 
+  export async function rerunQuery(frame: ExecutionFrame): Promise<void> {
+    if (activeController !== null) return;
+    parametersInput = JSON.stringify(frame.params, null, 2);
+    workspace.setQueryMode(frame.mode);
+    workspace.setQueryDraft(frame.gql);
+    requestError = null;
+    await tick();
+    await runQuery();
+  }
+
   async function runQuery(): Promise<void> {
     if (!canRun || !parametersValidation.ok) return;
     if (mode === 'read' && (!basisValidation.ok || !timeoutValidation.ok)) return;
@@ -195,14 +205,18 @@
       finalized = true;
       const finishedAt = Date.now();
       const durationMs = Math.max(0, finishedAt - startedAt);
-      workspace.replaceFrame({
-        ...runningFrame,
-        state: outcome,
-        finishedAt,
-        durationMs,
-        response: responseValue,
-        ...(rawResponseValue === undefined ? {} : { rawResponse: rawResponseValue }),
-      });
+      const currentFrame = workspace.frames.find(({ id }) => id === frameId);
+      if (currentFrame !== undefined) {
+        workspace.replaceFrame({
+          ...runningFrame,
+          pinned: currentFrame.pinned,
+          state: outcome,
+          finishedAt,
+          durationMs,
+          response: responseValue,
+          ...(rawResponseValue === undefined ? {} : { rawResponse: rawResponseValue }),
+        });
+      }
       workspace.recordHistory({
         gql,
         mode,
