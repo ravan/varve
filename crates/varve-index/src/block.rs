@@ -388,7 +388,16 @@ fn encode_meta(pages: &[PageMeta]) -> Result<Vec<u8>, IndexError> {
 /// short-lived this decode call is and that no correctness is at stake,
 /// only diagnostic text; the alternative (never scoping the hook) makes the
 /// fuzz targets unable to demonstrate survival at all, which is worse.
+///
+/// The `catch_unwind` guard handles arrow's UNWINDING panic classes only.
+/// Fuzzing surfaced a fourth, distinct class it cannot reach: arrow's
+/// `MessageReader::maybe_next` allocates a buffer sized from an unvalidated,
+/// attacker-controlled `bodyLength`, so a malformed huge value ABORTS the
+/// allocator with no unwind. [`crate::codec::validate_ipc_framing`] runs first
+/// (outside the guard) to bound that allocation against the actual input size
+/// before arrow sees the bytes.
 pub fn decode_meta(bytes: &[u8]) -> Result<Vec<PageMeta>, IndexError> {
+    crate::codec::validate_ipc_framing(bytes)?;
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let result =
@@ -824,6 +833,59 @@ mod tests {
         let bytes: &[u8] =
             include_bytes!("../../../fuzz/regressions/block_meta/buffer-slice-panic.bin");
         assert!(decode_meta(bytes).is_err());
+    }
+
+    /// Round-trip over a meta stream carrying TWO record-batch messages, so the
+    /// framing walk steps over two consecutive NON-zero `bodyLength` messages
+    /// and still reaches EOS. `encode_meta` only ever emits one record batch,
+    /// so this reuses a real batch written twice to build the multi-body
+    /// stream. Guards against a body-advance bug that a single-batch stream
+    /// (schema + one batch + EOS) would not surface.
+    #[test]
+    fn decode_meta_walks_multi_batch_stream() {
+        // page_rows = 1 over 3 entities → 3 pages → a meta batch with 3 rows.
+        let block = encode_block(
+            &table(&[
+                put(1, 1, 1, EOT, 0),
+                put(2, 2, 2, EOT, 0),
+                put(3, 3, 3, EOT, 0),
+            ]),
+            1,
+        )
+        .unwrap();
+        assert_eq!(block.pages.len(), 3);
+
+        let mut reader = StreamReader::try_new(std::io::Cursor::new(&block.meta), None).unwrap();
+        let batch = reader.next().unwrap().unwrap();
+
+        let schema = meta_schema();
+        let mut buf = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut buf, &schema).unwrap();
+            writer.write(&batch).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let pages = decode_meta(&buf).unwrap();
+        assert_eq!(pages.len(), block.pages.len() * 2);
+        assert_eq!(&pages[..block.pages.len()], &block.pages[..]);
+        assert_eq!(&pages[block.pages.len()..], &block.pages[..]);
+    }
+
+    /// Allocation-bound regression: a meta stream whose record-batch message
+    /// declares a `bodyLength` of ~1.15 EB. Pre-fix, arrow's
+    /// `MessageReader::maybe_next` would `MutableBuffer::from_len_zeroed(..)`
+    /// that many bytes; the allocation fails and `handle_alloc_error` ABORTS the
+    /// process — no unwind, so `catch_unwind` could not intercept it (this test
+    /// would kill the runner). Post-fix, `validate_ipc_framing` bounds the body
+    /// length against the input and returns a clean `Err`.
+    #[test]
+    fn decode_meta_rejects_unbounded_body_length() {
+        let block =
+            encode_block(&table(&[put(1, 1, 1, EOT, 0), put(2, 2, 2, EOT, 0)]), 16).unwrap();
+        let corrupt = crate::codec::corrupt_body_length_to_huge(&block.meta);
+        assert!(matches!(decode_meta(&corrupt), Err(IndexError::Codec(_))));
     }
 
     #[test]

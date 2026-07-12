@@ -150,6 +150,183 @@ pub fn encode_events(events: &[Event]) -> Result<Vec<u8>, IndexError> {
     Ok(buf)
 }
 
+/// Continuation marker prefixing every message length in the modern
+/// (>= Arrow v0.15.0 / metadata V5) IPC stream framing. Mirrors arrow-ipc's
+/// private `CONTINUATION_MARKER` (`arrow-ipc-58.3.0/src/lib.rs:73`, `[0xff; 4]`).
+const IPC_CONTINUATION_MARKER: [u8; 4] = [0xff; 4];
+
+/// Bounds the allocation arrow-ipc's `StreamReader` performs from a message's
+/// declared `metadata_size`/`bodyLength` BEFORE any bytes reach arrow.
+///
+/// `arrow_ipc::reader::MessageReader::maybe_next`
+/// (`arrow-ipc-58.3.0/src/reader.rs:1822`) does
+/// `self.buf.resize(meta_len, 0)` and
+/// `MutableBuffer::from_len_zeroed(message.bodyLength() as usize)` with NO
+/// check that those attacker-controlled lengths fit the actual input. A
+/// corrupt / bit-rotted / tampered object-store block declaring a huge
+/// `bodyLength` (e.g. `i64::MAX`) makes arrow request terabytes and the
+/// allocator ABORTS the process — no unwinding happens, so the `catch_unwind`
+/// guard on the decoders categorically cannot intercept it. Fuzzing
+/// `decode_meta`/`decode_events` surfaced exactly this class once the three
+/// unwinding panic classes were guarded.
+///
+/// This walks the Arrow "encapsulated message" stream framing EXACTLY as
+/// arrow's `MessageReader::maybe_next` + `read_meta_len` walk it (verified
+/// against that source): optional `0xFFFFFFFF` continuation marker, then
+/// `metadata_size: i32 LE` (`== 0` marks end-of-stream), then `metadata_size`
+/// bytes of `Message` flatbuffer, then `bodyLength` bytes of body — where the
+/// writer folds both the metadata and body 8-byte padding INTO those two
+/// counts (`writer.rs:566-598`), so there is no separate padding to skip. It
+/// rejects — with a clean [`IndexError::Codec`] — any length prefix,
+/// `metadata_size`, or `bodyLength` that is negative or exceeds the remaining
+/// input, before arrow can over-allocate.
+///
+/// It is conservative ONLY in the safe direction: each message's metadata is
+/// parsed with arrow's own verifier-backed, panic-free
+/// [`arrow::ipc::root_as_message`] — the identical call `maybe_next` makes — so
+/// it accepts every stream arrow itself accepts and can never false-reject a
+/// genuine block (a false rejection would break recovery/query reads of real
+/// data). Called at the very top of both decoders, AHEAD of the `catch_unwind`
+/// guard, because the abort it prevents never unwinds and its own body is
+/// panic-free (no `unwrap`/`expect`; `root_as_message` returns `Result`).
+pub(crate) fn validate_ipc_framing(bytes: &[u8]) -> Result<(), IndexError> {
+    let mut pos: usize = 0;
+    loop {
+        // `read_meta_len` reads a 4-byte length prefix; arrow treats EOF here
+        // (fewer than 4 bytes left at a message boundary) as a clean
+        // end-of-stream (`Ok(None)`), so we stop WITHOUT rejecting.
+        if bytes.len() - pos < 4 {
+            return Ok(());
+        }
+        let mut prefix: [u8; 4] = bytes[pos..pos + 4]
+            .try_into()
+            .map_err(|_| codec_err("IPC framing: short length prefix"))?;
+        pos += 4;
+        // A continuation marker means the real `metadata_size` is in the NEXT
+        // four bytes (modern format); its absence is the legacy format where
+        // the first four bytes ARE the size. After a continuation marker arrow
+        // REQUIRES the size (it uses `?`, not the EOF-tolerant path).
+        if prefix == IPC_CONTINUATION_MARKER {
+            if bytes.len() - pos < 4 {
+                return Err(codec_err(
+                    "IPC framing: truncated metadata length after continuation marker",
+                ));
+            }
+            prefix = bytes[pos..pos + 4]
+                .try_into()
+                .map_err(|_| codec_err("IPC framing: short metadata length"))?;
+            pos += 4;
+        }
+        let meta_len = i32::from_le_bytes(prefix);
+        // `metadata_size == 0` marks end-of-stream (EOS).
+        if meta_len == 0 {
+            return Ok(());
+        }
+        // arrow rejects a negative `metadata_size` (`usize::try_from`).
+        let meta_len = usize::try_from(meta_len)
+            .map_err(|_| codec_err(format!("IPC framing: negative metadata length {meta_len}")))?;
+        // arrow `resize`s a buffer to (and `read_exact`s) `meta_len` bytes —
+        // bound it against the remaining input so a huge `metadata_size` can't
+        // drive a multi-gigabyte allocation.
+        if meta_len > bytes.len() - pos {
+            return Err(codec_err(format!(
+                "IPC framing: metadata length {meta_len} exceeds {} remaining bytes",
+                bytes.len() - pos
+            )));
+        }
+        let metadata = &bytes[pos..pos + meta_len];
+        pos += meta_len;
+        // Parse with arrow's OWN verifier-backed, panic-free parser — the
+        // identical call `maybe_next` makes — to read the body length. Any
+        // structurally-invalid flatbuffer is rejected here exactly as arrow
+        // would reject it, never more strictly.
+        let message = arrow::ipc::root_as_message(metadata)
+            .map_err(|e| codec_err(format!("IPC framing: invalid message metadata: {e:?}")))?;
+        let body_length = message.bodyLength();
+        if body_length < 0 {
+            return Err(codec_err(format!(
+                "IPC framing: negative message body length {body_length}"
+            )));
+        }
+        let body_length = usize::try_from(body_length).map_err(|_| {
+            codec_err(format!(
+                "IPC framing: message body length {body_length} does not fit in usize"
+            ))
+        })?;
+        // The critical bound: arrow allocates `bodyLength` bytes via
+        // `MutableBuffer::from_len_zeroed` BEFORE reading them. Reject a body
+        // that cannot fit in the remaining input rather than let the allocator
+        // abort.
+        if body_length > bytes.len() - pos {
+            return Err(codec_err(format!(
+                "IPC framing: message body length {body_length} exceeds {} remaining bytes",
+                bytes.len() - pos
+            )));
+        }
+        pos += body_length;
+    }
+}
+
+/// Absurd `bodyLength` used by the allocation-bound regression tests: ~1.15 EB.
+/// Chosen so arrow's `MutableBuffer::from_len_zeroed` PASSES `Layout`
+/// construction (it is well under `isize::MAX`) but then FAILS the real
+/// allocation — `handle_alloc_error` → process ABORT, with no unwinding. That
+/// makes it the genuinely uncatchable class the framing validator must stop,
+/// as opposed to `i64::MAX`, which trips a catchable `LayoutError` panic that
+/// the `catch_unwind` guard alone would already handle.
+#[cfg(test)]
+pub(crate) const HUGE_BODY_LEN: i64 = 1 << 60;
+
+/// Test helper: rewrite a valid IPC stream's first record-batch message so its
+/// declared `bodyLength` is absurd ([`HUGE_BODY_LEN`]), reproducing the
+/// corrupt-object class that made arrow's reader allocate ~1 EB and abort.
+/// Walks the framing exactly like [`validate_ipc_framing`], locates the
+/// `bodyLength` scalar by re-parsing each candidate offset (so a colliding
+/// buffer offset/length can't be patched by mistake), and overwrites it. Shared
+/// by both decoders' allocation-bound regression tests.
+#[cfg(test)]
+pub(crate) fn corrupt_body_length_to_huge(stream: &[u8]) -> Vec<u8> {
+    let mut pos: usize = 0;
+    loop {
+        assert!(
+            stream.len() - pos >= 4,
+            "no record-batch message to corrupt"
+        );
+        let mut prefix: [u8; 4] = stream[pos..pos + 4].try_into().unwrap();
+        pos += 4;
+        if prefix == IPC_CONTINUATION_MARKER {
+            prefix = stream[pos..pos + 4].try_into().unwrap();
+            pos += 4;
+        }
+        let meta_len = i32::from_le_bytes(prefix);
+        assert!(meta_len > 0, "reached end-of-stream before a record batch");
+        let meta_len = meta_len as usize;
+        let meta_start = pos;
+        let metadata = &stream[meta_start..meta_start + meta_len];
+        let message = arrow::ipc::root_as_message(metadata).expect("valid message metadata");
+        let body_length = message.bodyLength();
+        pos += meta_len;
+        if body_length > 0 {
+            let needle = body_length.to_le_bytes();
+            for (rel, window) in metadata.windows(8).enumerate() {
+                if window == needle {
+                    let mut out = stream.to_vec();
+                    let at = meta_start + rel;
+                    out[at..at + 8].copy_from_slice(&HUGE_BODY_LEN.to_le_bytes());
+                    let patched =
+                        arrow::ipc::root_as_message(&out[meta_start..meta_start + meta_len])
+                            .expect("still-valid metadata after patch");
+                    if patched.bodyLength() == HUGE_BODY_LEN {
+                        return out;
+                    }
+                }
+            }
+            panic!("could not locate bodyLength field in record-batch metadata");
+        }
+        pos += body_length as usize;
+    }
+}
+
 /// Deserializes events from one Arrow IPC stream produced by `encode_events`.
 ///
 /// Task-6 fuzzing found that arrow-rs 58.3.0's IPC `StreamReader` PANICS
@@ -170,7 +347,16 @@ pub fn encode_events(events: &[Event]) -> Result<Vec<u8>, IndexError> {
 /// swap, `libfuzzer-sys`'s abort-before-unwind hook defeats `catch_unwind`
 /// outright inside a `cargo fuzz` target even though it works correctly
 /// under plain `cargo test`.
+///
+/// The `catch_unwind` guard handles arrow's UNWINDING panic classes only.
+/// Fuzzing surfaced a fourth, distinct class it cannot reach: arrow's
+/// `MessageReader::maybe_next` allocates a buffer sized from an unvalidated,
+/// attacker-controlled `bodyLength`, so a malformed huge value ABORTS the
+/// allocator with no unwind. [`validate_ipc_framing`] runs first (outside the
+/// guard) to bound that allocation against the actual input size before arrow
+/// sees the bytes.
 pub fn decode_events(bytes: &[u8]) -> Result<Vec<Event>, IndexError> {
+    validate_ipc_framing(bytes)?;
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -479,10 +665,90 @@ mod tests {
 
     #[test]
     fn wrong_schema_is_rejected() {
+        // Not an Arrow IPC stream at all. The framing validator now runs
+        // first (to bound arrow's allocation): the bogus 4-byte prefix decodes
+        // to a `metadata_size` far larger than the input, so it is rejected
+        // with a clean `Codec` error before `StreamReader` is ever built.
+        // (Pre-framing-validation this surfaced as `IndexError::Arrow`.)
         assert!(matches!(
             decode_events(b"not an ipc stream"),
-            Err(IndexError::Arrow(_))
+            Err(IndexError::Codec(_))
         ));
+    }
+
+    /// Round-trip over a stream carrying TWO record-batch messages (not just
+    /// the schema + single batch + EOS that every other test exercises). This
+    /// forces `validate_ipc_framing` to step over two consecutive NON-zero
+    /// `bodyLength` messages and still land on the EOS marker — the multi-body
+    /// walk a single `encode_events` output can never produce (it always emits
+    /// exactly one record batch). If the body-advance were off, the walk would
+    /// mis-parse the second message and reject a stream arrow accepts.
+    #[test]
+    fn decode_events_walks_multi_batch_stream() {
+        let events = vec![
+            edge_event(1),
+            Event {
+                op: Op::Delete,
+                ..edge_event(1)
+            },
+        ];
+        // Pull a real RecordBatch back out of a valid single-batch stream, then
+        // write it TWICE into one stream → two record-batch messages, schema
+        // guaranteed to match `event_schema`.
+        let single = encode_events(&events).unwrap();
+        let mut reader = StreamReader::try_new(std::io::Cursor::new(&single), None).unwrap();
+        let batch = reader.next().unwrap().unwrap();
+
+        let schema = event_schema();
+        let mut buf = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut buf, &schema).unwrap();
+            writer.write(&batch).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let decoded = decode_events(&buf).unwrap();
+        let mut expected = events.clone();
+        expected.extend(events);
+        assert_eq!(decoded, expected);
+    }
+
+    /// Allocation-bound regression: a stream whose record-batch message
+    /// declares a `bodyLength` of ~1.15 EB ([`HUGE_BODY_LEN`]). Pre-fix, arrow's
+    /// `MessageReader::maybe_next` would `MutableBuffer::from_len_zeroed(..)`
+    /// that many bytes; the allocation fails and `handle_alloc_error` ABORTS the
+    /// process — no unwind, so `catch_unwind` could not intercept it (this test
+    /// would kill the runner). Post-fix, `validate_ipc_framing` bounds the body
+    /// length against the input and returns a clean `Err`.
+    #[test]
+    fn decode_events_rejects_unbounded_body_length() {
+        let seed = encode_events(&[edge_event(1)]).unwrap();
+        let corrupt = corrupt_body_length_to_huge(&seed);
+        assert!(matches!(decode_events(&corrupt), Err(IndexError::Codec(_))));
+    }
+
+    /// Production-safety regression for the record-batch-descriptor
+    /// over-reservation class that `validate_ipc_framing` deliberately does NOT
+    /// police (it bounds the stream framing's `metadata_size`/`bodyLength`, not
+    /// the record-batch-INTERNAL `FieldNode`/`Buffer` length descriptors one
+    /// layer deeper). The committed artifact is the minimized `events` fuzz
+    /// input that made arrow's `RecordBatchDecoder::create_primitive_array` ->
+    /// `ArrayDataBuilder::build` request ~103 GB (`24 * u32::MAX`) from a
+    /// corrupted array-length descriptor. In a normal build that ~103 GB is a
+    /// lazily-backed `alloc_zeroed` (OS shared zero page, never touched → no
+    /// RSS) and our payload decoder rejects the truncated data first, so
+    /// `decode_events` returns a clean `Err` in ~0 ms — which this test asserts
+    /// and which passes under an ordinary `cargo test` build. The "crash" the
+    /// fuzzer reported was only libFuzzer's `-malloc_limit_mb` allocation-REQUEST
+    /// hook firing; the fuzz targets now gate on RSS (`-malloc_limit_mb=0`), and
+    /// a conservative descriptor-vs-`bodyLength` bound (or an arrow-rs upgrade)
+    /// for strict-no-overcommit deployments is an owned post-v1 follow-up.
+    #[test]
+    fn decode_events_returns_clean_err_on_oversized_record_batch_length() {
+        let bytes: &[u8] =
+            include_bytes!("../../../fuzz/regressions/events/record-batch-length-oom.bin");
+        assert!(decode_events(bytes).is_err());
     }
 
     // Bounded strategies: no NaN (Event's PartialEq would fail); NaN
