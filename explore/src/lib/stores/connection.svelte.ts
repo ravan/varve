@@ -243,8 +243,7 @@ function isDegradedStatus(value: unknown): boolean {
   if (typeof value.follower_error === 'string' && value.follower_error.length > 0) return true;
   return (
     isRecord(value.probe) &&
-    typeof value.probe.verdict === 'string' &&
-    value.probe.verdict !== 'supported'
+    value.probe.verdict === 'inconsistent'
   );
 }
 
