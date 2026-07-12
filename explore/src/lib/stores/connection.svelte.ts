@@ -1,4 +1,5 @@
 import type { ExplorerErrorCode } from '$lib/types';
+import { createSessionOperationCoordinator } from '$lib/logic/session-operations';
 
 export interface FetchLike {
   (input: string, init?: RequestInit): Promise<Response>;
@@ -35,6 +36,7 @@ export function createConnectionStore(fetcher: FetchLike) {
   let session = $state<ConnectionSession>('unknown');
   let error = $state<ConnectionFailure | null>(null);
   let refreshSequence = 0;
+  const sessionOperations = createSessionOperationCoordinator();
 
   async function refresh(): Promise<void> {
     const sequence = ++refreshSequence;
@@ -65,8 +67,9 @@ export function createConnectionStore(fetcher: FetchLike) {
         return;
       }
 
-      status = await requestJson(fetcher, '/api/varve/status');
+      const nextStatus = await requestJson(fetcher, '/api/varve/status');
       if (sequence !== refreshSequence) return;
+      status = nextStatus;
       session = 'authenticated';
     } catch (cause) {
       if (sequence !== refreshSequence) return;
@@ -86,40 +89,44 @@ export function createConnectionStore(fetcher: FetchLike) {
     session = 'connecting';
     error = null;
 
-    try {
-      const response = await fetcher('/api/session/connect', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ token }),
-      });
-      if (!response.ok) throw await responseFailure(response);
-      if (sequence !== refreshSequence) return;
-      await refresh();
-    } catch (cause) {
-      if (sequence !== refreshSequence) return;
-      const failure = normalizeFailure(cause);
-      error = failure;
-      status = null;
-      session = failure.code === 'unauthorized' ? 'unauthenticated' : 'error';
-    }
+    await sessionOperations.run(async () => {
+      try {
+        const response = await fetcher('/api/session/connect', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ token }),
+        });
+        if (!response.ok) throw await responseFailure(response);
+        if (sequence !== refreshSequence) return;
+        await refresh();
+      } catch (cause) {
+        if (sequence !== refreshSequence) return;
+        const failure = normalizeFailure(cause);
+        error = failure;
+        status = null;
+        session = failure.code === 'unauthorized' ? 'unauthenticated' : 'error';
+      }
+    });
   }
 
   async function disconnect(): Promise<void> {
     const sequence = ++refreshSequence;
     error = null;
 
-    try {
-      const response = await fetcher('/api/session', { method: 'DELETE' });
-      if (!response.ok) throw await responseFailure(response);
-      if (sequence !== refreshSequence) return;
-      config = config === null ? null : { ...config, authenticated: false };
-      status = null;
-      session = 'unauthenticated';
-    } catch (cause) {
-      if (sequence !== refreshSequence) return;
-      error = normalizeFailure(cause);
-      session = 'error';
-    }
+    await sessionOperations.run(async () => {
+      try {
+        const response = await fetcher('/api/session', { method: 'DELETE' });
+        if (!response.ok) throw await responseFailure(response);
+        if (sequence !== refreshSequence) return;
+        config = config === null ? null : { ...config, authenticated: false };
+        status = null;
+        session = 'unauthenticated';
+      } catch (cause) {
+        if (sequence !== refreshSequence) return;
+        error = normalizeFailure(cause);
+        session = 'error';
+      }
+    });
   }
 
   return {

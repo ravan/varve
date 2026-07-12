@@ -1,6 +1,7 @@
-import type { ExecutionMode, QueryParameters } from '../types';
+import type { ExecutionMode, JsonScalar, QueryParameters } from '../types';
 import { extractQueryShape } from './gql';
 import { extractObservedSchema, mergeObservedSchema, type ObservedSchema } from './schema';
+import { validateParameters } from './validation';
 
 export const WORKSPACE_STORAGE_VERSION = 1 as const;
 export const WORKSPACE_STORAGE_KEY = 'varve-explorer-workspace';
@@ -220,11 +221,11 @@ export function clearWorkspace(state: WorkspaceState, confirmed: boolean): Works
 
 export function serializeWorkspace(state: WorkspaceState): string {
   const workspace = {
-    frames: state.frames.map(safeFrame),
-    history: state.history.map((entry) => safeHistoryEntry(entry)),
-    favorites: state.favorites.map((favorite) => safeFavorite(favorite)),
-    observedSchema: cloneSafeValue(state.observedSchema),
-    settings: safeSettings(state.settings),
+    frames: compactMap(state.frames, encodeFrame),
+    history: compactMap(state.history, encodeHistoryEntry),
+    favorites: compactMap(state.favorites, encodeFavorite),
+    observedSchema: encodeObservedSchema(state.observedSchema),
+    settings: encodeSettings(state.settings),
   };
   const record: PersistedWorkspaceV1 = {
     version: WORKSPACE_STORAGE_VERSION,
@@ -238,14 +239,13 @@ export function deserializeWorkspace(serialized: string | null): WorkspaceState 
 
   try {
     const record: unknown = JSON.parse(serialized);
-    if (!isRecord(record) || record.version !== WORKSPACE_STORAGE_VERSION) return emptyWorkspace();
-    if (!isWorkspace(record.workspace)) return emptyWorkspace();
+    if (containsForbiddenKey(record)) return emptyWorkspace();
+    const workspace = decodePersistedWorkspace(record);
+    if (workspace === null) return emptyWorkspace();
     return freezeWorkspace({
-      frames: limitFrames(record.workspace.frames.map(safeFrame)),
-      history: record.workspace.history.slice(0, HISTORY_LIMIT).map(safeHistoryEntry),
-      favorites: record.workspace.favorites.map(safeFavorite),
-      observedSchema: cloneSafeValue(record.workspace.observedSchema) as ObservedSchema,
-      settings: safeSettings(record.workspace.settings),
+      ...workspace,
+      frames: limitFrames([...workspace.frames]),
+      history: workspace.history.slice(0, HISTORY_LIMIT),
     });
   } catch {
     return emptyWorkspace();
@@ -274,90 +274,340 @@ function observeGql(state: WorkspaceState, gql: string, timestamp: number): Work
   }
 }
 
-function safeFrame(frame: ExecutionFrame): ExecutionFrame {
-  return {
+function encodeFrame(frame: ExecutionFrame): ExecutionFrame | null {
+  return decodeFrame({
     id: frame.id,
     gql: frame.gql,
     mode: frame.mode,
-    params: cloneSafeValue(frame.params) as QueryParameters,
+    params: frame.params,
     parameterSummary: frame.parameterSummary,
     state: frame.state,
     startedAt: frame.startedAt,
     pinned: frame.pinned,
     ...(frame.finishedAt === undefined ? {} : { finishedAt: frame.finishedAt }),
     ...(frame.durationMs === undefined ? {} : { durationMs: frame.durationMs }),
-    ...(frame.state === 'running' || frame.response === undefined
-      ? {}
-      : { response: cloneSafeValue(frame.response) }),
-  };
+  });
 }
 
-function safeHistoryEntry(entry: HistoryEntry): HistoryEntry {
-  return {
+function encodeHistoryEntry(entry: HistoryEntry): HistoryEntry | null {
+  return decodeHistoryEntry({
     gql: entry.gql,
     mode: entry.mode,
-    params: cloneSafeValue(entry.params) as QueryParameters,
+    params: entry.params,
     finishedAt: entry.finishedAt,
     durationMs: entry.durationMs,
     rowCount: entry.rowCount,
     effectCount: entry.effectCount,
     outcome: entry.outcome,
     runCount: entry.runCount,
-  };
+  });
 }
 
-function safeFavorite(favorite: Favorite): Favorite {
-  const safe: Favorite = {
+function encodeFavorite(favorite: Favorite): Favorite | null {
+  return decodeFavorite({
     id: favorite.id,
     name: favorite.name,
     gql: favorite.gql,
     mode: favorite.mode,
-    params: cloneSafeValue(favorite.params) as QueryParameters,
+    params: favorite.params,
     createdAt: favorite.createdAt,
     updatedAt: favorite.updatedAt,
     ...(favorite.notes === undefined ? {} : { notes: favorite.notes }),
-  };
-  return safe;
+  });
 }
 
-function safeSettings(settings: WorkspaceSettings): WorkspaceSettings {
+function encodeSettings(settings: WorkspaceSettings): WorkspaceSettings {
+  return (
+    decodeSettings({
+      theme: settings.theme,
+      graphMotion: settings.graphMotion,
+      defaultResultTab: settings.defaultResultTab,
+      historyEnabled: settings.historyEnabled,
+      confirmBeforeClear: settings.confirmBeforeClear,
+    }) ?? DEFAULT_SETTINGS
+  );
+}
+
+function encodeObservedSchema(schema: ObservedSchema): ObservedSchema {
   return {
-    theme: settings.theme,
-    graphMotion: settings.graphMotion,
-    defaultResultTab: settings.defaultResultTab,
-    historyEnabled: settings.historyEnabled,
-    confirmBeforeClear: settings.confirmBeforeClear,
+    labels: encodeObservedRecord(schema.labels),
+    relationshipTypes: encodeObservedRecord(schema.relationshipTypes),
   };
 }
 
-function cloneSafeValue(value: unknown, ancestors = new Set<object>()): unknown {
-  if (value === null || typeof value !== 'object') return value;
-  if (ancestors.has(value)) throw new TypeError('Cannot persist circular workspace data');
-  ancestors.add(value);
-
-  let result: unknown;
-  if (Array.isArray(value)) {
-    result = value.map((item) => cloneSafeValue(item, ancestors));
-  } else {
-    result = Object.fromEntries(
-      Object.entries(value)
-        .filter(
-          ([key, item]) =>
-            !isSecretOrRawKey(key) &&
-            item !== undefined &&
-            typeof item !== 'function' &&
-            typeof item !== 'symbol',
-        )
-        .map(([key, item]) => [key, cloneSafeValue(item, ancestors)]),
-    );
+function encodeObservedRecord(
+  source: Readonly<Record<string, unknown>>,
+): Record<string, ObservedSchemaEntryValue> {
+  const entries: [string, ObservedSchemaEntryValue][] = [];
+  for (const [name, value] of Object.entries(source)) {
+    if (isForbiddenKey(name)) continue;
+    const entry = decodeObservedSchemaEntry(value);
+    if (entry !== null) entries.push([name, entry]);
   }
-  ancestors.delete(value);
-  return result;
+  return createSafeRecord(entries);
 }
 
-function isSecretOrRawKey(key: string): boolean {
-  const normalized = key.replaceAll('_', '').replaceAll('-', '').toLowerCase();
-  return normalized === 'raw' || normalized === 'rawresponse' || normalized.includes('token');
+interface ObservedSchemaEntryValue {
+  readonly count: number;
+  readonly firstSeen: number;
+  readonly lastSeen: number;
+  readonly starterGql: string;
+}
+
+function decodePersistedWorkspace(record: unknown): WorkspaceState | null {
+  if (!hasExactKeys(record, ['version', 'workspace'])) return null;
+  if (record.version !== WORKSPACE_STORAGE_VERSION || !isRecord(record.workspace)) return null;
+  if (
+    !hasExactKeys(record.workspace, [
+      'frames',
+      'history',
+      'favorites',
+      'observedSchema',
+      'settings',
+    ])
+  ) {
+    return null;
+  }
+
+  const frames = decodeArray(record.workspace.frames, decodeFrame);
+  const history = decodeArray(record.workspace.history, decodeHistoryEntry);
+  const favorites = decodeArray(record.workspace.favorites, decodeFavorite);
+  const observedSchema = decodeObservedSchema(record.workspace.observedSchema);
+  const settings = decodeSettings(record.workspace.settings);
+  if (
+    frames === null ||
+    history === null ||
+    favorites === null ||
+    observedSchema === null ||
+    settings === null
+  ) {
+    return null;
+  }
+
+  return { frames, history, favorites, observedSchema, settings };
+}
+
+function decodeFrame(value: unknown): ExecutionFrame | null {
+  if (
+    !hasExactKeys(
+      value,
+      ['id', 'gql', 'mode', 'params', 'parameterSummary', 'state', 'startedAt', 'pinned'],
+      ['finishedAt', 'durationMs'],
+    )
+  ) {
+    return null;
+  }
+  const params = decodeQueryParameters(value.params);
+  if (
+    params === null ||
+    typeof value.id !== 'string' ||
+    typeof value.gql !== 'string' ||
+    !isMode(value.mode) ||
+    typeof value.parameterSummary !== 'string' ||
+    !isFrameState(value.state) ||
+    !isFiniteNumber(value.startedAt) ||
+    (value.finishedAt !== undefined && !isFiniteNumber(value.finishedAt)) ||
+    (value.durationMs !== undefined && !isNonNegativeNumber(value.durationMs)) ||
+    typeof value.pinned !== 'boolean'
+  ) {
+    return null;
+  }
+
+  return {
+    id: value.id,
+    gql: value.gql,
+    mode: value.mode,
+    params,
+    parameterSummary: value.parameterSummary,
+    state: value.state,
+    startedAt: value.startedAt,
+    pinned: value.pinned,
+    ...(value.finishedAt === undefined ? {} : { finishedAt: value.finishedAt }),
+    ...(value.durationMs === undefined ? {} : { durationMs: value.durationMs }),
+  };
+}
+
+function decodeHistoryEntry(value: unknown): HistoryEntry | null {
+  if (
+    !hasExactKeys(value, [
+      'gql',
+      'mode',
+      'params',
+      'finishedAt',
+      'durationMs',
+      'rowCount',
+      'effectCount',
+      'outcome',
+      'runCount',
+    ])
+  ) {
+    return null;
+  }
+  const params = decodeQueryParameters(value.params);
+  if (
+    params === null ||
+    typeof value.gql !== 'string' ||
+    !isMode(value.mode) ||
+    !isFiniteNumber(value.finishedAt) ||
+    !isNonNegativeNumber(value.durationMs) ||
+    !isNonNegativeInteger(value.rowCount) ||
+    !isNonNegativeInteger(value.effectCount) ||
+    !isHistoryOutcome(value.outcome) ||
+    !isPositiveInteger(value.runCount)
+  ) {
+    return null;
+  }
+  return {
+    gql: value.gql,
+    mode: value.mode,
+    params,
+    finishedAt: value.finishedAt,
+    durationMs: value.durationMs,
+    rowCount: value.rowCount,
+    effectCount: value.effectCount,
+    outcome: value.outcome,
+    runCount: value.runCount,
+  };
+}
+
+function decodeFavorite(value: unknown): Favorite | null {
+  if (
+    !hasExactKeys(
+      value,
+      ['id', 'name', 'gql', 'mode', 'params', 'createdAt', 'updatedAt'],
+      ['notes'],
+    )
+  ) {
+    return null;
+  }
+  const params = decodeQueryParameters(value.params);
+  if (
+    params === null ||
+    typeof value.id !== 'string' ||
+    typeof value.name !== 'string' ||
+    typeof value.gql !== 'string' ||
+    !isMode(value.mode) ||
+    (value.notes !== undefined && typeof value.notes !== 'string') ||
+    !isFiniteNumber(value.createdAt) ||
+    !isFiniteNumber(value.updatedAt)
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    name: value.name,
+    gql: value.gql,
+    mode: value.mode,
+    params,
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+    ...(value.notes === undefined ? {} : { notes: value.notes }),
+  };
+}
+
+function decodeSettings(value: unknown): WorkspaceSettings | null {
+  if (
+    !hasExactKeys(value, [
+      'theme',
+      'graphMotion',
+      'defaultResultTab',
+      'historyEnabled',
+      'confirmBeforeClear',
+    ]) ||
+    (value.theme !== 'system' && value.theme !== 'light' && value.theme !== 'dark') ||
+    typeof value.graphMotion !== 'boolean' ||
+    (value.defaultResultTab !== 'graph' &&
+      value.defaultResultTab !== 'table' &&
+      value.defaultResultTab !== 'raw') ||
+    typeof value.historyEnabled !== 'boolean' ||
+    typeof value.confirmBeforeClear !== 'boolean'
+  ) {
+    return null;
+  }
+  return {
+    theme: value.theme,
+    graphMotion: value.graphMotion,
+    defaultResultTab: value.defaultResultTab,
+    historyEnabled: value.historyEnabled,
+    confirmBeforeClear: value.confirmBeforeClear,
+  };
+}
+
+function decodeObservedSchema(value: unknown): ObservedSchema | null {
+  if (!hasExactKeys(value, ['labels', 'relationshipTypes'])) return null;
+  const labels = decodeObservedRecord(value.labels);
+  const relationshipTypes = decodeObservedRecord(value.relationshipTypes);
+  return labels === null || relationshipTypes === null ? null : { labels, relationshipTypes };
+}
+
+function decodeObservedRecord(value: unknown): Record<string, ObservedSchemaEntryValue> | null {
+  if (!isRecord(value) || !hasSafePrototype(value)) return null;
+  const entries: [string, ObservedSchemaEntryValue][] = [];
+  for (const [name, entryValue] of Object.entries(value)) {
+    if (isForbiddenKey(name)) return null;
+    const entry = decodeObservedSchemaEntry(entryValue);
+    if (entry === null) return null;
+    entries.push([name, entry]);
+  }
+  return createSafeRecord(entries);
+}
+
+function decodeObservedSchemaEntry(value: unknown): ObservedSchemaEntryValue | null {
+  if (
+    !hasExactKeys(value, ['count', 'firstSeen', 'lastSeen', 'starterGql']) ||
+    !isNonNegativeInteger(value.count) ||
+    !isFiniteNumber(value.firstSeen) ||
+    !isFiniteNumber(value.lastSeen) ||
+    typeof value.starterGql !== 'string'
+  ) {
+    return null;
+  }
+  return {
+    count: value.count,
+    firstSeen: value.firstSeen,
+    lastSeen: value.lastSeen,
+    starterGql: value.starterGql,
+  };
+}
+
+function decodeQueryParameters(value: unknown): QueryParameters | null {
+  if (
+    !isRecord(value) ||
+    !hasSafePrototype(value) ||
+    containsForbiddenKey(value) ||
+    !Object.values(value).every(isParameterScalarShape)
+  ) {
+    return null;
+  }
+
+  let result: ReturnType<typeof validateParameters>;
+  try {
+    result = validateParameters(JSON.stringify(value));
+  } catch {
+    return null;
+  }
+  if (!result.ok) return null;
+  return createSafeRecord(
+    Object.entries(result.value).map(([key, scalar]) => [key, cloneJsonScalar(scalar)]),
+  );
+}
+
+function isParameterScalarShape(value: unknown): boolean {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    return true;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && (!Number.isInteger(value) || Number.isSafeInteger(value));
+  }
+  return (
+    hasExactKeys(value, ['$bytes']) && hasSafePrototype(value) && typeof value.$bytes === 'string'
+  );
+}
+
+function cloneJsonScalar(value: JsonScalar): JsonScalar {
+  return typeof value === 'object' && value !== null
+    ? (createSafeRecord([['$bytes', value.$bytes]]) as { $bytes: string })
+    : value;
 }
 
 function freezeWorkspace(state: WorkspaceState): WorkspaceState {
@@ -446,100 +696,77 @@ function isCompletedUnpinned(frame: ExecutionFrame): boolean {
   return frame.state !== 'running' && !frame.pinned;
 }
 
-function isWorkspace(value: unknown): value is WorkspaceState {
+function compactMap<T, U>(values: readonly T[], encode: (value: T) => U | null): U[] {
+  const result: U[] = [];
+  for (const value of values) {
+    const encoded = encode(value);
+    if (encoded !== null) result.push(encoded);
+  }
+  return result;
+}
+
+function decodeArray<T>(value: unknown, decode: (item: unknown) => T | null): T[] | null {
+  if (!Array.isArray(value)) return null;
+  const result: T[] = [];
+  for (const item of value) {
+    const decoded = decode(item);
+    if (decoded === null) return null;
+    result.push(decoded);
+  }
+  return result;
+}
+
+function containsForbiddenKey(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsForbiddenKey);
   if (!isRecord(value)) return false;
-  if (
-    !Array.isArray(value.frames) ||
-    !Array.isArray(value.history) ||
-    !Array.isArray(value.favorites) ||
-    !isObservedSchema(value.observedSchema) ||
-    !isSettings(value.settings)
-  ) {
-    return false;
+  return Object.entries(value).some(
+    ([key, item]) => isForbiddenKey(key) || containsForbiddenKey(item),
+  );
+}
+
+function isForbiddenKey(key: string): boolean {
+  const lower = key.toLowerCase();
+  if (lower === '__proto__' || lower === 'constructor' || lower === 'prototype') return true;
+  const normalized = lower.replaceAll('_', '').replaceAll('-', '');
+  return (
+    normalized === 'raw' ||
+    normalized === 'rawresponse' ||
+    normalized.includes('token') ||
+    normalized.includes('authorization') ||
+    normalized.includes('credential') ||
+    normalized.includes('secret')
+  );
+}
+
+function hasExactKeys(
+  value: unknown,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): value is Record<string, unknown> {
+  if (!isRecord(value) || !hasSafePrototype(value)) return false;
+  const keys = Object.keys(value);
+  const allowed = new Set([...required, ...optional]);
+  return (
+    required.every((key) => Object.hasOwn(value, key)) && keys.every((key) => allowed.has(key))
+  );
+}
+
+function hasSafePrototype(value: object): boolean {
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function createSafeRecord<T>(entries: readonly (readonly [string, T])[]): Record<string, T> {
+  const record = Object.create(null) as Record<string, T>;
+  for (const [key, value] of entries) {
+    Object.defineProperty(record, key, {
+      configurable: false,
+      enumerable: true,
+      value,
+      writable: false,
+    });
   }
-  return (
-    value.frames.every(isFrame) &&
-    value.history.every(isHistoryEntry) &&
-    value.favorites.every(isFavorite)
-  );
-}
-
-function isFrame(value: unknown): value is ExecutionFrame {
-  return (
-    isRecord(value) &&
-    typeof value.id === 'string' &&
-    typeof value.gql === 'string' &&
-    isMode(value.mode) &&
-    isRecord(value.params) &&
-    typeof value.parameterSummary === 'string' &&
-    isFrameState(value.state) &&
-    isFiniteNumber(value.startedAt) &&
-    (value.finishedAt === undefined || isFiniteNumber(value.finishedAt)) &&
-    (value.durationMs === undefined || isNonNegativeNumber(value.durationMs)) &&
-    typeof value.pinned === 'boolean'
-  );
-}
-
-function isHistoryEntry(value: unknown): value is HistoryEntry {
-  return (
-    isRecord(value) &&
-    typeof value.gql === 'string' &&
-    isMode(value.mode) &&
-    isRecord(value.params) &&
-    isFiniteNumber(value.finishedAt) &&
-    isNonNegativeNumber(value.durationMs) &&
-    isNonNegativeInteger(value.rowCount) &&
-    isNonNegativeInteger(value.effectCount) &&
-    isHistoryOutcome(value.outcome) &&
-    isPositiveInteger(value.runCount)
-  );
-}
-
-function isFavorite(value: unknown): value is Favorite {
-  return (
-    isRecord(value) &&
-    typeof value.id === 'string' &&
-    typeof value.name === 'string' &&
-    typeof value.gql === 'string' &&
-    isMode(value.mode) &&
-    isRecord(value.params) &&
-    (value.notes === undefined || typeof value.notes === 'string') &&
-    isFiniteNumber(value.createdAt) &&
-    isFiniteNumber(value.updatedAt)
-  );
-}
-
-function isSettings(value: unknown): value is WorkspaceSettings {
-  return (
-    isRecord(value) &&
-    (value.theme === 'system' || value.theme === 'light' || value.theme === 'dark') &&
-    typeof value.graphMotion === 'boolean' &&
-    (value.defaultResultTab === 'graph' ||
-      value.defaultResultTab === 'table' ||
-      value.defaultResultTab === 'raw') &&
-    typeof value.historyEnabled === 'boolean' &&
-    typeof value.confirmBeforeClear === 'boolean'
-  );
-}
-
-function isObservedSchema(value: unknown): value is ObservedSchema {
-  if (!isRecord(value) || !isRecord(value.labels) || !isRecord(value.relationshipTypes)) {
-    return false;
-  }
-  return (
-    Object.values(value.labels).every(isObservedSchemaEntry) &&
-    Object.values(value.relationshipTypes).every(isObservedSchemaEntry)
-  );
-}
-
-function isObservedSchemaEntry(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    isNonNegativeInteger(value.count) &&
-    isFiniteNumber(value.firstSeen) &&
-    isFiniteNumber(value.lastSeen) &&
-    typeof value.starterGql === 'string'
-  );
+  return record;
 }
 
 function isMode(value: unknown): value is ExecutionMode {
