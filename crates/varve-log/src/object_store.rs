@@ -5,9 +5,10 @@
 //! PUT that returns Ok is exactly as durable as the backend makes it.
 //!
 //! `trim` is a documented NO-OP: the sovereign `ObjectStore` trait has no
-//! delete (slice-4 decision); superseded log objects are swept by slice-8
-//! GC. Replay cost stays bounded regardless, because recovery reads only
-//! `tail(manifest.watermark)`.
+//! delete on the `Log` trait itself (slice-4 decision); superseded log
+//! objects are instead swept by GC (`Db::gc_once`) once wholly below the
+//! minimum retained manifest watermark. Replay cost stays bounded
+//! regardless, because recovery reads only `tail(manifest.watermark)`.
 
 use crate::log::{Log, LogError};
 use crate::record::LogRecord;
@@ -189,11 +190,12 @@ impl Log for ObjectStoreLog {
         Ok(out)
     }
 
-    /// NO-OP (documented): the sovereign store exposes no delete, so
-    /// superseded objects stay until slice-8 GC. The `Log::trim` contract
-    /// ("earlier records MAY be retained") is satisfied trivially, and
-    /// positions never regress because `next` is tracked independently of
-    /// what a trim could remove.
+    /// NO-OP (documented): the sovereign store exposes no delete on this
+    /// trait, so superseded objects stay until GC (`Db::gc_once`) sweeps
+    /// them once wholly below the minimum retained manifest watermark. The
+    /// `Log::trim` contract ("earlier records MAY be retained") is satisfied
+    /// trivially, and positions never regress because `next` is tracked
+    /// independently of what a trim could remove.
     async fn trim(&self, _up_to: LogPosition) -> Result<(), LogError> {
         Ok(())
     }
