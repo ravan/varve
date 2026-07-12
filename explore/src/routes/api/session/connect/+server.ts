@@ -7,6 +7,7 @@ import type { ExplorerError } from '$lib/types';
 import type { RequestHandler } from './$types';
 
 const MAX_TOKEN_BYTES = 4096;
+const MAX_COOKIE_VALUE_BYTES = 4096;
 const MAX_CONNECT_BODY_BYTES = 32_768;
 
 function jsonError(message: string, status: number): Response {
@@ -82,6 +83,10 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
     return jsonError('Token is too large', 413);
   }
   if (!isSafeBearerToken(value.token)) return jsonError('Token is invalid', 400);
+  const encodedSession = encodeSession(value.token);
+  if (Buffer.byteLength(encodedSession, 'utf8') > MAX_COOKIE_VALUE_BYTES) {
+    return jsonError('Token cannot be stored in a session cookie', 400);
+  }
 
   const config = loadServerConfig(env);
   const response = await forwardVarve({
@@ -92,6 +97,6 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
   });
   if (!response.ok) return response;
 
-  cookies.set(SESSION_COOKIE_NAME, encodeSession(value.token), sessionCookieOptions(dev));
+  cookies.set(SESSION_COOKIE_NAME, encodedSession, sessionCookieOptions(dev));
   return response;
 };

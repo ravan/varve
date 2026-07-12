@@ -32,18 +32,18 @@ interface StableError {
   message: string;
 }
 
-const STABLE_UPSTREAM_ERRORS: Partial<Record<ExplorerErrorCode, StableError>> = {
-  unauthorized: { status: 401, message: 'Authentication required' },
-  invalid_request: { status: 400, message: 'Invalid request' },
-  not_acceptable: { status: 406, message: 'Requested response format is not supported' },
-  basis_timeout: { status: 408, message: 'Basis wait timed out' },
-  backpressure: { status: 429, message: 'Varve is busy; retry later' },
-  misdirected_request: { status: 421, message: 'Writer routing failed' },
-  writer_unavailable: { status: 503, message: 'Writer is unavailable' },
-  writer_fenced: { status: 503, message: 'Writer lease changed; retry' },
-  follower_failed: { status: 503, message: 'Query follower failed' },
-  internal: { status: 500, message: 'Varve request failed' },
-};
+const STABLE_UPSTREAM_ERRORS = new Map<ExplorerErrorCode, StableError>([
+  ['unauthorized', { status: 401, message: 'Authentication required' }],
+  ['invalid_request', { status: 400, message: 'Invalid request' }],
+  ['not_acceptable', { status: 406, message: 'Requested response format is not supported' }],
+  ['basis_timeout', { status: 408, message: 'Basis wait timed out' }],
+  ['backpressure', { status: 429, message: 'Varve is busy; retry later' }],
+  ['misdirected_request', { status: 421, message: 'Writer routing failed' }],
+  ['writer_unavailable', { status: 503, message: 'Writer is unavailable' }],
+  ['writer_fenced', { status: 503, message: 'Writer lease changed; retry' }],
+  ['follower_failed', { status: 503, message: 'Query follower failed' }],
+  ['internal', { status: 500, message: 'Varve request failed' }],
+]);
 
 function errorResponse(
   code: ExplorerErrorCode,
@@ -82,10 +82,10 @@ function isErrorResponse(value: unknown): value is ErrorResponse {
 }
 
 export function isSafeBearerToken(token: string): boolean {
-  if (token.length === 0 || Buffer.byteLength(token, 'utf8') > 4096) return false;
+  if (Buffer.byteLength(token, 'utf8') > 4096) return false;
   for (let index = 0; index < token.length; index += 1) {
     const code = token.charCodeAt(index);
-    if (code <= 31 || code === 127) return false;
+    if (code < 33 || code > 126) return false;
   }
   return true;
 }
@@ -98,12 +98,12 @@ export function normalizeUpstreamError(
   if (upstreamStatus === 401) {
     return errorResponse('unauthorized', 'Authentication required', 401);
   }
-  if (!isErrorResponse(value) || !(value.code in STABLE_UPSTREAM_ERRORS)) {
+  if (!isErrorResponse(value)) {
     return errorResponse('malformed_response', 'Varve returned an invalid response', 502);
   }
 
-  const code = value.code as keyof typeof STABLE_UPSTREAM_ERRORS;
-  const stable = STABLE_UPSTREAM_ERRORS[code];
+  const code = value.code as ExplorerErrorCode;
+  const stable = STABLE_UPSTREAM_ERRORS.get(code);
   if (stable === undefined) {
     return errorResponse('malformed_response', 'Varve returned an invalid response', 502);
   }
@@ -226,9 +226,14 @@ export async function forwardVarve(input: ForwardInput): Promise<Response> {
   }
 
   const fetchImplementation = input.fetch ?? globalThis.fetch;
-  const headers = new Headers({ accept: JSON_CONTENT_TYPE });
-  if (input.token !== undefined) headers.set('authorization', `Bearer ${input.token}`);
-  if (body !== undefined) headers.set('content-type', JSON_CONTENT_TYPE);
+  let headers: Headers;
+  try {
+    headers = new Headers({ accept: JSON_CONTENT_TYPE });
+    if (input.token !== undefined) headers.set('authorization', `Bearer ${input.token}`);
+    if (body !== undefined) headers.set('content-type', JSON_CONTENT_TYPE);
+  } catch {
+    return errorResponse('unauthorized', 'Authentication required', 401);
+  }
   const signal = AbortSignal.timeout(input.config.timeoutMs);
 
   const send = async (target: URL): Promise<Response> => {

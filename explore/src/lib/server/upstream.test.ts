@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from './config';
-import { forwardVarve } from './upstream';
+import { forwardVarve, isSafeBearerToken, normalizeUpstreamError } from './upstream';
 
 const TOKEN = 'super-secret-token';
 
@@ -51,6 +51,66 @@ async function expectError(response: Response, expected: object) {
 }
 
 describe('forwardVarve', () => {
+  it.each(['toString', 'constructor'])(
+    'rejects inherited stable-error table key %s',
+    async (code) => {
+      const response = normalizeUpstreamError(500, { code, message: 'untrusted detail' });
+
+      expect(response.status).toBe(502);
+      await expectError(response, {
+        code: 'malformed_response',
+        message: 'Varve returned an invalid response',
+      });
+    },
+  );
+
+  it('accepts only empty or visible ASCII bearer token values', () => {
+    expect(isSafeBearerToken('')).toBe(true);
+    expect(isSafeBearerToken('AZaz09!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~')).toBe(true);
+    expect(isSafeBearerToken('contains space')).toBe(false);
+    expect(isSafeBearerToken('emoji-😀')).toBe(false);
+    expect(isSafeBearerToken('control\ncharacter')).toBe(false);
+  });
+
+  it.each(['emoji-😀', 'control\ncharacter'])(
+    'normalizes an unsafe bearer token without calling fetch',
+    async (token) => {
+      const fetch = vi.fn();
+
+      const response = await forwardVarve(makeInput({ fetch, token }));
+
+      expect(response.status).toBe(401);
+      expect(fetch).not.toHaveBeenCalled();
+      await expectError(response, {
+        code: 'unauthorized',
+        message: 'Authentication required',
+      });
+    },
+  );
+
+  it('normalizes authorization header construction failures', async () => {
+    const originalSet = Headers.prototype.set;
+    const set = vi.spyOn(Headers.prototype, 'set').mockImplementation(function (
+      this: Headers,
+      name: string,
+      value: string,
+    ) {
+      if (name.toLowerCase() === 'authorization') throw new TypeError('header rejected');
+      return originalSet.call(this, name, value);
+    });
+
+    try {
+      const fetch = vi.fn();
+      const response = await forwardVarve(makeInput({ fetch }));
+
+      expect(response.status).toBe(401);
+      expect(fetch).not.toHaveBeenCalled();
+      await expectError(response, { code: 'unauthorized' });
+    } finally {
+      set.mockRestore();
+    }
+  });
+
   it('joins only the configured origin and attaches the bearer token', async () => {
     const fetch = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ roles: ['query'] }), {
