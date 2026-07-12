@@ -365,29 +365,15 @@ fn encode_meta(pages: &[PageMeta]) -> Result<Vec<u8>, IndexError> {
 /// over a bug of our own (owner-approved, narrow override of the plan's
 /// general no-`catch_unwind` rule for this specific case).
 ///
-/// Panic-hook note: `catch_unwind` alone still lets the *current* panic hook
-/// run before the unwind is caught — and empirically (re-fuzzing this exact
-/// guard) that hook is not always benign. `libfuzzer-sys`'s harness
-/// (`initialize()` in its source) deliberately installs a process-global
-/// hook that calls `default_hook(info); std::process::abort()` on ANY
-/// panic, specifically so fuzzed code can't hide bugs behind its own
-/// `catch_unwind` — and it runs *before* unwinding starts, so it defeats
-/// this guard outright when compiled into a `cargo fuzz` target (confirmed:
-/// without the scoped swap below, `cargo fuzz run block_meta` still reports
-/// a "crash" for arrow panics even though this function's `catch_unwind`
-/// executes correctly under plain `cargo test`). We therefore scope-swap
-/// the hook to a no-op for the width of the `catch_unwind` call and restore
-/// the previous hook immediately after, which both silences the routine
-/// "thread panicked at ..." stderr for expected corrupt-input rejections
-/// AND lets our `catch_unwind` see the panic instead of the process
-/// aborting first. `std::panic::set_hook`/`take_hook` are process-global,
-/// so this briefly widens a race window: a genuine, unrelated panic on
-/// another thread during this narrow scope loses its hook-printed
-/// diagnostic (it still unwinds/propagates/fails its own test normally —
-/// only the stderr text is affected). Judged acceptable given how
-/// short-lived this decode call is and that no correctness is at stake,
-/// only diagnostic text; the alternative (never scoping the hook) makes the
-/// fuzz targets unable to demonstrate survival at all, which is worse.
+/// Panic-hook note: the `catch_unwind` and its fuzz-only panic-hook handling
+/// live in [`crate::codec::catch_arrow_panic`]. `libfuzzer-sys` installs a
+/// process-global abort-before-unwind hook that would defeat `catch_unwind`
+/// inside a `cargo fuzz` target, so — and ONLY under `--cfg fuzzing` — that
+/// helper swaps a no-op hook around the call. Production and `cargo test`
+/// builds do NOT touch the process-global hook: swapping it around a decode
+/// that runs concurrently with other decodes raced (two interleaved swaps
+/// could leave a no-op hook installed for good), so those builds use a bare
+/// `catch_unwind` and simply let arrow's panic message reach stderr (harmless).
 ///
 /// The `catch_unwind` guard handles arrow's UNWINDING panic classes only.
 /// Fuzzing surfaced a fourth, distinct class it cannot reach: arrow's
@@ -398,12 +384,7 @@ fn encode_meta(pages: &[PageMeta]) -> Result<Vec<u8>, IndexError> {
 /// before arrow sees the bytes.
 pub fn decode_meta(bytes: &[u8]) -> Result<Vec<PageMeta>, IndexError> {
     crate::codec::validate_ipc_framing(bytes)?;
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode_meta_uncaught(bytes)));
-    std::panic::set_hook(prev_hook);
-    match result {
+    match crate::codec::catch_arrow_panic(|| decode_meta_uncaught(bytes)) {
         Ok(result) => result,
         Err(_) => Err(IndexError::Codec(
             "arrow IPC decode panicked (corrupt input)".into(),

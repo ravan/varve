@@ -45,6 +45,12 @@ http-body-util = "0.1"
 rustyline = "18"
 criterion = "0.7"
 
+[workspace.lints.rust]
+# `fuzzing` is set by cargo-fuzz (`--cfg fuzzing`) only during a `cargo fuzz`
+# build; declare it so the normal workspace build doesn't flag it as an
+# unexpected cfg (varve-index's arrow-IPC panic guard is cfg(fuzzing)-gated).
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"

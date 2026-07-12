@@ -339,14 +339,11 @@ pub(crate) fn corrupt_body_length_to_huge(stream: &[u8]) -> Vec<u8> {
 /// of `bytes` with no shared mutable state, so catching the unwind here and
 /// converting it to a clean `IndexError` at this pure-function trust
 /// boundary is sound (owner-approved, narrow override of the plan's general
-/// no-`catch_unwind` rule for this specific case — see `decode_meta` in
-/// `block.rs` for the mirrored guard AND the panic-hook scope-swap
-/// reasoning (both why we swap the hook and why the resulting cross-thread
-/// race window is judged acceptable), which applies identically here: this
-/// guard was empirically re-fuzzed and, without the scoped no-op hook
-/// swap, `libfuzzer-sys`'s abort-before-unwind hook defeats `catch_unwind`
-/// outright inside a `cargo fuzz` target even though it works correctly
-/// under plain `cargo test`.
+/// no-`catch_unwind` rule for this specific case). The `catch_unwind` and the
+/// fuzz-only panic-hook handling live in [`catch_arrow_panic`] — production
+/// and `cargo test` builds do NOT touch the process-global panic hook (that
+/// swap raced across concurrent decodes); only `cargo fuzz` swaps it, to
+/// defeat `libfuzzer-sys`'s abort-before-unwind hook.
 ///
 /// The `catch_unwind` guard handles arrow's UNWINDING panic classes only.
 /// Fuzzing surfaced a fourth, distinct class it cannot reach: arrow's
@@ -355,15 +352,37 @@ pub(crate) fn corrupt_body_length_to_huge(stream: &[u8]) -> Vec<u8> {
 /// allocator with no unwind. [`validate_ipc_framing`] runs first (outside the
 /// guard) to bound that allocation against the actual input size before arrow
 /// sees the bytes.
+/// Runs an arrow-IPC decode under `catch_unwind`, turning arrow-rs's
+/// adversarial-input panics into a caught unwind the decoders convert to a
+/// clean `IndexError`.
+///
+/// Under `cargo fuzz` (`--cfg fuzzing`) ONLY, `libfuzzer-sys` installs an
+/// abort-before-unwind panic hook that defeats `catch_unwind`, so there we swap
+/// a no-op hook around the call so the unwind is actually caught. In every
+/// other build (production, `cargo test`) we DELIBERATELY do NOT touch the
+/// process-global panic hook: `set_hook`/`take_hook` are process-global, so
+/// swapping them around a decode that runs concurrently with other decodes (as
+/// it does on query-node reads and recovery) races — two interleaved swaps can
+/// leave a no-op hook permanently installed, silencing all future panic
+/// diagnostics. A bare `catch_unwind` catches arrow's unwinding panics fine;
+/// the only cost is arrow printing its panic message to stderr, which is
+/// harmless.
+pub(crate) fn catch_arrow_panic<T>(decode: impl FnOnce() -> T) -> std::thread::Result<T> {
+    #[cfg(fuzzing)]
+    let prev_hook = {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        prev
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode));
+    #[cfg(fuzzing)]
+    std::panic::set_hook(prev_hook);
+    result
+}
+
 pub fn decode_events(bytes: &[u8]) -> Result<Vec<Event>, IndexError> {
     validate_ipc_framing(bytes)?;
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        decode_events_uncaught(bytes)
-    }));
-    std::panic::set_hook(prev_hook);
-    match result {
+    match catch_arrow_panic(|| decode_events_uncaught(bytes)) {
         Ok(result) => result,
         Err(_) => Err(IndexError::Codec(
             "arrow IPC decode panicked (corrupt input)".into(),
