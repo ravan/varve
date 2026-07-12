@@ -1,0 +1,37 @@
+[node]
+roles = ["writer", "query", "compactor"]
+tail_poll_interval_ms = 200
+tail_batch_records = 1024
+basis_timeout_ms = 5000
+
+[log]
+backend = "local"
+group_commit_window_ms = 0
+
+[log.local]
+dir = ".varve-explorer-dev/log"
+
+[storage]
+backend = "local"
+max_block_rows = 100000
+flush_interval_ms = 300000
+
+[storage.local]
+dir = ".varve-explorer-dev/store"
+
+[server]
+backend = "http"
+
+[server.http]
+listen = "127.0.0.1:8080"
+advertised_address = "http://127.0.0.1:8080"
+max_body_bytes = "8MiB"
+
+[auth]
+backend = "static"
+
+[auth.static]
+tokens = [{ subject = "varve-explorer-dev", token = "varve-explorer-dev-token" }]
+
+[metrics]
+backend = "prometheus"

@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev",
+    "dev:varve": "cargo run --manifest-path ../Cargo.toml -p varve-server --bin varved -- --config varve.dev.toml",
     "build": "vite build",
     "preview": "vite preview",
     "start": "node build",
@@ -14,7 +15,8 @@
     "lint": "oxlint .",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
-    "licenses": "license-checker-rseidelsohn --production --onlyAllow 'MIT;ISC;Apache-2.0;BSD-2-Clause;BSD-3-Clause;0BSD;CC0-1.0;BlueOak-1.0.0;MPL-2.0'"
+    "licenses": "license-checker-rseidelsohn --production --onlyAllow 'MIT;ISC;Apache-2.0;BSD-2-Clause;BSD-3-Clause;0BSD;CC0-1.0;BlueOak-1.0.0' --excludePackages 'lightningcss@1.32.0'",
+    "verify": "pnpm test && pnpm check && pnpm lint && pnpm format:check && pnpm build && pnpm run licenses"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.4",

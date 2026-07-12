@@ -4,12 +4,12 @@ import { loadServerConfig } from './config';
 describe('loadServerConfig', () => {
   it('requires an absolute http(s) target in production', () => {
     expect(() => loadServerConfig({ NODE_ENV: 'production' })).toThrow('VARVE_URL');
-    expect(() =>
-      loadServerConfig({ NODE_ENV: 'production', VARVE_URL: 'file:///tmp/db' }),
-    ).toThrow('VARVE_URL');
-    expect(() =>
-      loadServerConfig({ NODE_ENV: 'production', VARVE_URL: '/relative' }),
-    ).toThrow('VARVE_URL');
+    expect(() => loadServerConfig({ NODE_ENV: 'production', VARVE_URL: 'file:///tmp/db' })).toThrow(
+      'VARVE_URL',
+    );
+    expect(() => loadServerConfig({ NODE_ENV: 'production', VARVE_URL: '/relative' })).toThrow(
+      'VARVE_URL',
+    );
   });
 
   it('normalizes writer origins and supplies exact bounded defaults', () => {
@@ -33,9 +33,9 @@ describe('loadServerConfig', () => {
       'https://query.example.test/#internal',
       'https://query.example.test#',
     ]) {
-      expect(() =>
-        loadServerConfig({ NODE_ENV: 'production', VARVE_URL: target }),
-      ).toThrow('VARVE_URL');
+      expect(() => loadServerConfig({ NODE_ENV: 'production', VARVE_URL: target })).toThrow(
+        'VARVE_URL',
+      );
     }
   });
 
@@ -92,9 +92,9 @@ describe('loadServerConfig', () => {
   });
 
   it('does not recognize the obsolete timeout variable', () => {
-    expect(
-      loadServerConfig({ NODE_ENV: 'development', VARVE_TIMEOUT_MS: '2500' }).timeoutMs,
-    ).toBe(60_000);
+    expect(loadServerConfig({ NODE_ENV: 'development', VARVE_TIMEOUT_MS: '2500' }).timeoutMs).toBe(
+      60_000,
+    );
   });
 
   it('preserves an allowed target path and query for upstream use', () => {
