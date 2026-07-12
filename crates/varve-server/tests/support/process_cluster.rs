@@ -1,7 +1,10 @@
-//! Multi-process `varved` cluster harness (roadmap slice 9, task 14).
+//! Multi-process `varved` cluster harness (roadmap slice 9, task 14; extended
+//! to N query nodes in slice 11, task 9).
 //!
 //! [`ProcessCluster::start`] spawns one Writer+Query+Compactor process and two
-//! Query-only processes, all sharing ONE temporary local log/store directory.
+//! Query-only processes; [`ProcessCluster::start_with_query_nodes`] spawns
+//! one Writer+Query+Compactor process plus an arbitrary number of Query-only
+//! processes. All processes share ONE temporary local log/store directory.
 //! Every process is a real `varved` binary (`env!("CARGO_BIN_EXE_varved")`).
 //!
 //! Readiness is never a fixed sleep: a per-child stdout thread parses the
@@ -99,11 +102,18 @@ impl Drop for ProcessCluster {
 }
 
 impl ProcessCluster {
-    /// Starts the three-process cluster against a fresh shared temp dir. The
-    /// writer starts first (it creates the log/store and publishes
-    /// `v1/writer.json`); the two query nodes follow. Any partially started
-    /// node is killed if a later node fails to come up.
+    /// Starts the three-process cluster (one writer, two query-only nodes)
+    /// against a fresh shared temp dir. Shorthand for
+    /// [`ProcessCluster::start_with_query_nodes`]`(2)`.
     pub async fn start() -> Result<ProcessCluster> {
+        ProcessCluster::start_with_query_nodes(2).await
+    }
+
+    /// Starts a `1 + query_nodes`-process cluster against a fresh shared temp
+    /// dir. The writer starts first (it creates the log/store and publishes
+    /// `v1/writer.json`); the query-only nodes follow, in order. Any
+    /// partially started node is killed if a later node fails to come up.
+    pub async fn start_with_query_nodes(query_nodes: usize) -> Result<ProcessCluster> {
         let tempdir = TempDir::new()?;
         let log_dir = tempdir.path().join("log");
         let store_dir = tempdir.path().join("store");
@@ -143,7 +153,7 @@ impl ProcessCluster {
             }
         }
 
-        for index in 1..=2 {
+        for index in 1..=query_nodes {
             let name = format!("query{index}");
             let config = node_config(&["query"], "127.0.0.1:0", None, &log_dir, &store_dir);
             let file = format!("node-{name}.toml");
@@ -171,7 +181,7 @@ impl ProcessCluster {
         &self.writer_advertised
     }
 
-    /// Base URLs of the two Query-only nodes, in creation order.
+    /// Base URLs of the query-only nodes, in creation order.
     pub fn query_urls(&self) -> Vec<&str> {
         self.nodes[1..]
             .iter()
