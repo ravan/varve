@@ -1868,7 +1868,7 @@ dead API, misleading docs, or untested reject paths that STATUS.md already flagg
 
 **Interfaces:** no new public API; item (g) DELETES one public enum variant.
 
-- [ ] **(a) CLI rejects invalid `--label`/`--graph` identifiers — durable tests.**
+- [x] **(a) CLI rejects invalid `--label`/`--graph` identifiers — durable tests.**
   Files: `crates/varve-cli/tests/transfer.rs`. Tests first: drive the import path with label
   `"bad-ident!"` and (separately) graph `"1nope"`; assert the error message names the invalid
   identifier and NO client call is made (mirror the existing invalid-property-KEY test in the same
@@ -1877,52 +1877,52 @@ dead API, misleading docs, or untested reject paths that STATUS.md already flagg
   reject path already works and the tests simply pin it (commit as `test:`).
   Commit: `test: pin import label/graph identifier rejection`.
 
-- [ ] **(b) `cli_help.rs` asserts literal `--help` output.**
+- [x] **(b) `cli_help.rs` asserts literal `--help` output.**
   Files: `crates/varve-cli/tests/cli_help.rs`. Render help via the clap `Command` from
   `varve-cli/src/cli.rs` (`Command::render_long_help()`), assert it contains the literal
   substrings `"import"`, `"export"`, `"admin"`, `"shell"`, `"--dir"`, `"--url"`, `"--token"`.
   Commit: `test: assert varve --help lists every subcommand and selector`.
 
-- [ ] **(c) `TxResponse::from_receipt` synthetic-instant decision — keep + pin.**
+- [x] **(c) `TxResponse::from_receipt` synthetic-instant decision — keep + pin.**
   Files: `crates/varve-server/src/api.rs` (line ~71 + tests). DECISION (record in STATUS): keep
   the `<micros>us` fallback for out-of-chrono-range instants (unreachable from real receipts;
   public API stays total). Add a unit test constructing an extreme synthetic receipt and asserting
   the exact fallback string, plus a rustdoc line on `from_receipt` documenting it.
   Commit: `test: pin synthetic-instant formatting on TxResponse::from_receipt`.
 
-- [ ] **(d) Move the strayed mutation doc comment.**
+- [x] **(d) Move the strayed mutation doc comment.**
   Files: `crates/varve-engine/src/db.rs`. The doc comment on `publish_writer` (~line 1178)
   describes mutation execution — move it to `Db::execute`; write `publish_writer` its own
   accurate doc (canonical-JSON plain PUT of the advertisement, NOT coordination).
   Commit: `docs: put the mutation doc comment back on Db::execute`.
 
-- [ ] **(e) Probe-path diagnostic asserts.**
+- [x] **(e) Probe-path diagnostic asserts.**
   Files: `crates/varve-testkit/tests/cas_failover_backends.rs` (~line 73 onward). Replace bare
   `.unwrap()`/`.unwrap_err()` on the refusal-path assertions with `expect`/`assert!` messages
   that include the probe verdict/report, so a live-backend failure names WHAT the probe saw.
   Commit: `test: diagnostic asserts on the cas-failover probe path`.
 
-- [ ] **(f) `FenceMap`: extract `is_dead` + test `EpochExhausted`.**
+- [x] **(f) `FenceMap`: extract `is_dead` + test `EpochExhausted`.**
   Files: `crates/varve-engine/src/coord/fence.rs`. Test first: a `jump` at epoch `u16::MAX`
   returns the `EpochExhausted` error (currently untested). Then extract the duplicated
   dead-condition shared by `is_live`/`jump` into a private `fn is_dead(...) -> bool` (pure
   refactor; existing tests stay green).
   Commit: `refactor: shared FenceMap dead-condition with EpochExhausted coverage`.
 
-- [ ] **(g) Delete `EngineError::InvalidCoordinatorConfig`.**
+- [x] **(g) Delete `EngineError::InvalidCoordinatorConfig`.**
   Files: `crates/varve-engine/src/db.rs` (line ~123) + any exhaustive matches. The variant is
   declared, never constructed; bad `[coordinator]` config already surfaces via
   `RegistryError::Build` carrying `validate()`'s message. Delete it (no back-compat); fix
   matches; `cargo test -p varve-engine` green.
   Commit: `refactor: drop the never-constructed InvalidCoordinatorConfig variant`.
 
-- [ ] **(h) Note the inert `fault-injection` unification.**
+- [x] **(h) Note the inert `fault-injection` unification.**
   Files: `crates/varve-server/Cargo.toml`. One comment above the `varve-testkit` dev-dep: it
   transitively enables `varve-log`/`varve-engine` `fault-injection` in the TEST build only;
   inert unless `VARVE_CRASH_TRIGGER` is set; isolate the fixture if that ever changes.
   Commit: `docs: note the inert fault-injection feature unification in server tests`.
 
-- [ ] **Final step: whole-sweep gate**
+- [x] **Final step: whole-sweep gate**
 
 ```bash
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace -- --test-threads=1
@@ -1949,11 +1949,11 @@ itself is Task 17 (user-gated).
 - Produces: `cargo package`-clean leaf crates; Task 16 tarballs include LICENSE/README/CHANGELOG;
   Task 17 publishes in the dependency order recorded here.
 
-- [ ] **Step 1: LICENSE + workspace version.** Apache-2.0 text at repo root;
+- [x] **Step 1: LICENSE + workspace version.** Apache-2.0 text at repo root;
   `[workspace.package] version = "1.0.0"`. Run `cargo build --workspace` (lockfile version
   bumps).
 
-- [ ] **Step 2: Per-crate metadata.** For each shipping crate add `description` (one line, own
+- [x] **Step 2: Per-crate metadata.** For each shipping crate add `description` (one line, own
   words per crate — e.g. varve: "Bitemporal property-graph database speaking GQL — embedded
   facade"; varve-server: "HTTP server (varved) for VarveDB"; varve-cli: "CLI (varve shell,
   import/export, admin) for VarveDB"; etc. for types/config/gql/log/storage/index/plan/engine),
@@ -1962,7 +1962,7 @@ itself is Task 17 (user-gated).
   path is stripped on publish). `varve-testkit`: `publish = false` (test rig; also keeps its
   docker/fixture surface off crates.io). `fuzz/` is already `publish = false` + workspace-excluded.
 
-- [ ] **Step 3: Verify packaging.**
+- [x] **Step 3: Verify packaging.**
 
 ```bash
 cargo package -p varve-types --list   # sane file set, no stray artifacts
@@ -1975,19 +1975,19 @@ cargo publish --dry-run -p varve-types
   → varve-engine → varve → varve-server → varve-cli`
   (derive the true order from `cargo tree` if it disagrees — code wins).
 
-- [ ] **Step 4: CHANGELOG.md** — one `## 1.0.0 (2026-07-XX)` section, feature summary grouped by
+- [x] **Step 4: CHANGELOG.md** — one `## 1.0.0 (2026-07-XX)` section, feature summary grouped by
   subsystem (bitemporal engine, GQL surface + TCK standing, durability + crash matrix, object
   storage + backends, compaction/GC + GDPR erase, server/CLI, coordination/failover,
   observability), known limitations (from `gql/deviations.md` + AWS-not-CI-verified), and the
   release checklist (publish order, tag, artifacts).
 
-- [ ] **Step 5: README quickstart** — rewrite the top half: badges-free, 30-second pitch,
+- [x] **Step 5: README quickstart** — rewrite the top half: badges-free, 30-second pitch,
   install matrix (cargo install / docker / tarball — marked available from v1.0.0; from-source
   path that works today), the 6-statement GQL session from getting-started, links to the book,
   benchmark report, design spec. Add License section (Apache-2.0). Keep the workspace/gates
   section.
 
-- [ ] **Step 6: USER DECISIONS — STOP and ask Ravan** (do not guess; record answers in
+- [x] **Step 6: USER DECISIONS — STOP and ask Ravan** (do not guess; record answers in
   STATUS.md):
   1. Repo rename `timedb` → `varve` and the `repository` URL (`https://github.com/ravan/varve`
      currently points at a name the repo does not have). Rename now, or ship with the URL fixed
@@ -1996,7 +1996,7 @@ cargo publish --dry-run -p varve-types
   3. Container registry: ghcr.io under which owner/name? (Task 16 defaults to
      `ghcr.io/<github-owner>/varve`.)
 
-- [ ] **Step 7: Gate + commit**
+- [x] **Step 7: Gate + commit**
 
 ```bash
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace -- --test-threads=1
@@ -2027,7 +2027,7 @@ release cadence grows.
   `aarch64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`; image
   `ghcr.io/<owner>/<repo>:<tag>` and `:latest`.
 
-- [ ] **Step 1: `scripts/package_release.sh`** (used by CI AND locally):
+- [x] **Step 1: `scripts/package_release.sh`** (used by CI AND locally):
 
 ```bash
 #!/usr/bin/env sh
@@ -2066,7 +2066,7 @@ tar -tzf dist/varve-1.0.0-aarch64-apple-darwin.tar.gz   # lists varve, varved, L
   justfile: `package target version: sh scripts/package_release.sh {{target}} {{version}}` (and
   add `dist/` to `.gitignore`).
 
-- [ ] **Step 2: `.github/workflows/release.yml`**
+- [x] **Step 2: `.github/workflows/release.yml`**
 
 ```yaml
 name: Release
@@ -2140,7 +2140,7 @@ jobs:
   cross's containerized toolchain) — if the aarch64 leg fails on first tag, that leg is fixed
   forward on the draft release, not re-planned.
 
-- [ ] **Step 3: Validate + commit**
+- [x] **Step 3: Validate + commit**
 
 ```bash
 python3 -c "import yaml; yaml.safe_load(open('.github/workflows/release.yml'))"
@@ -2163,7 +2163,7 @@ the agent.
 
 **Interfaces:** consumes everything above.
 
-- [ ] **Step 1: Whole-slice verification gate** (each command, record actual output):
+- [x] **Step 1: Whole-slice verification gate** (each command, record actual output):
 
 ```bash
 cargo fmt --all --check
@@ -2182,7 +2182,7 @@ git diff --check
 git log --format='%an %ae %(trailers)' <branch-base>..HEAD | grep -ci co-authored || true  # MUST be 0
 ```
 
-- [ ] **Step 2: Write `docs/release/v1-acceptance.md`** — one row per spec §1 criterion, each
+- [x] **Step 2: Write `docs/release/v1-acceptance.md`** — one row per spec §1 criterion, each
   with named evidence (test file :: test name, CI job, demo command, or report section):
 
 | # | Criterion | Evidence |
@@ -2199,7 +2199,7 @@ git log --format='%an %ae %(trailers)' <branch-base>..HEAD | grep -ci co-authore
   Any criterion that cannot be evidenced → fix the gap now (that is this task's purpose) or
   record it as an explicit, user-acknowledged exception in the report.
 
-- [ ] **Step 3: Closeout.** STATUS.md: slice 11 complete (tasks, decisions — Task 1 GC policy,
+- [x] **Step 3: Closeout.** STATUS.md: slice 11 complete (tasks, decisions — Task 1 GC policy,
   Task 4 selection rule, Task 14c formatting decision, Task 15 user answers, deviations),
   final verification transcript summary, demo commands (`social_bench`, `bench-scale-out`,
   `docs-serve`), and a "v1 READY — awaiting tag/publish" entry point. Roadmap: tick all slice-11
@@ -2224,19 +2224,19 @@ docker run ghcr.io/<owner>/<repo>:v1.0.0 --help
 
 ## Slice exit checklist
 
-- [ ] Roadmap slice-11 boxes ticked: ERASE end-to-end verification; fuzz targets complete +
+- [x] Roadmap slice-11 boxes ticked: ERASE end-to-end verification; fuzz targets complete +
       nightly budget; benchmark suite + `docs/benchmarks/v1.md`; docs site under `docs/book/`;
       release engineering; final acceptance pass.
-- [ ] `cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets -- -D warnings`
       clean; `cargo test --workspace -- --test-threads=1` green.
-- [ ] Both GDPR proofs green (`cargo test -p varve --test gdpr_gc -- --test-threads=1`).
-- [ ] All five fuzz targets build and survive a 60 s local run; `fuzz-nightly` matrix committed.
-- [ ] `just docs` builds with zero stubs (`grep -r "TODO(slice-11" docs/book/src` → empty);
+- [x] Both GDPR proofs green (`cargo test -p varve --test gdpr_gc -- --test-threads=1`).
+- [x] All five fuzz targets build and survive a 60 s local run; `fuzz-nightly` matrix committed.
+- [x] `just docs` builds with zero stubs (`grep -r "TODO(slice-11" docs/book/src` → empty);
       config-reference drift test green.
-- [ ] `docs/benchmarks/v1.md` published with re-measured numbers vs spec §13 targets.
-- [ ] `docs/release/v1-acceptance.md` — all 8 criteria evidenced or explicitly excepted.
-- [ ] Release workflow + package script committed; local host-triple tarball verified.
-- [ ] No co-author trailers anywhere on the branch.
-- [ ] STATUS.md updated (position, decisions, deviations, demo commands, next entry point =
+- [x] `docs/benchmarks/v1.md` published with re-measured numbers vs spec §13 targets.
+- [x] `docs/release/v1-acceptance.md` — all 8 criteria evidenced or explicitly excepted.
+- [x] Release workflow + package script committed; local host-triple tarball verified.
+- [x] No co-author trailers anywhere on the branch.
+- [x] STATUS.md updated (position, decisions, deviations, demo commands, next entry point =
       user-gated tag/publish); roadmap slice log row filled.
-- [ ] User decisions recorded (repo rename, crates.io, registry); tag/publish left to Ravan.
+- [x] User decisions recorded (repo rename, crates.io, registry); tag/publish left to Ravan.

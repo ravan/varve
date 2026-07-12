@@ -427,14 +427,26 @@ corruption, no acked loss; Grafana-ready metrics documented.
       from code, failover modes, sizing), architecture overview. *(Slice 11 Tasks 11-13:
       mdbook 0.5.4 site `docs/book/` + CI `docs` job; getting-started verified live; config
       reference GENERATED from code with a drift test; ops/metrics moved into the book.)*
-- [ ] Release engineering: `cargo dist` (or equiv) for macOS arm64 + linux x86_64/arm64
+- [x] Release engineering: `cargo dist` (or equiv) for macOS arm64 + linux x86_64/arm64
       (musl) binaries; Docker images; `varve` + subcrates published to crates.io;
-      CHANGELOG; `v1.0.0` tag; README quickstart.
-- [ ] Final acceptance pass: walk spec §1 success criteria 1–8, each with a linked
-      passing test/demo/report; fix gaps before tagging.
+      CHANGELOG; `v1.0.0` tag; README quickstart. *(Slice 11 Tasks 15-16: hand-rolled
+      tag-triggered `release.yml` — equiv to cargo-dist, zero-extra-deps precedent — for the 3
+      targets + `ghcr.io/ravan/varve` image; `scripts/package_release.sh` + `just package`
+      (host tarball verified); `LICENSE`, `CHANGELOG.md`, README quickstart; all 11 crates carry
+      1.0.0 publish metadata (leaf dry-run PASSED). The actual `cargo publish` + `v1.0.0` tag are
+      the USER-GATED ship actions Ravan fires — see STATUS.md / `docs/release/v1-acceptance.md`.)*
+- [x] Final acceptance pass: walk spec §1 success criteria 1–8, each with a linked
+      passing test/demo/report; fix gaps before tagging. *(Slice 11 Task 17:
+      `docs/release/v1-acceptance.md` — all 8 criteria MET, criterion 4 with the explicit
+      AWS-not-CI-verified exception; whole-slice gate 903 tests + fuzz + compose-demo + package
+      all green this session.)*
 
-**Exit criteria:** every spec §1 criterion checked off with evidence; `cargo install varve`
-/ `docker run` / `brew`-style tarball all reach a working shell in ≤ 5 minutes.
+**Exit criteria:** every spec §1 criterion checked off with evidence (`docs/release/v1-acceptance.md`)
+— ✅ done. The `cargo install varve` / `docker run` / tarball ≤ 5-minute-to-shell criterion is
+measurable only AFTER the user-gated publish; the artifacts (crate metadata, image, tarballs) are
+built and verified, so it is unblocked and pending only the ship actions. **Slice 11 code-complete
+2026-07-12** (Sessions A+B SDD subagent-driven, Session C controller-inline; Tasks 1-17); final
+whole-branch review + merge remain.
 
 ---
 
