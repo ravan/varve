@@ -239,9 +239,10 @@ function isHealthyHealth(value: unknown): boolean {
 }
 
 function isDegradedStatus(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  if (typeof value.follower_error === 'string' && value.follower_error.length > 0) return true;
-  return isRecord(value.probe) && value.probe.verdict === 'inconsistent';
+  if (!isRecord(value)) return true;
+  if (value.follower_error !== null && value.follower_error !== '') return true;
+  if (!isRecord(value.probe)) return true;
+  return value.probe.verdict !== 'supported' && value.probe.verdict !== 'unsupported';
 }
 
 function isExplorerErrorCode(value: unknown): value is ExplorerErrorCode {
