@@ -405,11 +405,15 @@ corruption, no acked loss; Grafana-ready metrics documented.
 
 **Sessions:** 2–3. **Depends:** all.
 
-- [ ] `ERASE` end-to-end verification: erase entity → immediate invisibility at every time
+- [x] `ERASE` end-to-end verification: erase entity → immediate invisibility at every time
       axis → after compaction, raw object scan proves the property bytes are gone (test
-      greps storage objects for sentinel values).
-- [ ] Fuzz targets complete: log-record decoder, manifest decoder, Arrow meta reader against
-      corrupted/truncated inputs (no panics, clean errors); nightly CI fuzz budget.
+      greps storage objects for sentinel values). *(Slice 11 Tasks 1-3: GC log/probe sweep +
+      local-profile whole-disk-byte proof + object-store-log raw-object-scan proof + DETACH ERASE.)*
+- [x] Fuzz targets complete: log-record decoder, manifest decoder, Arrow meta reader against
+      corrupted/truncated inputs (no panics, clean errors); nightly CI fuzz budget. *(Slice 11
+      Tasks 5-6: 5 targets, 5-way nightly matrix; arrow-rs IPC panics guarded by catch_unwind +
+      framing-allocation bounded, gates on RSS; deeper record-batch-descriptor over-reservation
+      is production-safe/clean-Err + owned post-v1 follow-up.)*
 - [ ] Benchmark suite: criterion micro (resolution, trie ops, parse) + end-to-end social
       workload (ingest rate, point read, 2-hop, AS-OF historical, query-node scale-out 1→4);
       compare against spec §13 targets; publish `docs/benchmarks/v1.md` report.

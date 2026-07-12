@@ -183,7 +183,7 @@ query follower lagging below the min retained watermark loses its tail and termi
 `LogGap` (restart recovers from the latest manifest); `blocks_to_keep`/`garbage_lifetime` are the
 operator's guard — cross-referenced in the ops guide (Task 12).
 
-- [ ] **Step 1: Write the failing planner tests** (replace
+- [x] **Step 1: Write the failing planner tests** (replace
   `gc_plan_keeps_probe_and_log_objects_out_of_scope` — its policy is now wrong; production code,
   no back-compat). Add to `gc.rs` `mod tests` (the existing `manifest(...)` fixture sets
   `watermark: block_id`; add a variant with an explicit packed watermark):
@@ -301,10 +301,10 @@ fn gc_plan_sweeps_probe_objects_and_keeps_fence_and_writer_keys() {
 }
 ```
 
-- [ ] **Step 2: Run to verify the new tests fail** (and the old out-of-scope test is deleted):
+- [x] **Step 2: Run to verify the new tests fail** (and the old out-of-scope test is deleted):
   `cargo test -p varve-engine gc_plan` → new tests FAIL (log/probe keys not in `delete_keys`).
 
-- [ ] **Step 3: Implement.** In `plan_gc`: compute
+- [x] **Step 3: Implement.** In `plan_gc`: compute
   `let min_retained_watermark: Option<u64> = /* min over retained manifests' .watermark */;`
   inside the existing `if let Some(latest)` block (the retained set is the manifests with
   `block_id >= retain_from`). Split key handling:
@@ -355,14 +355,14 @@ listed_keys.extend(store.list(PROBE_PREFIX).await?);
   capability probe racing a concurrent GC may lose its probe object mid-probe and should be
   retried; probes run at node startup, GC on the writer, so the window is operationally narrow).
 
-- [ ] **Step 4: Run** `cargo test -p varve-engine` → all gc tests PASS; full crate green.
+- [x] **Step 4: Run** `cargo test -p varve-engine` → all gc tests PASS; full crate green.
 
-- [ ] **Step 5: Update the stale `trim` promise comment** in
+- [x] **Step 5: Update the stale `trim` promise comment** in
   `crates/varve-log/src/object_store.rs` module doc from "swept by slice-8 GC" to "swept by GC
   (`Db::gc_once`) once wholly below the minimum retained manifest watermark" — the promise is now
   true; keep it accurate.
 
-- [ ] **Step 6: Gate + commit**
+- [x] **Step 6: Gate + commit**
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p varve-engine -p varve-log
@@ -393,7 +393,7 @@ axis after compaction AND after restart, and prove it for edge properties via `D
   New test helper `fn all_disk_bytes(root: &Path) -> Vec<u8>` (recursive walk of `root`, i.e.
   BOTH `dir/log` and `dir/store`, concatenating every file's bytes; `std::fs` only).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 fn all_disk_bytes(root: &Path) -> Vec<u8> {
@@ -516,7 +516,7 @@ async fn detach_erase_scrubs_edge_property_bytes_too() {
   `MATCH … INSERT` edge syntax follow the existing slice-6/7 test corpus — if the exact INSERT
   form differs, mirror `crates/varve/tests/erase.rs`; the ASSERTIONS are the contract.)
 
-- [ ] **Step 2: Add the config helper to `db_harness.rs`** (same shape as
+- [x] **Step 2: Add the config helper to `db_harness.rs`** (same shape as
   `local_gc_blocks_config`, plus one line in `[log.local]`):
 
 ```rust
@@ -544,7 +544,7 @@ pub fn local_gc_small_segment_config(root: &Path, max_block_rows: usize) -> Conf
 }
 ```
 
-- [ ] **Step 3: Run to verify current behavior** —
+- [x] **Step 3: Run to verify current behavior** —
   `cargo test -p varve --test gdpr_gc -- --test-threads=1`. Expected: the new tests FAIL at the
   post-GC full-scan assertion IF any sentinel byte survives (e.g. in a log segment the trim did
   not drop, or an adjacency family compaction missed). Investigate any failure with
@@ -553,14 +553,14 @@ pub fn local_gc_small_segment_config(root: &Path, max_block_rows: usize) -> Conf
   must run enough L0→L1 rounds. If the tests instead pass immediately, verify non-vacuity: the
   pre-GC `assert!(contains(...))` must have run (it fails the test if the sentinel never hit disk).
 
-- [ ] **Step 4: Fix until green.** Expected fixes are test-side (config/sequencing), NOT
+- [x] **Step 4: Fix until green.** Expected fixes are test-side (config/sequencing), NOT
   engine-side — slice 8 already proved erase-drops-bytes for compaction; the new ground the test
   breaks is (a) the whole-`dir` scan incl. log segments, and (b) edge/adjacency sentinel bytes.
   If an ENGINE gap is found (e.g. adjacency family retains erased-edge payload bytes), fix it in
   `varve-engine`/`varve-index` with its own failing unit test first and record the deviation in
   STATUS.md at closeout.
 
-- [ ] **Step 5: Gate + commit**
+- [x] **Step 5: Gate + commit**
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p varve --test gdpr_gc -p varve-testkit --lib -- --test-threads=1
@@ -590,7 +590,7 @@ sentinel.
   `group_commit_window_ms = 1`, gc enabled with `blocks_to_keep = 0`,
   `garbage_lifetime_hours = 0`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 async fn every_object_byte(dir: &Path) -> Vec<u8> {
@@ -641,7 +641,7 @@ async fn erased_bytes_absent_from_every_raw_object_on_the_object_store_log_profi
 }
 ```
 
-- [ ] **Step 2: Add `object_log_gc_config` to `db_harness.rs`**
+- [x] **Step 2: Add `object_log_gc_config` to `db_harness.rs`**
 
 ```rust
 pub fn object_log_gc_config(root: &Path, max_block_rows: usize) -> Config {
@@ -664,14 +664,14 @@ pub fn object_log_gc_config(root: &Path, max_block_rows: usize) -> Config {
 }
 ```
 
-- [ ] **Step 3: Run** `cargo test -p varve --test gdpr_gc -- --test-threads=1`. Without Task 1
+- [x] **Step 3: Run** `cargo test -p varve --test gdpr_gc -- --test-threads=1`. Without Task 1
   the post-GC assertion fails on surviving `v1/log/**.vlog` bytes; with Task 1 it must pass.
   Note: with `blocks_to_keep = 0` only the latest manifest is retained, so the min retained
   watermark is the latest flush watermark — every fully-superseded log object qualifies. The last
   log object is never deleted; the test's 61 filler txs after the erase guarantee the sentinel
   object has successors at or below the final watermark.
 
-- [ ] **Step 4: Gate + commit**
+- [x] **Step 4: Gate + commit**
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p varve --test gdpr_gc -- --test-threads=1
@@ -700,7 +700,7 @@ follower reads.
   signature, new selection rule. Every existing caller (`Db::open` recovery, `verify_database`,
   follower manifest reads, `/v1/status`) inherits the hardening with no call-site change.
 
-- [ ] **Step 1: Write the failing tests** (in `manifest.rs` `mod tests`, alongside
+- [x] **Step 1: Write the failing tests** (in `manifest.rs` `mod tests`, alongside
   `latest_manifest_picks_the_highest_block_id` — REPLACE that test, its rule is superseded):
 
 ```rust
@@ -737,10 +737,10 @@ async fn latest_manifest_breaks_watermark_ties_by_block_id() {
   `latest_manifest_none_when_empty` and `latest_manifest_surfaces_corruption` — corruption in ANY
   listed manifest now surfaces, which is strictly stricter and correct.)
 
-- [ ] **Step 2: Run** `cargo test -p varve-storage latest_manifest` → new tests FAIL
+- [x] **Step 2: Run** `cargo test -p varve-storage latest_manifest` → new tests FAIL
   (stray block 11 wins under the old rule).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 /// Finds the newest COMMITTED manifest: max by `(watermark, block_id)`.
@@ -758,17 +758,17 @@ pub async fn latest_manifest(
 }
 ```
 
-- [ ] **Step 4: Run** `cargo test -p varve-storage && cargo test -p varve-engine` → PASS. The
+- [x] **Step 4: Run** `cargo test -p varve-storage && cargo test -p varve-engine` → PASS. The
   engine's recovery/follower/verify suites must stay green (equal-watermark tiebreak preserves
   every legitimate ordering they rely on).
 
-- [ ] **Step 5: Update the two limitation comments.** In `writer.rs` (the block around line
+- [x] **Step 5: Update the two limitation comments.** In `writer.rs` (the block around line
   1877 discussing the in-flight manifest PUT) and `flush.rs` (manifest-PUT commit-point doc):
   replace "robust hardening ... is a Slice-11 follow-up" wording with a statement that
   `latest_manifest` now selects by `(watermark, block_id)`, so a stray stale-watermark manifest
   can never be selected; the before+after lease ack-gate remains the liveness guard.
 
-- [ ] **Step 6: Gate + commit**
+- [x] **Step 6: Gate + commit**
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p varve-storage -p varve-engine
@@ -801,7 +801,7 @@ path to it, and fuzz it: arbitrary bytes must never panic — only `Ok(records)`
   decoder returns today, with `context` in the message. Re-export as `varve_log::decode_frames`
   from `lib.rs`. Task 6's CI step and the fuzz target consume it.
 
-- [ ] **Step 1: Write the failing unit tests** (in `record.rs` `mod tests`; frame-building
+- [x] **Step 1: Write the failing unit tests** (in `record.rs` `mod tests`; frame-building
   helper mirrors the object-store log's encode side):
 
 ```rust
@@ -861,9 +861,9 @@ fn decode_frames_rejects_an_absurd_length_prefix_without_allocating() {
   If `LogError`'s corrupt variant needs a specific payload, mirror `object_store.rs::decode_frame`'s
   construction — that function is about to delegate here.)
 
-- [ ] **Step 2: Run** `cargo test -p varve-log decode_frames` → FAIL (function does not exist).
+- [x] **Step 2: Run** `cargo test -p varve-log decode_frames` → FAIL (function does not exist).
 
-- [ ] **Step 3: Implement `decode_frames`** by MOVING the loop logic of
+- [x] **Step 3: Implement `decode_frames`** by MOVING the loop logic of
   `object_store.rs::{decode_object, decode_frame}` into `record.rs` (length-bounds check BEFORE
   slicing — the absurd-length test — then CRC, then `LogRecord::from_wire`), and reduce
   `decode_object(key, bytes)` to `decode_frames(key, bytes)`. Keep `decode_frame` deleted or as a
@@ -871,11 +871,11 @@ fn decode_frames_rejects_an_absurd_length_prefix_without_allocating() {
   changed (its torn-TAIL tolerance is a different, lenient contract; note this in `decode_frames`
   rustdoc: "strict — for atomic whole objects; the local segment scanner tolerates a torn tail").
 
-- [ ] **Step 4: Run** `cargo test -p varve-log` (default features include `object-store`) →
+- [x] **Step 4: Run** `cargo test -p varve-log` (default features include `object-store`) →
   ALL PASS including the existing object-store corruption tests, which now exercise the shared
   decoder.
 
-- [ ] **Step 5: Add the fuzz target and seed.** `fuzz/Cargo.toml` additions:
+- [x] **Step 5: Add the fuzz target and seed.** `fuzz/Cargo.toml` additions:
 
 ```toml
 [dependencies]
@@ -929,7 +929,7 @@ fn write_log_record_fuzz_seed() {
 
   Run: `cargo test -p varve-log write_log_record_fuzz_seed -- --ignored` then `git add` the seed.
 
-- [ ] **Step 6: Smoke-fuzz locally**
+- [x] **Step 6: Smoke-fuzz locally**
 
 ```bash
 cargo +nightly fuzz run log_record -- -max_total_time=60 -rss_limit_mb=4096
@@ -938,7 +938,7 @@ cargo +nightly fuzz run log_record -- -max_total_time=60 -rss_limit_mb=4096
   Expected: no crashes. ANY crash = a real bug: minimize (`cargo fuzz tmin`), add the crash bytes
   as a `decode_frames_regression_*` unit test in `record.rs`, fix, re-run.
 
-- [ ] **Step 7: Gate + commit**
+- [x] **Step 7: Gate + commit**
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p varve-log
@@ -972,7 +972,7 @@ all five targets.
   `varve_storage::TrieCatalog::from_manifests`, `varve_index::{decode_meta, decode_events}`.
 - Produces: no API changes (hardening stays behind the existing signatures).
 
-- [ ] **Step 1: Add the three fuzz targets.** `fuzz/Cargo.toml`:
+- [x] **Step 1: Add the three fuzz targets.** `fuzz/Cargo.toml`:
 
 ```toml
 varve-storage = { path = "../crates/varve-storage", default-features = false }
@@ -1045,16 +1045,16 @@ fuzz_target!(|data: &[u8]| {
   re-exported per `catalog.rs`; if `TrieCatalog::from_manifests` takes `&[BlockManifest]`, the
   `from_ref` call matches.)
 
-- [ ] **Step 2: Verify all targets build:** `cargo +nightly fuzz build` → compiles all five.
+- [x] **Step 2: Verify all targets build:** `cargo +nightly fuzz build` → compiles all five.
 
-- [ ] **Step 3: Generate seeds** with `#[ignore]`d writer tests, same pattern as Task 5:
+- [x] **Step 3: Generate seeds** with `#[ignore]`d writer tests, same pattern as Task 5:
   in `manifest.rs` tests, write `sample().to_wire()` to `fuzz/corpus/manifest/valid.bin`; in
   `varve-index` tests, write one `encode_meta`/`encode_block`-produced meta buffer and one
   `encode_events(&[...])` buffer (reuse the existing round-trip test fixtures) to
   `fuzz/corpus/block_meta/valid.bin` and `fuzz/corpus/events/valid.bin`. Run each with
   `-- --ignored`, commit the seeds.
 
-- [ ] **Step 4: Smoke-fuzz each target 120 s:**
+- [x] **Step 4: Smoke-fuzz each target 120 s:**
 
 ```bash
 for t in manifest block_meta events; do
@@ -1072,7 +1072,7 @@ done
   `fuzz/regressions/` and a `#[should_panic]`-free skip note — but exhaust validation options
   first.
 
-- [ ] **Step 5: Extend CI + justfile.** `fuzz-nightly` job becomes a matrix over all five
+- [x] **Step 5: Extend CI + justfile.** `fuzz-nightly` job becomes a matrix over all five
   targets (parse keeps its 600 s budget; decoders get 300 s each):
 
 ```yaml
@@ -1114,7 +1114,7 @@ fuzz target="parse" secs="60":
     cargo +nightly fuzz run {{target}} -- -max_total_time={{secs}} -rss_limit_mb=4096
 ```
 
-- [ ] **Step 6: Gate + commit**
+- [x] **Step 6: Gate + commit**
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p varve-storage -p varve-index
