@@ -48,6 +48,11 @@ tower = { workspace = true, features = ["util"] }
 http-body-util = { workspace = true }
 tempfile = { workspace = true }
 varve-log = { path = "../varve-log" }
+# `varve-testkit` transitively enables the `fault-injection` feature of
+# `varve-log`/`varve-engine` for THIS test build only (cargo feature
+# unification). Those crash hooks stay inert unless `VARVE_CRASH_TRIGGER`
+# names an armed trigger file, so the server tests are unaffected. If this
+# crate ever ships fault-injection in a non-test build, isolate the fixture.
 varve-testkit = { path = "../varve-testkit" }
 reqwest = { workspace = true }
 
