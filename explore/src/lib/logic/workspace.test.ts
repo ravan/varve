@@ -274,6 +274,35 @@ it('serializes schema version 1 without any frame response or raw body', () => {
   expect(serialized).not.toContain('raw-complete');
 });
 
+it('serializes the exact read basis and timeout in the safe frame snapshot', () => {
+  const frame = completedFrame('read-request', {
+    readBasis: 'at:9007199254740991',
+    basisTimeoutMs: 12_345,
+  });
+  const state = addFrame(emptyWorkspace(), frame);
+
+  const record = JSON.parse(serializeWorkspace(state)) as {
+    workspace: { frames: Record<string, unknown>[] };
+  };
+
+  expect(record.workspace.frames[0]).toMatchObject({
+    readBasis: 'at:9007199254740991',
+    basisTimeoutMs: 12_345,
+  });
+});
+
+it('restores the exact read basis and timeout from a strict workspace record', () => {
+  const record = JSON.parse(
+    serializeWorkspace(addFrame(emptyWorkspace(), completedFrame('read-request'))),
+  ) as { workspace: { frames: Record<string, unknown>[] } };
+  record.workspace.frames[0].readBasis = 42;
+  record.workspace.frames[0].basisTimeoutMs = 30_001;
+
+  const restored = deserializeWorkspace(JSON.stringify(record));
+
+  expect(restored.frames[0]).toMatchObject({ readBasis: 42, basisTimeoutMs: 30_001 });
+});
+
 it('decodes a valid v1 workspace record', () => {
   let original = recordHistory(emptyWorkspace(), historyEntry());
   original = addFavorite(original, favorite());

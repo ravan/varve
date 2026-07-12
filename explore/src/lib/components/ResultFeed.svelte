@@ -6,9 +6,11 @@
   let {
     workspace,
     onRerun,
+    rerunDisabled,
   }: {
     workspace: WorkspaceStore;
     onRerun: (frame: ExecutionFrame) => void;
+    rerunDisabled: boolean;
   } = $props();
 
   let frames = $derived([...workspace.frames].reverse());
@@ -26,7 +28,7 @@
 
     <div class="grid gap-4">
       {#each frames as frame (frame.id)}
-        <ResultFrame {frame} {workspace} {onRerun} />
+        <ResultFrame {frame} {workspace} {onRerun} {rerunDisabled} />
       {/each}
     </div>
   </section>

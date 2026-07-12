@@ -1,7 +1,7 @@
-import type { ExecutionMode, JsonScalar, QueryParameters } from '../types';
+import type { Basis, ExecutionMode, JsonScalar, QueryParameters } from '../types';
 import { extractQueryShape } from './gql';
 import { extractObservedSchema, mergeObservedSchema, type ObservedSchema } from './schema';
-import { validateParameters } from './validation';
+import { parseBasis, validateParameters } from './validation';
 
 export const WORKSPACE_STORAGE_VERSION = 1 as const;
 export const WORKSPACE_STORAGE_KEY = 'varve-explorer-workspace';
@@ -25,6 +25,8 @@ export interface ExecutionFrame {
   readonly gql: string;
   readonly mode: ExecutionMode;
   readonly params: QueryParameters;
+  readonly readBasis?: Basis;
+  readonly basisTimeoutMs?: number;
   readonly parameterSummary: string;
   readonly state: FrameState;
   readonly startedAt: number;
@@ -280,6 +282,8 @@ function encodeFrame(frame: ExecutionFrame): ExecutionFrame | null {
     gql: frame.gql,
     mode: frame.mode,
     params: frame.params,
+    ...(frame.readBasis === undefined ? {} : { readBasis: frame.readBasis }),
+    ...(frame.basisTimeoutMs === undefined ? {} : { basisTimeoutMs: frame.basisTimeoutMs }),
     parameterSummary: frame.parameterSummary,
     state: frame.state,
     startedAt: frame.startedAt,
@@ -392,20 +396,25 @@ function decodeFrame(value: unknown): ExecutionFrame | null {
     !hasExactKeys(
       value,
       ['id', 'gql', 'mode', 'params', 'parameterSummary', 'state', 'startedAt', 'pinned'],
-      ['finishedAt', 'durationMs'],
+      ['readBasis', 'basisTimeoutMs', 'finishedAt', 'durationMs'],
     )
   ) {
     return null;
   }
   const params = decodeQueryParameters(value.params);
+  const readBasis = value.readBasis === undefined ? undefined : decodeBasis(value.readBasis);
   if (
     params === null ||
+    readBasis === null ||
     typeof value.id !== 'string' ||
     typeof value.gql !== 'string' ||
     !isMode(value.mode) ||
     typeof value.parameterSummary !== 'string' ||
     !isFrameState(value.state) ||
     !isFiniteNumber(value.startedAt) ||
+    (value.basisTimeoutMs !== undefined && !isPositiveInteger(value.basisTimeoutMs)) ||
+    (value.mode === 'write' &&
+      (value.readBasis !== undefined || value.basisTimeoutMs !== undefined)) ||
     (value.finishedAt !== undefined && !isFiniteNumber(value.finishedAt)) ||
     (value.durationMs !== undefined && !isNonNegativeNumber(value.durationMs)) ||
     typeof value.pinned !== 'boolean'
@@ -418,6 +427,8 @@ function decodeFrame(value: unknown): ExecutionFrame | null {
     gql: value.gql,
     mode: value.mode,
     params,
+    ...(readBasis === undefined ? {} : { readBasis }),
+    ...(value.basisTimeoutMs === undefined ? {} : { basisTimeoutMs: value.basisTimeoutMs }),
     parameterSummary: value.parameterSummary,
     state: value.state,
     startedAt: value.startedAt,
@@ -425,6 +436,12 @@ function decodeFrame(value: unknown): ExecutionFrame | null {
     ...(value.finishedAt === undefined ? {} : { finishedAt: value.finishedAt }),
     ...(value.durationMs === undefined ? {} : { durationMs: value.durationMs }),
   };
+}
+
+function decodeBasis(value: unknown): Basis | null {
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
+  const result = parseBasis(String(value));
+  return result.ok && result.value !== undefined ? result.value : null;
 }
 
 function decodeHistoryEntry(value: unknown): HistoryEntry | null {

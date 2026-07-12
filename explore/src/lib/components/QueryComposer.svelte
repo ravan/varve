@@ -32,10 +32,12 @@
     connection,
     workspace,
     fetcher = fetch,
+    active = $bindable(false),
   }: {
     connection: ConnectionStore;
     workspace: WorkspaceStore;
     fetcher?: FetchLike;
+    active?: boolean;
   } = $props();
 
   let editorHost = $state<HTMLDivElement | null>(null);
@@ -50,7 +52,11 @@
 
   let parametersValidation = $derived(validateParameters(parametersInput));
   let basisValidation = $derived(parseBasis(basisInput));
-  let timeoutValidation = $derived(parsePositiveInteger(timeoutInput, 'Basis timeout'));
+  let timeoutValidation = $derived(
+    timeoutInput.trim() === ''
+      ? ({ ok: true, value: undefined } as const)
+      : parsePositiveInteger(timeoutInput, 'Basis timeout'),
+  );
   let mode = $derived(workspace.queryMode);
   let canRun = $derived(
     workspace.queryDraft.trim().length > 0 &&
@@ -147,6 +153,10 @@
     if (nextBasis !== undefined) basisInput = String(nextBasis);
   });
 
+  $effect(() => {
+    active = activeController !== null;
+  });
+
   function cancelQuery(): void {
     activeController?.abort();
   }
@@ -154,6 +164,11 @@
   export async function rerunQuery(frame: ExecutionFrame): Promise<void> {
     if (activeController !== null) return;
     parametersInput = JSON.stringify(frame.params, null, 2);
+    basisInput = frame.mode === 'read' && frame.readBasis !== undefined ? String(frame.readBasis) : '';
+    timeoutInput =
+      frame.mode === 'read' && frame.basisTimeoutMs !== undefined
+        ? String(frame.basisTimeoutMs)
+        : '';
     workspace.setQueryMode(frame.mode);
     workspace.setQueryDraft(frame.gql);
     requestError = null;
@@ -167,6 +182,9 @@
 
     const gql = workspace.queryDraft;
     const params = parametersValidation.value;
+    const readBasis = mode === 'read' && basisValidation.ok ? basisValidation.value : undefined;
+    const basisTimeoutMs =
+      mode === 'read' && timeoutValidation.ok ? timeoutValidation.value : undefined;
     const startedAt = Date.now();
     const frameId = crypto.randomUUID();
     const controller = new AbortController();
@@ -175,6 +193,8 @@
       gql,
       mode,
       params,
+      ...(readBasis === undefined ? {} : { readBasis }),
+      ...(basisTimeoutMs === undefined ? {} : { basisTimeoutMs }),
       parameterSummary: summarizeParameters(params),
       state: 'running',
       startedAt,
@@ -235,14 +255,14 @@
 
     try {
       const request: QueryRequest = { gql, params };
-      if (mode === 'read') {
-        if (basisValidation.ok && basisValidation.value !== undefined) {
-          request.basis = basisValidation.value;
+      if (runningFrame.mode === 'read') {
+        if (runningFrame.readBasis !== undefined) request.basis = runningFrame.readBasis;
+        if (runningFrame.basisTimeoutMs !== undefined) {
+          request.basis_timeout_ms = runningFrame.basisTimeoutMs;
         }
-        if (timeoutValidation.ok) request.basis_timeout_ms = timeoutValidation.value;
       }
 
-      const response = await fetcher(mode === 'read' ? '/api/varve/query' : '/api/varve/tx', {
+      const response = await fetcher(runningFrame.mode === 'read' ? '/api/varve/query' : '/api/varve/tx', {
         method: 'POST',
         headers: { accept: 'application/json', 'content-type': 'application/json' },
         body: JSON.stringify(request),
