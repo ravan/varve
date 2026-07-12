@@ -3,9 +3,11 @@ name = "varve-index"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Bitemporal event encoding, block/trie index, and resolution for Varve, the bitemporal graph database."
 
 [dependencies]
-varve-types = { path = "../varve-types" }
+varve-types = { path = "../varve-types", version = "1.0.0" }
 arrow = { workspace = true }
 thiserror = { workspace = true }
 

@@ -4136,7 +4136,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "varve"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -4158,7 +4158,7 @@ dependencies = [
 
 [[package]]
 name = "varve-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -4181,7 +4181,7 @@ dependencies = [
 
 [[package]]
 name = "varve-config"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serial_test",
@@ -4192,7 +4192,7 @@ dependencies = [
 
 [[package]]
 name = "varve-engine"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4217,7 +4217,7 @@ dependencies = [
 
 [[package]]
 name = "varve-gql"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -4227,7 +4227,7 @@ dependencies = [
 
 [[package]]
 name = "varve-index"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arrow",
  "criterion",
@@ -4238,7 +4238,7 @@ dependencies = [
 
 [[package]]
 name = "varve-log"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4256,7 +4256,7 @@ dependencies = [
 
 [[package]]
 name = "varve-plan"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -4271,7 +4271,7 @@ dependencies = [
 
 [[package]]
 name = "varve-server"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -4308,7 +4308,7 @@ dependencies = [
 
 [[package]]
 name = "varve-storage"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4327,7 +4327,7 @@ dependencies = [
 
 [[package]]
 name = "varve-testkit"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arrow",
  "bytes",
@@ -4353,7 +4353,7 @@ dependencies = [
 
 [[package]]
 name = "varve-types"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "criterion",

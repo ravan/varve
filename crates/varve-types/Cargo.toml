@@ -3,6 +3,8 @@ name = "varve-types"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Core value, timestamp, and xxh3-128 identifier types for Varve, the bitemporal graph database."
 
 [dependencies]
 thiserror = { workspace = true }

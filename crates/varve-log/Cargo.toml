@@ -3,6 +3,8 @@ name = "varve-log"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Durable write-ahead log (local segments or object-store) for Varve, the bitemporal graph database."
 
 [features]
 default = ["object-store"]
@@ -13,9 +15,9 @@ object-store = ["dep:varve-storage", "dep:bytes"]
 fault-injection = []
 
 [dependencies]
-varve-types = { path = "../varve-types" }
-varve-config = { path = "../varve-config" }
-varve-storage = { path = "../varve-storage", optional = true }
+varve-types = { path = "../varve-types", version = "1.0.0" }
+varve-config = { path = "../varve-config", version = "1.0.0" }
+varve-storage = { path = "../varve-storage", version = "1.0.0", optional = true }
 bytes = { workspace = true, optional = true }
 prost = { workspace = true }
 crc32c = { workspace = true }

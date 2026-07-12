@@ -3,6 +3,9 @@ name = "varve-testkit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# Internal test/bench/demo rig (docker backend harness, fixtures, oracle,
+# fault-injection feature unification) — never published to crates.io.
+publish = false
 
 [dependencies]
 proptest = { workspace = true }
