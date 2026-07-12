@@ -2,6 +2,9 @@
 target/
 Cargo.lock.orig
 
+# Release tarballs (scripts/package_release.sh, release.yml)
+dist/
+
 # Reference checkouts (not part of this repo)
 refs/
 .worktrees/

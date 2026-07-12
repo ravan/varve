@@ -57,3 +57,10 @@ docs-serve:
 # config_reference_doc.rs fails `just check`/`just docs` otherwise.
 docs-gen:
     cargo run -p varve-testkit --bin config_reference > docs/book/src/ops/configuration.md
+
+# Slice 11 task 16: build the release tarball (varve + varved + LICENSE +
+# README + CHANGELOG + sha256) for one target, into dist/. Mirrors what the
+# tag-triggered release.yml runs per matrix leg; use it to verify the host
+# triple locally, e.g. `just package aarch64-apple-darwin 1.0.0`.
+package target version:
+    sh scripts/package_release.sh {{target}} {{version}}
