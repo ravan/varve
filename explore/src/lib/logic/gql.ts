@@ -313,24 +313,27 @@ function parseRelationship(
 
     const open = tokens[bracketStart];
     let index = bracketStart + 1;
-    if (isIdentifier(tokens[index]) && tokens[index].braceDepth === open.braceDepth) {
-      variable = tokens[index].text;
-    }
+    const isAtRelationshipLevel = (token: Token | undefined) =>
+      token !== undefined &&
+      token.bracketDepth === open.bracketDepth + 1 &&
+      token.braceDepth === open.braceDepth;
 
-    while (index < bracketEnd) {
-      const token = tokens[index];
-      if (
-        (token.text === ':' || token.text === '|') &&
-        token.bracketDepth === open.bracketDepth + 1 &&
-        token.braceDepth === open.braceDepth
-      ) {
-        if (!isIdentifier(tokens[index + 1])) return null;
-        types.push(tokens[index + 1].text);
-        index += 2;
-        continue;
-      }
+    if (isIdentifier(tokens[index]) && isAtRelationshipLevel(tokens[index])) {
+      variable = tokens[index].text;
       index += 1;
     }
+
+    if (tokens[index]?.text === ':' && isAtRelationshipLevel(tokens[index])) {
+      do {
+        if (!isIdentifier(tokens[index + 1]) || !isAtRelationshipLevel(tokens[index + 1])) {
+          return null;
+        }
+        types.push(tokens[index + 1].text);
+        index += 2;
+      } while (tokens[index]?.text === '|' && isAtRelationshipLevel(tokens[index]));
+    }
+
+    if (index !== bracketEnd) return null;
   }
 
   const prefix = tokens
