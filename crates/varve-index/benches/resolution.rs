@@ -28,6 +28,15 @@ fn bench_iid() -> Iid {
 /// ("events must be in arrival (log) order: ascending system_from"). Every
 /// 4th event is a `Delete`; the very last event is always a `Put` so the
 /// "current" bench has a non-trivial resolved row to compute.
+///
+/// # Benchmark scope caveat
+///
+/// Every event has an **identical eternal valid range** (`Instant::MIN` to
+/// `Instant::END_OF_TIME`). This deliberately exercises `resolve`'s
+/// system-time Ceiling/Polygon bookkeeping (the reverse-arrival scan) but
+/// **does not exercise** valid-time range splitting (insert/drain/binary-search
+/// under distinct valid-time boundaries). Task 10's report must not generalize
+/// these medians to mixed-valid-time workloads.
 fn alternating_put_delete_history(n: usize) -> Vec<Event> {
     let iid = bench_iid();
     (0..n)

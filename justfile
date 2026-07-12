@@ -21,6 +21,7 @@ s3-matrix backends="garage,seaweedfs,minio":
     VARVE_S3_BACKENDS={{backends}} cargo test -p varve-testkit --test backend_matrix -- --nocapture
 
 # Spec §13.7 criterion micro-benches: resolve, trie ops, parse.
+# Per-crate targets required: cargo bench -- --quick without --bench <name> conflicts with libtest unit-test runner.
 bench-micro:
     cargo bench -p varve-index -p varve-types -p varve-gql
 
