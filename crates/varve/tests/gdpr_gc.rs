@@ -343,7 +343,11 @@ async fn detach_erase_scrubs_edge_property_bytes_too() {
         .unwrap();
     }
     wait_for_manifest_count(dir.path(), 147).await;
-    assert!(contains(&all_disk_bytes(dir.path()), edge_secret));
+    // Non-vacuity for BOTH sentinels: each must be on disk before compaction+GC,
+    // so the post-GC absence assertions below cannot pass vacuously.
+    let pre_gc = all_disk_bytes(dir.path());
+    assert!(contains(&pre_gc, node_secret));
+    assert!(contains(&pre_gc, edge_secret));
 
     compact_until_idle(&db).await.unwrap();
     db.gc_once().await.unwrap();

@@ -67,6 +67,13 @@ full (non-`--quick`) sweep.
 
 ## Ship steps (USER-GATED — not executed by the agent)
 
+> **Precondition — repo name must be `varve` before tagging.** `release.yml` derives the image
+> name from `${{ github.repository }}`, and README / `CHANGELOG.md` / every crate's `repository`
+> URL hardcode `ravan/varve`. If the GitHub repo is still named `timedb` at tag time, the pushed
+> image is `ghcr.io/ravan/timedb` and the documented `docker run ghcr.io/ravan/varve:v1.0.0` /
+> repo URLs 404. Rename the GitHub repo (and, if desired, the working dir) to `varve` first, or
+> reconcile the hardcoded URLs to the real name before step 1.
+
 1. `git tag v1.0.0 && git push origin main v1.0.0` — the release workflow builds the three
    target tarballs and pushes `ghcr.io/ravan/varve:v1.0.0` / `:latest`; publish the DRAFT
    GitHub release after inspecting assets.
