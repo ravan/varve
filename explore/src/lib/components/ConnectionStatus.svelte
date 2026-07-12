@@ -23,6 +23,7 @@
   function statusLabel(current: ConnectionSession, currentHealth: unknown): string {
     if (current === 'unknown' || current === 'checking') return 'Checking';
     if (current === 'connecting') return 'Connecting';
+    if (current === 'degraded') return 'Degraded';
     if (current === 'unauthenticated') return 'Authentication required';
     if (current === 'error') return 'Unavailable';
     if (isRecord(currentHealth) && currentHealth.status === 'degraded') return 'Degraded';
@@ -34,8 +35,14 @@
   }
 </script>
 
-<div class="flex items-center gap-2" aria-label="Connection status">
-  <span class="text-muted-foreground hidden text-xs sm:inline">Connection status</span>
+<div
+  class="flex items-center gap-2"
+  role="status"
+  aria-label="Connection status"
+  aria-live="polite"
+  aria-atomic="true"
+>
+  <span class="text-muted-foreground hidden text-xs sm:inline" aria-hidden="true">Connection status</span>
   {#if session === 'unknown' || session === 'checking'}
     <Skeleton class="h-5 w-20 motion-reduce:animate-none" aria-label={label} />
   {:else}

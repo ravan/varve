@@ -16,6 +16,7 @@ export type ConnectionSession =
   | 'checking'
   | 'connecting'
   | 'authenticated'
+  | 'degraded'
   | 'unauthenticated'
   | 'error';
 
@@ -35,6 +36,7 @@ export function createConnectionStore(fetcher: FetchLike) {
   let status = $state<unknown>(null);
   let session = $state<ConnectionSession>('unknown');
   let error = $state<ConnectionFailure | null>(null);
+  let degraded = $state(false);
   let refreshSequence = 0;
   const sessionOperations = createSessionOperationCoordinator();
 
@@ -51,8 +53,10 @@ export function createConnectionStore(fetcher: FetchLike) {
       if (sequence !== refreshSequence) return;
       if (healthResult.status === 'fulfilled') {
         health = healthResult.value;
+        degraded = isDegradedHealth(healthResult.value);
       } else {
         health = null;
+        degraded = false;
         error = normalizeFailure(healthResult.reason);
       }
       if (configResult.status === 'rejected') throw configResult.reason;
@@ -70,7 +74,8 @@ export function createConnectionStore(fetcher: FetchLike) {
       const nextStatus = await requestJson(fetcher, '/api/varve/status');
       if (sequence !== refreshSequence) return;
       status = nextStatus;
-      session = 'authenticated';
+      degraded = degraded || isDegradedStatus(nextStatus);
+      session = error !== null ? 'error' : degraded ? 'degraded' : 'authenticated';
     } catch (cause) {
       if (sequence !== refreshSequence) return;
       const failure = normalizeFailure(cause);
@@ -145,6 +150,9 @@ export function createConnectionStore(fetcher: FetchLike) {
     get error() {
       return error;
     },
+    get degraded() {
+      return degraded;
+    },
     connect,
     disconnect,
     refresh,
@@ -175,12 +183,17 @@ async function requestHealth(fetcher: FetchLike): Promise<unknown> {
   } catch {
     throw requestFailure('network');
   }
+  let value: unknown;
   try {
-    return await response.json();
+    value = await response.json();
   } catch {
-    if (!response.ok) throw await responseFailure(response);
     throw requestFailure('malformed_response', response.status);
   }
+  if ((response.ok && isHealthyHealth(value)) || isDegradedHealth(value)) return value;
+  if (isRecord(value) && isExplorerErrorCode(value.code)) {
+    throw requestFailure(value.code, response.status);
+  }
+  throw requestFailure('malformed_response', response.status);
 }
 
 async function responseFailure(response: Response): Promise<RequestFailure> {
@@ -214,6 +227,24 @@ function isConnectionConfig(value: unknown): value is ConnectionConfig {
     typeof value.displayName === 'string' &&
     typeof value.target === 'string' &&
     typeof value.authenticated === 'boolean'
+  );
+}
+
+function isDegradedHealth(value: unknown): boolean {
+  return isRecord(value) && value.status === 'degraded';
+}
+
+function isHealthyHealth(value: unknown): boolean {
+  return isRecord(value) && value.status === 'ok';
+}
+
+function isDegradedStatus(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (typeof value.follower_error === 'string' && value.follower_error.length > 0) return true;
+  return (
+    isRecord(value.probe) &&
+    typeof value.probe.verdict === 'string' &&
+    value.probe.verdict !== 'supported'
   );
 }
 
