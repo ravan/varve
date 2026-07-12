@@ -109,12 +109,26 @@ describe('extractQueryShape', () => {
   });
 
   it.each([
+    ['[:KNOWS]', { variable: undefined, types: ['KNOWS'] }],
+    ['[r]', { variable: 'r', types: [] }],
+    ['[r:KNOWS]', { variable: 'r', types: ['KNOWS'] }],
+  ])('accepts the supported relationship body %s', (body, relationship) => {
+    expect(extractQueryShape(`MATCH (a)-${body}->(b) RETURN a`)).toMatchObject({
+      ambiguous: false,
+      patterns: [{ relationships: [relationship] }],
+    });
+  });
+
+  it.each([
     'MATCH (a:Person RETURN a',
     'MATCH shortestPath((a)-[:KNOWS]->(b)) RETURN a',
     "MATCH (a:Person {name: 'Ada}) RETURN a",
     'MATCH (a)-foo-(b) RETURN a',
     'MATCH (a unexpected)-[:KNOWS]->(b) RETURN a',
     'MATCH (a:Person unexpected)-[:KNOWS]->(b) RETURN a',
+    'MATCH (a)-[r unexpected:KNOWS]->(b) RETURN a',
+    'MATCH (a)-[r|KNOWS]->(b) RETURN a',
+    'MATCH (a)-[r junk]->(b) RETURN a',
   ])('returns an empty ambiguous shape for unsupported input %s', (gql) => {
     expect(extractQueryShape(gql)).toEqual({
       ambiguous: true,
