@@ -261,3 +261,45 @@ async fn export_writes_line_delimited_json_with_explicit_nulls_and_tagged_bytes(
         .unwrap_or_else(|error| panic!("row 1 must be valid json: {error}"));
     assert_eq!(row1, json!({"name": null, "age": 30, "blob": null}));
 }
+
+#[tokio::test]
+async fn invalid_label_is_rejected_before_any_client_call() {
+    let input = b"{\"_id\":1}\n";
+    let client = Arc::new(FakeClient::new());
+    let error =
+        expect_err(import_jsonl(client.clone(), Cursor::new(input), "bad-ident!", None).await);
+    let message = error.to_string();
+    assert!(
+        message.contains("--label"),
+        "error must name the flag: {message}"
+    );
+    assert!(
+        message.contains("bad-ident!"),
+        "error must name the invalid identifier: {message}"
+    );
+    assert!(
+        client.tx_requests().is_empty(),
+        "no transaction should reach the client when the label is invalid"
+    );
+}
+
+#[tokio::test]
+async fn invalid_graph_is_rejected_before_any_client_call() {
+    let input = b"{\"_id\":1}\n";
+    let client = Arc::new(FakeClient::new());
+    let error =
+        expect_err(import_jsonl(client.clone(), Cursor::new(input), "Person", Some("1nope")).await);
+    let message = error.to_string();
+    assert!(
+        message.contains("--graph"),
+        "error must name the flag: {message}"
+    );
+    assert!(
+        message.contains("1nope"),
+        "error must name the invalid identifier: {message}"
+    );
+    assert!(
+        client.tx_requests().is_empty(),
+        "no transaction should reach the client when the graph is invalid"
+    );
+}
