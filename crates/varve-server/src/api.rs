@@ -69,6 +69,14 @@ pub struct TxResponse {
 }
 
 impl TxResponse {
+    /// Builds the wire response from an engine [`TxReceipt`].
+    ///
+    /// `system_time` is the receipt instant rendered through its `Display`,
+    /// which is RFC 3339 with microsecond precision for every real receipt.
+    /// Instants outside chrono's representable range — sentinels or synthetic
+    /// values the writer never emits — fall back to a raw `<µs>us` string
+    /// (e.g. `9223372036854775807us`), keeping this conversion total so a
+    /// public caller can never trip a panic on an extreme instant.
     pub fn from_receipt(receipt: &TxReceipt) -> Self {
         Self {
             tx_id: receipt.tx_id,
@@ -284,4 +292,26 @@ pub fn batches_to_json(batches: &[RecordBatch]) -> Result<QueryJsonResponse, Ser
     Ok(QueryJsonResponse {
         rows: varve::rows(batches)?.collect(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use varve_engine::SideEffects;
+    use varve_types::Instant;
+
+    #[test]
+    fn from_receipt_renders_out_of_range_instants_as_raw_micros() {
+        // `Instant::END_OF_TIME` (i64::MAX µs) is outside chrono's range, so
+        // its Display falls back to `<µs>us`. Real receipts never carry such
+        // an instant; this pins that `from_receipt` stays total either way.
+        let receipt = TxReceipt {
+            tx_id: 7,
+            system_time: Instant::END_OF_TIME,
+            side_effects: SideEffects::default(),
+        };
+        let response = TxResponse::from_receipt(&receipt);
+        assert_eq!(response.system_time, "9223372036854775807us");
+        assert_eq!(response.system_time_us, i64::MAX);
+    }
 }
