@@ -25,6 +25,12 @@ s3-matrix backends="garage,seaweedfs,minio":
 bench-micro:
     cargo bench -p varve-index -p varve-types -p varve-gql
 
+# Slice 11 task 9: env-gated release-mode read scale-out bench (1/2/4 query
+# nodes of one cluster, single ingest). Prints a markdown QPS table for
+# docs/benchmarks/v1.md. Skips fast without VARVE_SCALE_BENCH=1.
+bench-scale-out:
+    VARVE_SCALE_BENCH=1 cargo test -p varve-server --release --test scale_out_bench -- --nocapture --test-threads=1
+
 # Slice 9 exit demo: Garage + writer + two query nodes over Compose, with
 # fixture load, cross-node basis/Arrow verify, shell/admin drive, and teardown.
 # Routed through `rtk proxy` so the repo's RTK rule stays visible.
