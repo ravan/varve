@@ -147,7 +147,7 @@
             onclick={() => void disconnect()}
           >Disconnect</Button>
         {/if}
-        <Button type="submit" disabled={connection.session === 'connecting' || token.length === 0}>
+        <Button type="submit" disabled={connection.session === 'connecting'}>
           {connection.session === 'connecting' ? 'Connecting…' : 'Connect'}
         </Button>
       </Dialog.Footer>
