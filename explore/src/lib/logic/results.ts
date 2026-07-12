@@ -129,7 +129,7 @@ export function formatCell(cell: NormalizedCell): string {
   if (value === null) {
     return 'null';
   }
-  if (isBytesObject(value)) {
+  if (isCanonicalBytesObject(value)) {
     const preview = value.$bytes.length > 24 ? `${value.$bytes.slice(0, 24)}…` : value.$bytes;
     return `bytes · ${decodedBase64Size(value.$bytes)} B · ${preview}`;
   }
@@ -269,7 +269,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isBytesObject(value: unknown): value is { $bytes: string } {
+export function isCanonicalBytesObject(value: unknown): value is { $bytes: string } {
   return (
     isRecord(value) &&
     Object.keys(value).length === 1 &&

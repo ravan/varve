@@ -38,6 +38,15 @@ describe('extractGraph', () => {
     });
   });
 
+  it('keeps deterministic endpoints for an undirected relationship', () => {
+    const shape = extractQueryShape('MATCH p = (a)-[:CONNECTED]-(b) RETURN p');
+
+    expect(extractGraph(shape, [{ p: ['node-a', 'edge-ab', 'node-b'] }], 1000)).toMatchObject({
+      available: true,
+      edges: [{ source: 'node-a', target: 'node-b', type: 'CONNECTED' }],
+    });
+  });
+
   it('maps direct returned variables and ignores unrelated scalar attachments', () => {
     const shape = extractQueryShape(
       'MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a AS from, r, b AS to',
@@ -62,6 +71,25 @@ describe('extractGraph', () => {
     });
   });
 
+  it('uses complete direct variables when a named path is not returned', () => {
+    const shape = extractQueryShape('MATCH p = (a)-[r:KNOWS]->(b) RETURN a, r, b');
+
+    expect(extractGraph(shape, [{ a: 'node-a', r: 'edge-ab', b: 'node-b' }], 1000)).toMatchObject({
+      available: true,
+      nodes: [{ id: 'node-a' }, { id: 'node-b' }],
+      edges: [{ id: 'edge-ab', source: 'node-a', target: 'node-b', type: 'KNOWS' }],
+    });
+  });
+
+  it('rejects a non-returned named path when direct variables are incomplete', () => {
+    const shape = extractQueryShape('MATCH p = (a)-[r]->(b) RETURN a, r');
+
+    expect(extractGraph(shape, [{ a: 'node-a', r: 'edge-ab' }], 1000)).toMatchObject({
+      available: false,
+      reason: expect.stringContaining('topology'),
+    });
+  });
+
   it('supports exact Varve byte identifiers without inferring from display properties', () => {
     const shape = extractQueryShape('MATCH p = (a)-[r]->(b) RETURN p');
     const graph = extractGraph(
@@ -80,6 +108,18 @@ describe('extractGraph', () => {
       reason: expect.stringContaining('identity'),
     });
   });
+
+  it.each(['not-base64', 'AB==', 'AAB='])(
+    'rejects the malformed or noncanonical byte identity %s',
+    ($bytes) => {
+      const shape = extractQueryShape('MATCH p = (a)-[r]->(b) RETURN p');
+
+      expect(extractGraph(shape, [{ p: [{ $bytes }, 'edge', 'node-b'] }], 1000)).toMatchObject({
+        available: false,
+        reason: expect.stringContaining('identity'),
+      });
+    },
+  );
 
   it('refuses malformed path values and ambiguous query shapes', () => {
     const shape = extractQueryShape('MATCH p = (a)-[r]->(b) RETURN p');
