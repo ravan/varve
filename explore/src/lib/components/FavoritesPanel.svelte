@@ -44,9 +44,10 @@
 
   function saveFavorite(): void {
     const name = favoriteName.trim();
-    if (name === '' || parametersDraft === null) return;
+    if (name === '') return;
     const now = Date.now();
     if (editingId === null) {
+      if (parametersDraft === null) return;
       workspace.addFavorite({
         id: crypto.randomUUID(),
         name,
@@ -155,7 +156,10 @@
     </div>
     <Dialog.Footer>
       <Button variant="outline" onclick={() => (dialogOpen = false)}>Cancel</Button>
-      <Button disabled={favoriteName.trim() === '' || parametersDraft === null} onclick={saveFavorite}>Save favorite</Button>
+      <Button
+        disabled={favoriteName.trim() === '' || (editingId === null && parametersDraft === null)}
+        onclick={saveFavorite}
+      >Save favorite</Button>
     </Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>
