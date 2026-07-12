@@ -19,33 +19,32 @@
   } = $props();
 
   let token = $state('');
-  let wasOpen = $state(false);
-  let mustRemainOpen = $derived(connection.session !== 'authenticated');
-  let errorCopy = $derived(connectionErrorCopy(connection.error?.code));
+  let mustRemainOpen = $derived(
+    connection.config?.authenticated !== true || connection.session === 'unauthenticated',
+  );
+  let errorCopy = $derived(connectionErrorCopy(connection.error?.code, connection.degraded));
 
-  $effect(() => {
-    if (mustRemainOpen && !open) open = true;
-  });
-
-  $effect(() => {
-    if (wasOpen && !open && !mustRemainOpen) {
-      queueMicrotask(() => returnFocus?.focus());
-    }
-    wasOpen = open;
-  });
+  function handleOpenChange(nextOpen: boolean): void {
+    if (!nextOpen && mustRemainOpen) return;
+    const shouldRestoreFocus = open && !nextOpen;
+    open = nextOpen;
+    if (shouldRestoreFocus) queueMicrotask(() => returnFocus?.focus());
+  }
 
   async function connect(): Promise<void> {
     const submittedToken = token;
     token = '';
     await connection.connect(submittedToken);
-    if (connection.session === 'authenticated') open = false;
+    if (connection.session === 'authenticated' || connection.session === 'degraded') {
+      open = false;
+      queueMicrotask(() => returnFocus?.focus());
+    }
   }
 
-  function connectionErrorCopy(code: string | undefined): {
+  function connectionErrorCopy(code: string | undefined, degraded: boolean): {
     title: string;
     description: string;
   } | null {
-    if (code === undefined) return null;
     if (code === 'unauthorized') {
       return {
         title: 'Authentication required',
@@ -64,6 +63,13 @@
         description: 'The configured target could not be reached. Your token was not retained.',
       };
     }
+    if (degraded) {
+      return {
+        title: 'Connection degraded',
+        description: 'Varve is reachable, but health or node status reports a degraded service.',
+      };
+    }
+    if (code === undefined) return null;
     return {
       title: 'Connection degraded',
       description: 'The target is not ready. Try connecting again when it recovers.',
@@ -71,8 +77,12 @@
   }
 </script>
 
-<Dialog.Root bind:open>
-  <Dialog.Content showCloseButton={!mustRemainOpen}>
+<Dialog.Root open={mustRemainOpen || open} onOpenChange={handleOpenChange}>
+  <Dialog.Content
+    showCloseButton={!mustRemainOpen}
+    escapeKeydownBehavior={mustRemainOpen ? 'ignore' : 'close'}
+    interactOutsideBehavior={mustRemainOpen ? 'ignore' : 'close'}
+  >
     <Dialog.Header>
       <Dialog.Title>Connect to Varve</Dialog.Title>
       <Dialog.Description>

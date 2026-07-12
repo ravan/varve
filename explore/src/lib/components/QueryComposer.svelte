@@ -45,6 +45,7 @@
   let timeoutInput = $state('30000');
   let activeController = $state<AbortController | null>(null);
   let requestError = $state<ErrorCopy | null>(null);
+  let componentMounted = false;
 
   let parametersValidation = $derived(validateParameters(parametersInput));
   let basisValidation = $derived(parseBasis(basisInput));
@@ -81,6 +82,7 @@
 
   onMount(() => {
     if (editorHost === null) return;
+    componentMounted = true;
     editor = new EditorView({
       parent: editorHost,
       state: EditorState.create({
@@ -117,6 +119,9 @@
     });
 
     return () => {
+      componentMounted = false;
+      activeController?.abort();
+      activeController = null;
       editor?.destroy();
       editor = null;
     };
@@ -168,6 +173,7 @@
     let rowCount = 0;
     let effectCount = 0;
     let responseValue: unknown;
+    let rawResponseValue: unknown;
 
     try {
       const request: QueryRequest = { gql, params };
@@ -185,49 +191,57 @@
         signal: controller.signal,
       });
       const raw = await readJson(response);
+      rawResponseValue = raw;
+      if (!componentMounted) return;
       if (!response.ok) throw responseFailure(raw, response.status);
 
       if (mode === 'read') {
         const normalized = normalizeQueryResponse(raw);
         responseValue = normalized;
+        rawResponseValue = normalized.raw;
         rowCount = normalized.rows.length;
       } else {
         const receipt = normalizeTxReceipt(raw);
         responseValue = receipt;
+        rawResponseValue = receipt.raw;
         effectCount = Object.values(receipt.side_effects).reduce((total, count) => total + count, 0);
         workspace.setDefaultReadBasis(receipt.basis);
       }
       outcome = 'success';
     } catch (cause) {
-      const failure = normalizeExecutionFailure(cause, controller.signal.aborted);
-      outcome = failure.code === 'cancelled' ? 'cancelled' : 'error';
-      responseValue = failure;
-      requestError = executionErrorCopy(failure);
-      if (failure.code === 'unauthorized') void connection.refresh();
+      if (componentMounted) {
+        const failure = normalizeExecutionFailure(cause, controller.signal.aborted);
+        outcome = failure.code === 'cancelled' ? 'cancelled' : 'error';
+        responseValue = failure;
+        requestError = executionErrorCopy(failure);
+        if (failure.code === 'unauthorized') void connection.refresh();
+      }
     } finally {
-      const finishedAt = Date.now();
-      const durationMs = Math.max(0, finishedAt - startedAt);
-      workspace.replaceFrame({
-        ...runningFrame,
-        state: outcome,
-        finishedAt,
-        durationMs,
-        response: responseValue,
-        rawResponse: responseValue,
-      });
-      workspace.recordHistory({
-        gql,
-        mode,
-        params,
-        finishedAt,
-        durationMs,
-        rowCount,
-        effectCount,
-        outcome,
-        runCount: 1,
-      });
-      workspace.observeExecution(gql, outcome, finishedAt);
-      activeController = null;
+      if (componentMounted) {
+        const finishedAt = Date.now();
+        const durationMs = Math.max(0, finishedAt - startedAt);
+        workspace.replaceFrame({
+          ...runningFrame,
+          state: outcome,
+          finishedAt,
+          durationMs,
+          response: responseValue,
+          ...(rawResponseValue === undefined ? {} : { rawResponse: rawResponseValue }),
+        });
+        workspace.recordHistory({
+          gql,
+          mode,
+          params,
+          finishedAt,
+          durationMs,
+          rowCount,
+          effectCount,
+          outcome,
+          runCount: 1,
+        });
+        workspace.observeExecution(gql, outcome, finishedAt);
+        activeController = null;
+      }
     }
   }
 
