@@ -19,6 +19,21 @@ it('returns null for malformed or incorrectly shaped values', () => {
   }
 });
 
+it('rejects non-canonical base64url before decoding JSON', () => {
+  const valid = encodeSession('secret');
+
+  for (const value of [
+    `${valid}=`,
+    `${valid}===`,
+    ` ${valid}`,
+    `${valid}\n`,
+    `${valid}!`,
+    `${valid}!junk`,
+  ]) {
+    expect(decodeSession(value)).toBeNull();
+  }
+});
+
 it('uses a session-only strict HttpOnly cookie in production', () => {
   const options = sessionCookieOptions(false);
 

@@ -9,8 +9,13 @@ export function encodeSession(token: string): string {
 }
 
 export function decodeSession(value: string): string | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
+
   try {
-    const decoded: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
+    const bytes = Buffer.from(value, 'base64url');
+    if (bytes.toString('base64url') !== value) return null;
+
+    const decoded: unknown = JSON.parse(bytes.toString('utf8'));
     if (
       typeof decoded !== 'object' ||
       decoded === null ||
