@@ -7,7 +7,7 @@ import type { ExplorerError } from '$lib/types';
 import type { RequestHandler } from './$types';
 
 const MAX_TOKEN_BYTES = 4096;
-const MAX_COOKIE_VALUE_BYTES = 4096;
+const MAX_COOKIE_NAME_VALUE_BYTES = 4096;
 const MAX_CONNECT_BODY_BYTES = 32_768;
 
 function jsonError(message: string, status: number): Response {
@@ -74,8 +74,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
     typeof value !== 'object' ||
     value === null ||
     !('token' in value) ||
-    typeof value.token !== 'string' ||
-    value.token.length === 0
+    typeof value.token !== 'string'
   ) {
     return jsonError('Token is required', 400);
   }
@@ -84,7 +83,10 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
   }
   if (!isSafeBearerToken(value.token)) return jsonError('Token is invalid', 400);
   const encodedSession = encodeSession(value.token);
-  if (Buffer.byteLength(encodedSession, 'utf8') > MAX_COOKIE_VALUE_BYTES) {
+  if (
+    Buffer.byteLength(`${SESSION_COOKIE_NAME}=${encodedSession}`, 'utf8') >
+    MAX_COOKIE_NAME_VALUE_BYTES
+  ) {
     return jsonError('Token cannot be stored in a session cookie', 400);
   }
 
