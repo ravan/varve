@@ -3,6 +3,8 @@ name = "varve-storage"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "S3-compatible object-store abstraction and block/manifest format for Varve, the bitemporal graph database."
 
 [features]
 # Any S3-API endpoint (AWS, Garage, Ceph RGW, SeaweedFS, MinIO). Default-on:
@@ -12,8 +14,8 @@ default = ["s3"]
 s3 = ["object_store/aws"]
 
 [dependencies]
-varve-config = { path = "../varve-config" }
-varve-types = { path = "../varve-types" }
+varve-config = { path = "../varve-config", version = "1.0.0" }
+varve-types = { path = "../varve-types", version = "1.0.0" }
 object_store = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }

@@ -103,20 +103,49 @@ impl BlockManifest {
     }
 }
 
-/// Finds the newest committed manifest under `v1/blocks/` (lex-hex sorts
-/// lexicographically in numeric order, but we parse-and-max explicitly
-/// rather than rely on that, since foreign/stray keys under the prefix
-/// must be ignored rather than corrupt the ordering).
+/// How many of the highest-block-id manifests [`latest_manifest`] fetches.
+/// The winner (max watermark) is always the current writer's tip, which is at
+/// the top of block-id order; a fenced writer's stray sits at most a handful
+/// of blocks above the tip (the lease ack-gate makes a fenced writer fatal
+/// after one commit). 32 is generous headroom over that handful while keeping
+/// the read O(1) regardless of how far the total manifest count has grown.
+const LATEST_MANIFEST_SCAN: usize = 32;
+
+/// Finds the newest COMMITTED manifest: max by `(watermark, block_id)`.
+/// Watermark-first makes a fenced writer's stray manifest (higher block id,
+/// stale watermark — the slice-10 known limitation) permanently unable to
+/// win; block id breaks the flush-vs-compaction tie at equal watermarks.
+///
+/// Bounded read: only the [`LATEST_MANIFEST_SCAN`] highest-block-id manifests
+/// are fetched, never the whole history. This is correct because block id and
+/// watermark advance together for the legit chain, so the max-watermark
+/// manifest is always among the highest block ids; every OLDER manifest has
+/// both a lower block id AND a lower watermark and can never win. This keeps a
+/// query follower's idle poll (which calls this ~20×/s) at O(1) object reads
+/// even when GC is disabled and the manifest count grows without bound.
+/// Corruption in a manifest OLDER than the scan window is not surfaced here (it
+/// cannot affect the result); `manifest_history` still reads and validates all.
 pub async fn latest_manifest(
     store: &dyn ObjectStore,
 ) -> Result<Option<BlockManifest>, StorageError> {
-    let keys = store.list(MANIFEST_PREFIX).await?;
-    let latest = keys.iter().filter_map(|k| manifest_block_id(k)).max();
-    let Some(latest) = latest else {
-        return Ok(None);
-    };
-    let bytes = store.get(&manifest_key(latest)).await?;
-    Ok(Some(BlockManifest::from_wire(&bytes)?))
+    let mut ids: Vec<u64> = store
+        .list(MANIFEST_PREFIX)
+        .await?
+        .iter()
+        .filter_map(|key| manifest_block_id(key))
+        .collect();
+    // Highest block ids first; only the top window can contain the winner.
+    ids.sort_unstable_by(|a, b| b.cmp(a));
+    ids.truncate(LATEST_MANIFEST_SCAN);
+
+    let mut manifests = Vec::with_capacity(ids.len());
+    for id in ids {
+        let bytes = store.get(&manifest_key(id)).await?;
+        manifests.push(BlockManifest::from_wire(&bytes)?);
+    }
+    Ok(manifests
+        .into_iter()
+        .max_by_key(|manifest| (manifest.watermark, manifest.block_id)))
 }
 
 pub async fn manifest_history(store: &dyn ObjectStore) -> Result<Vec<BlockManifest>, StorageError> {
@@ -218,6 +247,15 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "regenerates the committed fuzz seed corpus"]
+    fn write_manifest_fuzz_seed() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/manifest");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("valid.bin"), sample().to_wire()).unwrap();
+    }
+
+    #[test]
     fn from_wire_rejects_garbage() {
         assert!(matches!(
             BlockManifest::from_wire(&[0xFF, 0xFF, 0xFF]),
@@ -232,28 +270,96 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn latest_manifest_picks_the_highest_block_id() {
+    async fn latest_manifest_picks_the_highest_watermark_not_block_id() {
         let store = memory_store();
-        for block_id in [0u64, 1] {
+        let good = BlockManifest {
+            block_id: 10,
+            watermark: 500,
+            ..sample()
+        };
+        // A fenced writer's stray manifest: newer block id, STALE watermark.
+        let stray = BlockManifest {
+            block_id: 11,
+            watermark: 400,
+            ..sample()
+        };
+        store
+            .put(&manifest_key(10), Bytes::from(good.to_wire()))
+            .await
+            .unwrap();
+        store
+            .put(&manifest_key(11), Bytes::from(stray.to_wire()))
+            .await
+            .unwrap();
+
+        let latest = latest_manifest(store.as_ref()).await.unwrap().unwrap();
+        assert_eq!((latest.watermark, latest.block_id), (500, 10));
+    }
+
+    #[tokio::test]
+    async fn latest_manifest_breaks_watermark_ties_by_block_id() {
+        // Compaction manifests legitimately share the flush watermark; the newer
+        // block id (the compaction result) must win, preserving today's behavior.
+        let store = memory_store();
+        let flush = BlockManifest {
+            block_id: 10,
+            watermark: 500,
+            ..sample()
+        };
+        let compaction = BlockManifest {
+            block_id: 11,
+            watermark: 500,
+            ..sample()
+        };
+        store
+            .put(&manifest_key(10), Bytes::from(flush.to_wire()))
+            .await
+            .unwrap();
+        store
+            .put(&manifest_key(11), Bytes::from(compaction.to_wire()))
+            .await
+            .unwrap();
+
+        let latest = latest_manifest(store.as_ref()).await.unwrap().unwrap();
+        assert_eq!(latest.block_id, 11);
+    }
+
+    #[tokio::test]
+    async fn latest_manifest_scans_only_the_highest_block_ids() {
+        // A query follower calls latest_manifest continuously; with GC disabled
+        // the manifest count grows without bound, so it must NOT fetch every
+        // object. The winner (max watermark) is always the current writer's tip
+        // at the top of block-id order. This plants LATEST_MANIFEST_SCAN + 4
+        // monotonic legit manifests (block_id == watermark) plus an
+        // impossible-in-production probe at block_id 0 with a u64::MAX
+        // watermark: the bounded scan never fetches the probe (far below the top
+        // window), so the real tip wins. The unbounded predecessor would have
+        // fetched every object and been fooled by the probe's watermark.
+        let store = memory_store();
+        let tip = LATEST_MANIFEST_SCAN as u64 + 4;
+        for block_id in 1..=tip {
             let m = BlockManifest {
                 block_id,
+                watermark: block_id,
                 ..sample()
             };
             store
-                .put(
-                    &crate::keys::manifest_key(block_id),
-                    Bytes::from(m.to_wire()),
-                )
+                .put(&manifest_key(block_id), Bytes::from(m.to_wire()))
                 .await
                 .unwrap();
         }
-        // A foreign key under the prefix is ignored, not an error.
+        let probe = BlockManifest {
+            block_id: 0,
+            watermark: u64::MAX,
+            ..sample()
+        };
         store
-            .put("v1/blocks/stray.tmp", Bytes::from_static(b"x"))
+            .put(&manifest_key(0), Bytes::from(probe.to_wire()))
             .await
             .unwrap();
+
         let latest = latest_manifest(store.as_ref()).await.unwrap().unwrap();
-        assert_eq!(latest.block_id, 1);
+        assert_eq!((latest.watermark, latest.block_id), (tip, tip));
     }
 
     #[tokio::test]

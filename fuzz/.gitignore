@@ -1,3 +1,9 @@
 artifacts/
 coverage/
 target/
+# Fuzzer-discovered corpus inputs are ephemeral coverage, not source. The
+# hand-authored seeds under corpus/<target>/ are already tracked and stay so
+# (an ignore never untracks); this only stops local/CI fuzz runs from
+# dirtying the tree with thousands of hash-named inputs. Add a new seed with
+# `git add -f`.
+corpus/

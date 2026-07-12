@@ -3,6 +3,9 @@ name = "varve-testkit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# Internal test/bench/demo rig (docker backend harness, fixtures, oracle,
+# fault-injection feature unification) — never published to crates.io.
+publish = false
 
 [dependencies]
 proptest = { workspace = true }
@@ -16,6 +19,13 @@ varve-engine = { path = "../varve-engine", features = ["fault-injection"] }
 varve-storage = { path = "../varve-storage" }
 varve-config = { path = "../varve-config" }
 varve-gql = { path = "../varve-gql" }
+# config_reference.rs (library code, task 13) reuses
+# varve_server::http::DEFAULT_MAX_BODY_BYTES so the generated configuration
+# reference cannot drift from the server's real serde default; only the
+# "http" feature is needed (no tls/otel) for that one constant.
+varve-server = { path = "../varve-server", default-features = false, features = [
+    "http",
+] }
 tokio = { workspace = true }
 # backends.rs is library code (not test-only) that shells out to docker and
 # needs scratch config directories, so tempfile lives here, not dev-deps.

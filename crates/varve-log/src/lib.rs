@@ -10,7 +10,7 @@ pub use log::{Log, LogError};
 pub use memory::{MemoryLog, MemoryLogFactory};
 #[cfg(feature = "object-store")]
 pub use object_store::{ObjectStoreLog, ObjectStoreLogFactory};
-pub use record::{LogRecord, TableEffects};
+pub use record::{decode_frames, LogRecord, TableEffects};
 
 use varve_config::{ComponentFactory, Registry};
 

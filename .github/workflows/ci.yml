@@ -33,6 +33,16 @@ jobs:
             target/tck-outcomes.tsv
           if-no-files-found: error
 
+  docs:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install mdbook --locked --version 0.5.4
+      - run: mdbook build docs/book
+
   gql-differential:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
@@ -106,16 +116,32 @@ jobs:
   fuzz-nightly:
     if: github.event_name == 'schedule' && github.event.schedule == '0 3 * * *'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: parse
+            secs: 600
+          - target: log_record
+            secs: 300
+          - target: manifest
+            secs: 300
+          - target: block_meta
+            secs: 300
+          - target: events
+            secs: 300
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-fuzz --locked
-      - run: cargo +nightly fuzz run parse -- -max_total_time=600 -rss_limit_mb=4096
+      # Varve's arrow-IPC decoders may lazily over-reserve (never-touched) buffers on adversarial input while returning clean errors; gate on RSS (real memory), not on allocation request-size.
+      # NOTE: libFuzzer treats -malloc_limit_mb=0 as "inherit -rss_limit_mb", so 0 does NOT disable the single-malloc hook. We raise it to 1 TiB to effectively unbound the request-size hook while -rss_limit_mb=4096 remains the real (touched-memory) gate.
+      - run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=${{ matrix.secs }} -rss_limit_mb=4096 -malloc_limit_mb=1048576
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: fuzz-artifacts
+          name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts
 
   crash-matrix:
