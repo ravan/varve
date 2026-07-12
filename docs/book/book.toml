@@ -1,0 +1,9 @@
+[book]
+title = "VarveDB"
+description = "Bitemporal property-graph database speaking GQL, embedded-first, over any S3-API object store"
+authors = ["Varve contributors"]
+language = "en"
+src = "src"
+
+[build]
+create-missing = false
