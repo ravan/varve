@@ -241,10 +241,7 @@ function isHealthyHealth(value: unknown): boolean {
 function isDegradedStatus(value: unknown): boolean {
   if (!isRecord(value)) return false;
   if (typeof value.follower_error === 'string' && value.follower_error.length > 0) return true;
-  return (
-    isRecord(value.probe) &&
-    value.probe.verdict === 'inconsistent'
-  );
+  return isRecord(value.probe) && value.probe.verdict === 'inconsistent';
 }
 
 function isExplorerErrorCode(value: unknown): value is ExplorerErrorCode {
