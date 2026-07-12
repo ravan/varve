@@ -1,6 +1,7 @@
 import { expect, it } from 'vitest';
 import type { QueryParameters } from '../types';
 import {
+  areQueryParametersPersistable,
   addFavorite,
   addFrame,
   clearHistory,
@@ -22,6 +23,12 @@ import {
   type HistoryEntry,
 } from './workspace';
 
+function parametersWithOwnKey(key: string): QueryParameters {
+  const params: QueryParameters = {};
+  Object.defineProperty(params, key, { enumerable: true, value: 'unsafe' });
+  return params;
+}
+
 it.each([
   'token',
   'authToken',
@@ -41,6 +48,24 @@ it.each(['name', 'position', 'basis', 'accountId'])(
     expect(isSensitiveParameterKey(key)).toBe(false);
   },
 );
+
+it.each([
+  ['empty', {}],
+  ['ordinary', { accountId: 42, basis: 'latest' }],
+] as const)('accepts %s query parameters for persistence', (_label, params) => {
+  expect(areQueryParametersPersistable(params)).toBe(true);
+});
+
+it.each([
+  ['sensitive session', { sessionId: 'session-1' }],
+  ['reserved raw', { raw: 'body' }],
+  ['reserved raw response', { rawResponse: 'body' }],
+  ['prototype __proto__', parametersWithOwnKey('__proto__')],
+  ['prototype constructor', parametersWithOwnKey('constructor')],
+  ['prototype prototype', parametersWithOwnKey('prototype')],
+] as const)('rejects %s query parameters from persistence', (_label, params) => {
+  expect(areQueryParametersPersistable(params)).toBe(false);
+});
 
 function historyEntry(overrides: Partial<HistoryEntry> = {}): HistoryEntry {
   return {
@@ -267,6 +292,35 @@ it('observes schema from successful executions and favorites only', () => {
   });
 });
 
+it('round-trips observed schema names containing Session', () => {
+  const original = observeExecution(
+    emptyWorkspace(),
+    'MATCH (source:Session)-[:Session]->(target:Target) RETURN source',
+    'success',
+    1,
+  );
+
+  expect(original.observedSchema.labels.Session).toBeDefined();
+  expect(original.observedSchema.relationshipTypes.Session).toBeDefined();
+
+  const serialized = serializeWorkspace(original);
+  const persisted = JSON.parse(serialized) as {
+    workspace: {
+      observedSchema: {
+        labels: Record<string, unknown>;
+        relationshipTypes: Record<string, unknown>;
+      };
+    };
+  };
+
+  expect(persisted.workspace.observedSchema.labels.Session).toBeDefined();
+  expect(persisted.workspace.observedSchema.relationshipTypes.Session).toBeDefined();
+
+  const restored = deserializeWorkspace(serialized);
+
+  expect(restored.observedSchema).toEqual(original.observedSchema);
+});
+
 it('serializes schema version 1 without any frame response or raw body', () => {
   let state = addFrame(emptyWorkspace(), completedFrame('complete'));
   state = addFrame(
@@ -330,6 +384,17 @@ it('decodes a valid v1 workspace record', () => {
   original = updateSettings(original, { theme: 'dark', defaultResultTab: 'table' });
 
   expect(deserializeWorkspace(serializeWorkspace(original))).toEqual(original);
+});
+
+it('persists a favorite with ordinary query parameters', () => {
+  const original = addFavorite(
+    emptyWorkspace(),
+    favorite({ params: { accountId: 42, basis: 'latest' } }),
+  );
+
+  const restored = deserializeWorkspace(serializeWorkspace(original));
+
+  expect(restored.favorites).toEqual(original.favorites);
 });
 
 it('restores v1 storage within frame and history limits', () => {

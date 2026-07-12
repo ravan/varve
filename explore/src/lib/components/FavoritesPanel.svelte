@@ -91,7 +91,7 @@
 
   {#if parametersDraft === null}
     <p class="text-destructive text-sm">
-      Add current query is unavailable while parameters are invalid or contain sensitive token/session fields.
+      Add current query is unavailable while parameters are invalid or contain sensitive or reserved names.
     </p>
   {/if}
 

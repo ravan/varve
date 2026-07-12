@@ -3,6 +3,7 @@ import type { GraphInspection } from '$lib/logic/graph';
 import { classifyGql } from '$lib/logic/gql';
 import type { Basis, ExecutionMode, QueryParameters } from '$lib/types';
 import {
+  areQueryParametersPersistable,
   addFavorite as addFavoriteTransition,
   addFrame as addFrameTransition,
   clearHistory as clearHistoryTransition,
@@ -11,7 +12,6 @@ import {
   deserializeWorkspace,
   duplicateFavorite as duplicateFavoriteTransition,
   emptyWorkspace,
-  isSensitiveParameterKey,
   observeExecution as observeExecutionTransition,
   recordHistory as recordHistoryTransition,
   removeFrame as removeFrameTransition,
@@ -120,7 +120,7 @@ export function createWorkspaceStore(storage: StorageLike) {
     },
     setQueryParametersDraft(params: QueryParameters | null): void {
       queryParametersDraft =
-        params === null || Object.keys(params).some(isSensitiveParameterKey) ? null : params;
+        params === null || !areQueryParametersPersistable(params) ? null : params;
     },
     addFrame(frame: ExecutionFrame): void {
       apply(addFrameTransition(snapshot(), frame));
