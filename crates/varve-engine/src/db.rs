@@ -1186,9 +1186,13 @@ impl Db {
         ))
     }
 
-    /// Executes a mutation statement (INSERT, MATCH … DELETE): parses here,
-    /// resolves and commits inside the writer loop, and returns once the tx
-    /// is durable AND visible.
+    /// Publishes this writer's advertised address so query nodes can answer a
+    /// misdirected mutation (HTTP 421) with the writer's location. With a
+    /// coordinator configured it delegates to the coordinator's `advertise`;
+    /// otherwise it writes a canonical-JSON `WriterAdvertisement` to
+    /// `v1/writer.json` with a plain PUT. This is advertisement only — NOT a
+    /// lock, lease, or leader election; exactly-one-writer remains a
+    /// deployment guarantee.
     pub async fn publish_writer(&self, address: &str) -> Result<(), EngineError> {
         self.require_role(NodeRole::Writer)?;
         match &self.inner.coordinator {
@@ -1232,6 +1236,9 @@ impl Db {
         Ok(execute_gc(&self.inner.store, &self.inner.gc_config).await?)
     }
 
+    /// Executes a mutation statement (INSERT, MATCH … DELETE): parses here,
+    /// resolves and commits inside the writer loop, and returns once the tx
+    /// is durable AND visible.
     pub async fn execute(&self, gql: &str) -> Result<TxReceipt, EngineError> {
         let params = BTreeMap::new();
         self.execute_with(gql, &params).await
