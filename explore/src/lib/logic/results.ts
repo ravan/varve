@@ -67,7 +67,10 @@ export function normalizeQueryResponse(response: QueryResponse | unknown): Norma
         columns.map((column) => [
           column,
           Object.prototype.hasOwnProperty.call(row, column)
-            ? Object.freeze({ kind: 'value' as const, value: row[column] })
+            ? Object.freeze({
+                kind: 'value' as const,
+                value: cloneAndFreezeJson(row[column], new Set()),
+              })
             : MISSING_CELL,
         ]),
       ),
@@ -239,6 +242,27 @@ function canonicalize(value: unknown, ancestors: Set<object>): unknown {
   }
   ancestors.delete(value);
   return result;
+}
+
+function cloneAndFreezeJson(value: unknown, ancestors: Set<object>): unknown {
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+  if (ancestors.has(value)) {
+    throw new TypeError('Cannot normalize circular JSON');
+  }
+
+  ancestors.add(value);
+  const clone = Array.isArray(value)
+    ? value.map((item) => cloneAndFreezeJson(item, ancestors))
+    : Object.fromEntries(
+        Object.keys(value).map((key) => [
+          key,
+          cloneAndFreezeJson((value as Record<string, unknown>)[key], ancestors),
+        ]),
+      );
+  ancestors.delete(value);
+  return Object.freeze(clone);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
