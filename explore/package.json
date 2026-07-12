@@ -1,7 +1,6 @@
 {
   "name": "explore",
   "version": "0.0.1",
-  "private": true,
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -15,7 +14,7 @@
     "lint": "oxlint .",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
-    "licenses": "license-checker-rseidelsohn --production --onlyAllow 'MIT;ISC;Apache-2.0;BSD-2-Clause;BSD-3-Clause;0BSD;CC0-1.0;BlueOak-1.0.0'"
+    "licenses": "license-checker-rseidelsohn --production --onlyAllow 'MIT;ISC;Apache-2.0;BSD-2-Clause;BSD-3-Clause;0BSD;CC0-1.0;BlueOak-1.0.0;MPL-2.0'"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.4",
