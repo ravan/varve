@@ -42,6 +42,26 @@ describe('validateParameters', () => {
     });
   });
 
+  it.each(['AB==', 'AAB=', 'A===', 'AA=A', 'AAA'])(
+    'rejects non-canonical standard base64 %s',
+    (bytes) => {
+      expect(validateParameters(JSON.stringify({ blob: { $bytes: bytes } }))).toMatchObject({
+        ok: false,
+        error: expect.stringContaining('blob'),
+      });
+    },
+  );
+
+  it.each(['', 'AA==', '/w==', 'AAA=', '//8=', '////'])(
+    'accepts canonical standard base64 boundary %s',
+    (bytes) => {
+      expect(validateParameters(JSON.stringify({ blob: { $bytes: bytes } }))).toEqual({
+        ok: true,
+        value: { blob: { $bytes: bytes } },
+      });
+    },
+  );
+
   it('rejects invalid JSON and non-object roots', () => {
     expect(validateParameters('{')).toMatchObject({ ok: false });
     expect(validateParameters('null')).toMatchObject({ ok: false });
@@ -53,12 +73,30 @@ describe('validateParameters', () => {
     expect(validateParameters('{"number":NaN}')).toMatchObject({ ok: false });
     expect(validateParameters('{"number":Infinity}')).toMatchObject({ ok: false });
   });
+
+  it('accepts Number.MAX_SAFE_INTEGER', () => {
+    expect(validateParameters('{"maximum":9007199254740991}')).toEqual({
+      ok: true,
+      value: { maximum: Number.MAX_SAFE_INTEGER },
+    });
+  });
 });
 
 describe('parseBasis', () => {
   it('accepts transaction ids and packed positions', () => {
     expect(parseBasis('42')).toEqual({ ok: true, value: 42 });
     expect(parseBasis('at:99')).toEqual({ ok: true, value: 'at:99' });
+  });
+
+  it('accepts the inclusive numeric boundaries', () => {
+    expect(parseBasis('9007199254740991')).toEqual({
+      ok: true,
+      value: Number.MAX_SAFE_INTEGER,
+    });
+    expect(parseBasis('at:18446744073709551615')).toEqual({
+      ok: true,
+      value: 'at:18446744073709551615',
+    });
   });
 
   it('accepts an empty optional basis', () => {
@@ -78,6 +116,13 @@ describe('parsePositiveInteger', () => {
     expect(parsePositiveInteger(' 60000 ', 'Basis timeout')).toEqual({
       ok: true,
       value: 60_000,
+    });
+  });
+
+  it('accepts Number.MAX_SAFE_INTEGER', () => {
+    expect(parsePositiveInteger('9007199254740991', 'Basis timeout')).toEqual({
+      ok: true,
+      value: Number.MAX_SAFE_INTEGER,
     });
   });
 
