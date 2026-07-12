@@ -1465,7 +1465,7 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "varve-config"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -1485,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "varve-gql"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "thiserror",
  "varve-types",
@@ -1493,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "varve-index"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arrow",
  "thiserror",
@@ -1502,7 +1502,7 @@ dependencies = [
 
 [[package]]
 name = "varve-log"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "crc32c",
@@ -1516,7 +1516,7 @@ dependencies = [
 
 [[package]]
 name = "varve-storage"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1532,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "varve-types"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "thiserror",
