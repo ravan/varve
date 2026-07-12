@@ -43,6 +43,7 @@ tokio-stream = "0.1"
 tower = "0.5"
 http-body-util = "0.1"
 rustyline = "18"
+criterion = "0.7"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
