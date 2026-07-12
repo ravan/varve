@@ -12,6 +12,7 @@
   import Plus from '@lucide/svelte/icons/plus';
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
   import type { Core, EdgeSingular, ElementDefinition, NodeSingular } from 'cytoscape';
+  import { onMount } from 'svelte';
 
   const GRAPH_ELEMENT_CAP = 1_000;
 
@@ -34,7 +35,7 @@
 
   let normalizedElements = $derived(capElements(extraction));
 
-  $effect(() => {
+  onMount(() => {
     const host = graphHost;
     const elements = normalizedElements;
     const shouldAnimate = motion;
@@ -51,7 +52,6 @@
         layout: layoutOptions(shouldAnimate && !reduceMotion),
         minZoom: 0.1,
         maxZoom: 4,
-        wheelSensitivity: 0.22,
         style: [
           {
             selector: 'node',
@@ -69,8 +69,8 @@
               'text-overflow-wrap': 'anywhere',
               'text-valign': 'center',
               'text-halign': 'center',
-              width: 'label',
-              height: 'label',
+              width: 120,
+              height: 44,
             },
           },
           {

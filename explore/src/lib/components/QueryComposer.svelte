@@ -479,7 +479,7 @@
       <Label id="gql-query-label">GQL query</Label>
       <span class="text-muted-foreground font-mono text-xs">⌘/Ctrl + Enter</span>
     </div>
-    <div bind:this={editorHost} class="query-editor min-h-56" aria-labelledby="gql-query-label"></div>
+    <div bind:this={editorHost} class="query-editor min-h-56"></div>
   </div>
 
   <ParametersPanel
