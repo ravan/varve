@@ -41,6 +41,11 @@
     }
   }
 
+  async function disconnect(): Promise<void> {
+    token = '';
+    await connection.disconnect();
+  }
+
   function connectionErrorCopy(code: string | undefined, degraded: boolean): {
     title: string;
     description: string;
@@ -134,6 +139,14 @@
       </div>
 
       <Dialog.Footer>
+        {#if connection.config?.authenticated === true}
+          <Button
+            type="button"
+            variant="outline"
+            disabled={connection.session === 'connecting'}
+            onclick={() => void disconnect()}
+          >Disconnect</Button>
+        {/if}
         <Button type="submit" disabled={connection.session === 'connecting' || token.length === 0}>
           {connection.session === 'connecting' ? 'Connecting…' : 'Connect'}
         </Button>
