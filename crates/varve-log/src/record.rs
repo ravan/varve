@@ -43,6 +43,88 @@ impl LogRecord {
     }
 }
 
+/// Frame header: `len: u32 LE` (payload length) + `crc: u32 LE` (CRC32C of
+/// the payload), immediately followed by the payload itself — the one log
+/// frame grammar shared by every durable backend.
+pub(crate) const FRAME_HEADER: usize = 8;
+
+/// Decodes a buffer that is expected to hold zero or more complete,
+/// back-to-back log frames (`len u32 LE · crc32c u32 LE · protobuf payload`).
+///
+/// STRICT, whole-buffer contract: every byte in `bytes` must belong to a
+/// complete, CRC-valid frame whose payload decodes as a `LogRecord`. A
+/// truncated header, a truncated payload, a CRC mismatch, a protobuf decode
+/// failure, or trailing bytes that don't form another complete frame all
+/// produce a `LogError::Corrupt` naming `context`. Zero-length input decodes
+/// to `Ok(vec![])`. The length prefix is bounds-checked against the
+/// remaining buffer BEFORE any slicing, so an adversarial length (e.g.
+/// `u32::MAX`) can never be used to slice past the buffer or allocate
+/// unboundedly.
+///
+/// This is the STRICT sibling of `local.rs::scan_segment`: this function is
+/// for atomic whole objects (an object-store PUT, or a fuzz input) where a
+/// torn tail can never legitimately occur. `scan_segment` is a DIFFERENT,
+/// LENIENT contract used only for the local segmented log, where a torn tail
+/// on the last, still-being-written segment is expected after a crash and is
+/// tolerated (truncated away) rather than treated as corruption.
+pub fn decode_frames(context: &str, bytes: &[u8]) -> Result<Vec<LogRecord>, LogError> {
+    let mut records = Vec::new();
+    let mut off = 0usize;
+    while let Some(record) = decode_one_frame(context, bytes, &mut off)? {
+        records.push(record);
+    }
+    Ok(records)
+}
+
+/// Decodes a single frame at `*off`, advancing it past the frame on
+/// success. Returns `Ok(None)` once `*off` reaches the end of `bytes`
+/// exactly (the strict end-of-buffer condition); any other short read is a
+/// `Corrupt` error.
+pub(crate) fn decode_one_frame(
+    context: &str,
+    bytes: &[u8],
+    off: &mut usize,
+) -> Result<Option<LogRecord>, LogError> {
+    if *off == bytes.len() {
+        return Ok(None);
+    }
+    if bytes.len() - *off < FRAME_HEADER {
+        return Err(corrupt(context, *off, "truncated frame header"));
+    }
+    let len = u32::from_le_bytes([
+        bytes[*off],
+        bytes[*off + 1],
+        bytes[*off + 2],
+        bytes[*off + 3],
+    ]) as usize;
+    let crc = u32::from_le_bytes([
+        bytes[*off + 4],
+        bytes[*off + 5],
+        bytes[*off + 6],
+        bytes[*off + 7],
+    ]);
+    // Bounds-check the claimed length against what remains BEFORE slicing:
+    // an adversarial len (e.g. u32::MAX) must be a clean error here, never a
+    // slice-index panic or an unbounded allocation.
+    if bytes.len() - *off - FRAME_HEADER < len {
+        return Err(corrupt(context, *off, "truncated frame payload"));
+    }
+    let payload = &bytes[*off + FRAME_HEADER..*off + FRAME_HEADER + len];
+    if crc32c::crc32c(payload) != crc {
+        return Err(corrupt(context, *off, "CRC mismatch"));
+    }
+    *off += FRAME_HEADER + len;
+    Ok(Some(LogRecord::from_wire(payload)?))
+}
+
+fn corrupt(context: &str, offset: usize, reason: &str) -> LogError {
+    LogError::Corrupt {
+        path: context.to_string(),
+        offset: offset as u64,
+        reason: reason.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,6 +173,69 @@ mod tests {
             LogRecord::from_wire(&[0xFF, 0xFF, 0xFF]),
             Err(LogError::Decode(_))
         ));
+    }
+
+    fn frame(payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(&crc32c::crc32c(payload).to_le_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn sample_record(tx_id: u64) -> LogRecord {
+        LogRecord {
+            tx_id,
+            system_time_us: 1_700_000_000_000_000 + tx_id as i64,
+            user: String::new(),
+            effects: vec![],
+        }
+    }
+
+    #[test]
+    fn decode_frames_round_trips_a_multi_frame_stream() {
+        let records = vec![sample_record(1), sample_record(2)];
+        let mut bytes = Vec::new();
+        for record in &records {
+            bytes.extend_from_slice(&frame(&record.to_wire()));
+        }
+        assert_eq!(decode_frames("test", &bytes).unwrap(), records);
+        assert_eq!(decode_frames("test", &[]).unwrap(), Vec::<LogRecord>::new());
+    }
+
+    #[test]
+    fn decode_frames_rejects_truncation_crc_and_trailing_garbage() {
+        let good = frame(&sample_record(1).to_wire());
+        // Truncated header, truncated payload, flipped CRC byte, trailing garbage.
+        assert!(decode_frames("t", &good[..3]).is_err());
+        assert!(decode_frames("t", &good[..good.len() - 1]).is_err());
+        let mut bad_crc = good.clone();
+        bad_crc[4] ^= 0xFF;
+        assert!(decode_frames("t", &bad_crc).is_err());
+        let mut trailing = good.clone();
+        trailing.push(0x00);
+        assert!(decode_frames("t", &trailing).is_err());
+    }
+
+    #[test]
+    fn decode_frames_rejects_an_absurd_length_prefix_without_allocating() {
+        // len = u32::MAX with a tiny buffer must be a clean error, not an OOM/panic.
+        let mut bytes = u32::MAX.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&[0u8; 8]);
+        assert!(decode_frames("t", &bytes).is_err());
+    }
+
+    #[test]
+    #[ignore = "regenerates the committed fuzz seed corpus"]
+    fn write_log_record_fuzz_seed() {
+        let mut bytes = Vec::new();
+        for record in [sample_record(1), sample_record(2)] {
+            bytes.extend_from_slice(&frame(&record.to_wire()));
+        }
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/log_record");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("valid-two-frames.bin"), bytes).unwrap();
     }
 
     #[test]

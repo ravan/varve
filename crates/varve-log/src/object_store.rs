@@ -18,12 +18,6 @@ use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError}
 use varve_storage::{keys, ObjectStore};
 use varve_types::LogPosition;
 
-/// Frame header: `len: u32 LE` + `crc: u32 LE` (CRC32C of the payload) —
-/// the exact `LocalLog` frame grammar, so both durable backends share one
-/// on-disk format. Decoding here is STRICT (any malformed frame is
-/// `Corrupt`): object PUTs are atomic, so a torn tail cannot exist.
-const FRAME_HEADER: usize = 8;
-
 pub struct ObjectStoreLog {
     store: Arc<dyn ObjectStore>,
     /// Position of the next appended record. `None` until first use:
@@ -69,47 +63,15 @@ impl ObjectStoreLog {
     }
 }
 
-/// Strict frame walk: every byte must belong to a complete, CRC-valid frame.
+/// Delegates the whole-object grammar to the shared, fuzzed strict decoder
+/// (`record::decode_frames`); a log object is additionally never empty
+/// (that invariant is this backend's, not the shared frame grammar's).
 fn decode_object(key: &str, bytes: &[u8]) -> Result<Vec<LogRecord>, LogError> {
-    let mut records = Vec::new();
-    let mut off = 0usize;
-    while let Some(record) = decode_frame(key, bytes, &mut off)? {
-        records.push(record);
-    }
+    let records = crate::record::decode_frames(key, bytes)?;
     if records.is_empty() {
         return Err(corrupt(key, 0, "empty log object"));
     }
     Ok(records)
-}
-
-fn decode_frame(key: &str, bytes: &[u8], off: &mut usize) -> Result<Option<LogRecord>, LogError> {
-    if *off == bytes.len() {
-        return Ok(None);
-    }
-    if bytes.len() - *off < FRAME_HEADER {
-        return Err(corrupt(key, *off, "truncated frame header"));
-    }
-    let len = u32::from_le_bytes([
-        bytes[*off],
-        bytes[*off + 1],
-        bytes[*off + 2],
-        bytes[*off + 3],
-    ]) as usize;
-    let crc = u32::from_le_bytes([
-        bytes[*off + 4],
-        bytes[*off + 5],
-        bytes[*off + 6],
-        bytes[*off + 7],
-    ]);
-    if bytes.len() - *off - FRAME_HEADER < len {
-        return Err(corrupt(key, *off, "truncated frame payload"));
-    }
-    let payload = &bytes[*off + FRAME_HEADER..*off + FRAME_HEADER + len];
-    if crc32c::crc32c(payload) != crc {
-        return Err(corrupt(key, *off, "CRC mismatch"));
-    }
-    *off += FRAME_HEADER + len;
-    Ok(Some(LogRecord::from_wire(payload)?))
 }
 
 fn corrupt(key: &str, off: usize, reason: &str) -> LogError {
@@ -178,7 +140,7 @@ impl Log for ObjectStoreLog {
                 if position >= to {
                     break;
                 }
-                let Some(record) = decode_frame(key, &bytes, &mut off)? else {
+                let Some(record) = crate::record::decode_one_frame(key, &bytes, &mut off)? else {
                     break;
                 };
                 if position >= from && position < to {
@@ -281,7 +243,7 @@ mod tests {
                 store.put(&key, Bytes::from(bytes)).await.unwrap();
                 return;
             }
-            off += FRAME_HEADER + len;
+            off += crate::record::FRAME_HEADER + len;
         }
         panic!("frame {frame_index} not found");
     }
