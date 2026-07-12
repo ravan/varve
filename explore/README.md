@@ -57,7 +57,7 @@ rtk pnpm --dir explore run build
 Supply `VARVE_URL` to the running Node process; production startup does not load `explore/.env.example` automatically. For example:
 
 ```bash
-NODE_ENV=production VARVE_URL=https://varve.internal.example HOST=127.0.0.1 PORT=3000 rtk pnpm --dir explore run start
+rtk env NODE_ENV=production VARVE_URL=https://varve.internal.example HOST=127.0.0.1 PORT=3000 pnpm --dir explore run start
 ```
 
 Put Explorer behind a trusted reverse proxy that terminates browser-facing TLS. Do not expose an HTTP-only production listener to browsers: production session cookies are `Secure`. Restrict direct access to the Node listener and protect the proxy-to-Explorer and Explorer-to-Varve network paths according to the deployment's trust boundary.
