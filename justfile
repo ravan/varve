@@ -20,6 +20,10 @@ chaos secs="60":
 s3-matrix backends="garage,seaweedfs,minio":
     VARVE_S3_BACKENDS={{backends}} cargo test -p varve-testkit --test backend_matrix -- --nocapture
 
+# Spec §13.7 criterion micro-benches: resolve, trie ops, parse.
+bench-micro:
+    cargo bench -p varve-index -p varve-types -p varve-gql
+
 # Slice 9 exit demo: Garage + writer + two query nodes over Compose, with
 # fixture load, cross-node basis/Arrow verify, shell/admin drive, and teardown.
 # Routed through `rtk proxy` so the repo's RTK rule stays visible.
