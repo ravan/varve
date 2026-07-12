@@ -132,5 +132,98 @@
 
   body {
     @apply bg-background text-foreground;
+    min-width: 20rem;
+    min-height: 100vh;
+  }
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 15rem minmax(0, 1fr) 20rem;
+  min-height: 100vh;
+}
+
+.desktop-rail,
+.desktop-inspector {
+  min-width: 0;
+}
+
+.mobile-only {
+  display: none;
+}
+
+.query-editor .cm-editor {
+  min-height: 14rem;
+  background: transparent;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+}
+
+.query-editor .cm-scroller {
+  min-height: 14rem;
+  overflow: auto;
+}
+
+.query-editor .cm-content {
+  padding: 1rem 0;
+  caret-color: var(--foreground);
+}
+
+.query-editor .cm-line {
+  padding-inline: 0.75rem;
+}
+
+.query-editor .cm-gutters {
+  border-right: 1px solid var(--border);
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.query-editor .cm-activeLine,
+.query-editor .cm-activeLineGutter {
+  background: color-mix(in oklab, var(--accent) 55%, transparent);
+}
+
+.query-editor .cm-focused {
+  outline: 3px solid color-mix(in oklab, var(--ring) 45%, transparent);
+  outline-offset: -3px;
+}
+
+.query-editor .cm-cursor {
+  border-left-color: var(--foreground);
+}
+
+.query-editor .cm-selectionBackground,
+.query-editor .cm-content ::selection {
+  background: color-mix(in oklab, var(--data) 30%, transparent) !important;
+}
+
+.query-editor .cm-gql-keyword {
+  color: var(--primary);
+  font-weight: 650;
+}
+
+@media (max-width: 899px) {
+  .app-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .desktop-rail,
+  .desktop-inspector {
+    display: none;
+  }
+
+  .mobile-only {
+    display: inline-flex;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .query-editor *,
+  .query-editor *::before,
+  .query-editor *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
   }
 }

@@ -151,6 +151,8 @@ export function createConnectionStore(fetcher: FetchLike) {
   };
 }
 
+export type ConnectionStore = ReturnType<typeof createConnectionStore>;
+
 async function requestJson(fetcher: FetchLike, input: string): Promise<unknown> {
   let response: Response;
   try {

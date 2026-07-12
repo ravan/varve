@@ -1,4 +1,6 @@
 import type { ObservedSchema } from '$lib/logic/schema';
+import { classifyGql } from '$lib/logic/gql';
+import type { Basis, ExecutionMode } from '$lib/types';
 import {
   addFavorite as addFavoriteTransition,
   addFrame as addFrameTransition,
@@ -32,6 +34,9 @@ export function createWorkspaceStore(storage: StorageLike) {
   let favorites = $state<readonly Favorite[]>(restored.favorites);
   let observedSchema = $state<ObservedSchema>(restored.observedSchema);
   let settings = $state<WorkspaceSettings>(restored.settings);
+  let queryDraft = $state('');
+  let queryModeOverride = $state<ExecutionMode | null>(null);
+  let defaultReadBasis = $state<Basis | undefined>(undefined);
 
   function snapshot(): WorkspaceState {
     return { frames, history, favorites, observedSchema, settings };
@@ -68,6 +73,34 @@ export function createWorkspaceStore(storage: StorageLike) {
     },
     get settings() {
       return settings;
+    },
+    get queryDraft() {
+      return queryDraft;
+    },
+    get queryMode(): ExecutionMode {
+      return queryModeOverride ?? classifyGql(queryDraft);
+    },
+    get queryModeOverridden(): boolean {
+      return queryModeOverride !== null;
+    },
+    get defaultReadBasis() {
+      return defaultReadBasis;
+    },
+    setQueryDraft(gql: string): void {
+      queryDraft = gql;
+    },
+    setQueryMode(mode: ExecutionMode): void {
+      queryModeOverride = mode;
+    },
+    resetQueryMode(): void {
+      queryModeOverride = null;
+    },
+    startNewQuery(): void {
+      queryDraft = '';
+      queryModeOverride = null;
+    },
+    setDefaultReadBasis(basis: Basis): void {
+      defaultReadBasis = basis;
     },
     addFrame(frame: ExecutionFrame): void {
       apply(addFrameTransition(snapshot(), frame));
@@ -107,6 +140,8 @@ export function createWorkspaceStore(storage: StorageLike) {
     },
   };
 }
+
+export type WorkspaceStore = ReturnType<typeof createWorkspaceStore>;
 
 function restore(storage: StorageLike): WorkspaceState {
   try {
