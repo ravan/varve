@@ -119,8 +119,6 @@ pub enum EngineError {
         age_ms: u64,
         takeover_after_ms: u64,
     },
-    #[error("invalid [coordinator] configuration: {0}")]
-    InvalidCoordinatorConfig(String),
     #[error("cas-failover requires the shared \"object-store\" log; [log] backend is \"{0}\"")]
     CasRequiresSharedLog(String),
     #[error("storage backend cannot support cas-failover: {reason}. Use [coordinator] backend = \"designated-writer\" (spec §12, D5).")]
