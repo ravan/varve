@@ -69,6 +69,57 @@ it('connects only after an authenticated status check succeeds', async () => {
   );
 });
 
+it('stores an encoded session cookie at the exact 4096-byte value boundary', async () => {
+  const token = 'a'.repeat(3060);
+  const encoded = encodeSession(token);
+  expect(Buffer.byteLength(token, 'utf8')).toBeLessThanOrEqual(4096);
+  expect(Buffer.byteLength(encoded, 'utf8')).toBe(4096);
+  const upstream = new Response(JSON.stringify({ roles: ['writer'] }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+  forwardVarve.mockResolvedValue(upstream);
+  const cookieJar = cookies();
+  const request = new Request('https://explorer.example.test/api/session/connect', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+
+  const response = await connect(event(request, cookieJar) as Parameters<typeof connect>[0]);
+
+  expect(response).toBe(upstream);
+  expect(forwardVarve).toHaveBeenCalledWith(expect.objectContaining({ token }));
+  expect(cookieJar.set).toHaveBeenCalledWith(
+    SESSION_COOKIE_NAME,
+    encoded,
+    sessionCookieOptions(false),
+  );
+});
+
+it('rejects a token whose encoded session cookie exceeds 4096 bytes before upstream', async () => {
+  const token = 'a'.repeat(3061);
+  const encoded = encodeSession(token);
+  expect(Buffer.byteLength(token, 'utf8')).toBeLessThanOrEqual(4096);
+  expect(Buffer.byteLength(encoded, 'utf8')).toBe(4098);
+  const cookieJar = cookies();
+  const request = new Request('https://explorer.example.test/api/session/connect', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+
+  const response = await connect(event(request, cookieJar) as Parameters<typeof connect>[0]);
+
+  expect(response.status).toBe(400);
+  await expect(response.json()).resolves.toMatchObject({
+    code: 'invalid_request',
+    message: 'Token cannot be stored in a session cookie',
+  });
+  expect(forwardVarve).not.toHaveBeenCalled();
+  expect(cookieJar.set).not.toHaveBeenCalled();
+});
+
 it('does not store a token when the status check fails', async () => {
   forwardVarve.mockResolvedValue(
     new Response(JSON.stringify({ code: 'unauthorized', message: 'Authentication required' }), {
