@@ -47,6 +47,29 @@ pub fn local_gc_blocks_config(root: &Path, max_block_rows: usize) -> Config {
     .unwrap_or_else(|error| panic!("local gc blocks config should parse: {error}"))
 }
 
+pub fn local_gc_small_segment_config(root: &Path, max_block_rows: usize) -> Config {
+    let log_dir = toml_escaped_path(&root.join("log"));
+    let store_dir = toml_escaped_path(&root.join("store"));
+    Config::from_toml_str(&format!(
+        "[log]\n\
+         backend = \"local\"\n\
+         group_commit_window_ms = 1\n\
+         [log.local]\n\
+         dir = {log_dir}\n\
+         segment_max_bytes = 256\n\
+         [storage]\n\
+         backend = \"local\"\n\
+         max_block_rows = {max_block_rows}\n\
+         [storage.local]\n\
+         dir = {store_dir}\n\
+         [gc]\n\
+         enabled = true\n\
+         blocks_to_keep = 0\n\
+         garbage_lifetime_hours = 0\n"
+    ))
+    .unwrap_or_else(|error| panic!("small segment gc config should parse: {error}"))
+}
+
 pub fn row_count(batches: &[RecordBatch]) -> usize {
     batches.iter().map(|batch| batch.num_rows()).sum()
 }
