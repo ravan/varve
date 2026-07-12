@@ -21,6 +21,10 @@ export function isSensitiveParameterKey(key: string): boolean {
   return SENSITIVE_PARAMETER_KEY_PARTS.some((part) => normalized.includes(part));
 }
 
+export function areQueryParametersPersistable(params: QueryParameters): boolean {
+  return decodeQueryParameters(params) !== null;
+}
+
 export interface StorageLike {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
@@ -604,6 +608,7 @@ function decodeQueryParameters(value: unknown): QueryParameters | null {
     !isRecord(value) ||
     !hasSafePrototype(value) ||
     containsForbiddenKey(value) ||
+    Object.keys(value).some(isSensitiveParameterKey) ||
     !Object.values(value).every(isParameterScalarShape)
   ) {
     return null;
@@ -757,7 +762,14 @@ function isForbiddenKey(key: string): boolean {
   const lower = key.toLowerCase();
   if (lower === '__proto__' || lower === 'constructor' || lower === 'prototype') return true;
   const normalized = lower.replaceAll('_', '').replaceAll('-', '');
-  return normalized === 'raw' || normalized === 'rawresponse' || isSensitiveParameterKey(key);
+  return (
+    normalized === 'raw' ||
+    normalized === 'rawresponse' ||
+    normalized.includes('token') ||
+    normalized.includes('authorization') ||
+    normalized.includes('credential') ||
+    normalized.includes('secret')
+  );
 }
 
 function hasExactKeys(

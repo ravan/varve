@@ -14,7 +14,7 @@
   import { extractGraph, type GraphExtraction } from '$lib/logic/graph';
   import { extractQueryShape } from '$lib/logic/gql';
   import {
-    isSensitiveParameterKey,
+    areQueryParametersPersistable,
     type ExecutionFrame,
     type ResultTab,
   } from '$lib/logic/workspace';
@@ -75,8 +75,8 @@
   }
 
   function addToFavorites(): void {
-    if (Object.keys(frame.params).some(isSensitiveParameterKey)) {
-      toast.error('Sensitive parameters cannot be saved to favorites');
+    if (!areQueryParametersPersistable(frame.params)) {
+      toast.error('Invalid, sensitive, or reserved parameters cannot be saved to favorites');
       return;
     }
 
