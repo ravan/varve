@@ -97,6 +97,7 @@ async fn read_qps_scales_from_one_to_four_query_nodes() {
                         ok += 1;
                     }
                 }
+                assert!(ok > 0, "{url} made no successful reads in the window");
                 ok
             }));
         }
