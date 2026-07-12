@@ -280,6 +280,29 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "regenerates the committed fuzz seed corpus"]
+    fn write_events_fuzz_seed() {
+        let mut doc = Doc::new();
+        doc.insert("name".into(), Value::Str("Ada".into()));
+        let events = vec![Event {
+            iid: iid(1),
+            system_from: us(10),
+            valid_from: us(5),
+            valid_to: Instant::END_OF_TIME,
+            src: None,
+            dst: None,
+            op: Op::Put {
+                labels: vec!["Person".into()],
+                doc,
+            },
+        }];
+        let bytes = encode_events(&events).unwrap();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/events");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("valid.bin"), &bytes).unwrap();
+    }
+
+    #[test]
     fn round_trips_empty_labels_and_empty_doc() {
         let events = vec![Event {
             iid: iid(1),

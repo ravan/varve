@@ -216,6 +216,15 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "regenerates the committed fuzz seed corpus"]
+    fn write_manifest_fuzz_seed() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/manifest");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("valid.bin"), sample().to_wire()).unwrap();
+    }
+
+    #[test]
     fn from_wire_rejects_garbage() {
         assert!(matches!(
             BlockManifest::from_wire(&[0xFF, 0xFF, 0xFF]),
