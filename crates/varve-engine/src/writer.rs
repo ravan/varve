@@ -1873,13 +1873,16 @@ fn fence_all(staged: Vec<Staged>, reason: String) -> FlushOutcome {
 /// result. A `compact_once` error is acked as-is, unchanged from before this
 /// fix: its failure is not itself evidence of a lease problem.
 ///
-/// KNOWN LIMITATION (Slice-10 final-review finding 2): a fenced-but-alive
-/// writer's in-flight manifest PUT (inside `compact_once`/`flush_block`) is
-/// not itself epoch-fenced — only the log is. This gate is what contains
-/// that for v1 (a fenced writer never acks `Ok` and instead goes fatal), but
-/// it's a narrow alive-zombie race: robust manifest fencing (e.g. selecting
-/// latest by `(watermark, block_id)`) is a documented v1 limitation — see
-/// STATUS.md Slice-10 known limitations.
+/// A fenced-but-alive writer's in-flight manifest PUT (inside
+/// `compact_once`/`flush_block`) is not itself epoch-fenced — only the log
+/// is; this gate (never acking `Ok`, going fatal instead) is what contains
+/// that narrow alive-zombie race before-and-after the manifest PUT. Should
+/// such a writer's manifest PUT still land, `latest_manifest` (slice 11)
+/// now selects the newest manifest by `(watermark, block_id)` rather than
+/// max `block_id` alone, so a stray manifest with a newer block id but a
+/// stale watermark can never be selected during recovery/verify/follower
+/// reads — the before+after lease ack-gate here remains the liveness guard
+/// that keeps the writer itself from acking `Ok` once fenced.
 async fn gated_compact(
     state: &mut WriterState,
     ack: oneshot::Sender<Result<CompactionReport, EngineError>>,

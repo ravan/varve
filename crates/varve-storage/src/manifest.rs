@@ -103,20 +103,18 @@ impl BlockManifest {
     }
 }
 
-/// Finds the newest committed manifest under `v1/blocks/` (lex-hex sorts
-/// lexicographically in numeric order, but we parse-and-max explicitly
-/// rather than rely on that, since foreign/stray keys under the prefix
-/// must be ignored rather than corrupt the ordering).
+/// Finds the newest COMMITTED manifest: max by `(watermark, block_id)`.
+/// Watermark-first makes a fenced writer's stray manifest (higher block id,
+/// stale watermark — the slice-10 known limitation) permanently unable to
+/// win; block id breaks the flush-vs-compaction tie at equal watermarks.
+/// Reads every listed manifest (bounded: GC retains `blocks_to_keep + 1`).
 pub async fn latest_manifest(
     store: &dyn ObjectStore,
 ) -> Result<Option<BlockManifest>, StorageError> {
-    let keys = store.list(MANIFEST_PREFIX).await?;
-    let latest = keys.iter().filter_map(|k| manifest_block_id(k)).max();
-    let Some(latest) = latest else {
-        return Ok(None);
-    };
-    let bytes = store.get(&manifest_key(latest)).await?;
-    Ok(Some(BlockManifest::from_wire(&bytes)?))
+    let manifests = manifest_history(store).await?;
+    Ok(manifests
+        .into_iter()
+        .max_by_key(|manifest| (manifest.watermark, manifest.block_id)))
 }
 
 pub async fn manifest_history(store: &dyn ObjectStore) -> Result<Vec<BlockManifest>, StorageError> {
@@ -232,28 +230,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn latest_manifest_picks_the_highest_block_id() {
+    async fn latest_manifest_picks_the_highest_watermark_not_block_id() {
         let store = memory_store();
-        for block_id in [0u64, 1] {
-            let m = BlockManifest {
-                block_id,
-                ..sample()
-            };
-            store
-                .put(
-                    &crate::keys::manifest_key(block_id),
-                    Bytes::from(m.to_wire()),
-                )
-                .await
-                .unwrap();
-        }
-        // A foreign key under the prefix is ignored, not an error.
+        let good = BlockManifest {
+            block_id: 10,
+            watermark: 500,
+            ..sample()
+        };
+        // A fenced writer's stray manifest: newer block id, STALE watermark.
+        let stray = BlockManifest {
+            block_id: 11,
+            watermark: 400,
+            ..sample()
+        };
         store
-            .put("v1/blocks/stray.tmp", Bytes::from_static(b"x"))
+            .put(&manifest_key(10), Bytes::from(good.to_wire()))
             .await
             .unwrap();
+        store
+            .put(&manifest_key(11), Bytes::from(stray.to_wire()))
+            .await
+            .unwrap();
+
         let latest = latest_manifest(store.as_ref()).await.unwrap().unwrap();
-        assert_eq!(latest.block_id, 1);
+        assert_eq!((latest.watermark, latest.block_id), (500, 10));
+    }
+
+    #[tokio::test]
+    async fn latest_manifest_breaks_watermark_ties_by_block_id() {
+        // Compaction manifests legitimately share the flush watermark; the newer
+        // block id (the compaction result) must win, preserving today's behavior.
+        let store = memory_store();
+        let flush = BlockManifest {
+            block_id: 10,
+            watermark: 500,
+            ..sample()
+        };
+        let compaction = BlockManifest {
+            block_id: 11,
+            watermark: 500,
+            ..sample()
+        };
+        store
+            .put(&manifest_key(10), Bytes::from(flush.to_wire()))
+            .await
+            .unwrap();
+        store
+            .put(&manifest_key(11), Bytes::from(compaction.to_wire()))
+            .await
+            .unwrap();
+
+        let latest = latest_manifest(store.as_ref()).await.unwrap().unwrap();
+        assert_eq!(latest.block_id, 11);
     }
 
     #[tokio::test]
