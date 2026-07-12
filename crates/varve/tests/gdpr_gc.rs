@@ -4,7 +4,7 @@ use std::path::Path;
 use varve::{Db, Instant};
 use varve_testkit::db_harness::{
     compact_until_idle, local_gc_blocks_config as gc_config,
-    local_gc_small_segment_config as small_segment_config, row_count as rows,
+    local_gc_small_segment_config as small_segment_config, object_log_gc_config, row_count as rows,
     wait_for_manifest_count,
 };
 
@@ -239,6 +239,68 @@ async fn erased_bytes_absent_from_every_stored_object_and_log_segment() {
     assert_eq!(
         rows(&db.query("MATCH (p:P) RETURN p.token").await.unwrap()),
         62 // the fillers survive untouched
+    );
+}
+
+async fn every_object_byte(dir: &Path) -> Vec<u8> {
+    let store = varve_storage::local_store(&dir.join("store")).unwrap();
+    let mut bytes = Vec::new();
+    for key in store.list("v1").await.unwrap() {
+        bytes.extend_from_slice(&store.get(&key).await.unwrap());
+    }
+    bytes
+}
+
+#[tokio::test]
+async fn erased_bytes_absent_from_every_raw_object_on_the_object_store_log_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(object_log_gc_config(dir.path(), 1)).await.unwrap();
+    let secret = "gdpr-objectlog-sentinel-77aa01ce";
+
+    db.execute(&format!("INSERT (:P {{_id: 1, token: '{secret}'}})"))
+        .await
+        .unwrap();
+    db.execute("MATCH (p:P {_id: 1}) ERASE p").await.unwrap();
+    // The nodes-table L0 compaction trigger (`LOG_LIMIT`) fires only once a
+    // scope accumulates at least 64 L0 tries; with `max_block_rows == 1` each
+    // statement below is its own trie, so we need 62 fillers to bring the
+    // insert + erase + fillers total to 64.
+    for id in 2..=63 {
+        db.execute(&format!("INSERT (:P {{_id: {id}}})"))
+            .await
+            .unwrap();
+    }
+    wait_for_manifest_count(dir.path(), 64).await;
+
+    // Non-vacuous both ways: the sentinel is in at least one raw object, and at
+    // least one of those objects is a LOG object (the profile under test).
+    let store = varve_storage::local_store(&dir.path().join("store")).unwrap();
+    let mut sentinel_log_objects = 0usize;
+    for key in store.list("v1/log").await.unwrap() {
+        if contains(&store.get(&key).await.unwrap(), secret) {
+            sentinel_log_objects += 1;
+        }
+    }
+    assert!(
+        sentinel_log_objects > 0,
+        "sentinel never reached a log object"
+    );
+
+    compact_until_idle(&db).await.unwrap();
+    db.gc_once().await.unwrap();
+
+    assert!(!contains(&every_object_byte(dir.path()).await, secret));
+
+    // The store still works: fillers intact, erased id gone, restart clean.
+    assert_eq!(
+        rows(&db.query("MATCH (p:P) RETURN p._id").await.unwrap()),
+        62
+    );
+    drop(db);
+    let db = Db::open(object_log_gc_config(dir.path(), 1)).await.unwrap();
+    assert_eq!(
+        rows(&db.query("MATCH (p:P {_id: 1}) RETURN p._id").await.unwrap()),
+        0
     );
 }
 
