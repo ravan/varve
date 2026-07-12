@@ -3,6 +3,8 @@ name = "varve-config"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Layered TOML configuration and component registry for Varve, the bitemporal graph database."
 
 [dependencies]
 thiserror = { workspace = true }

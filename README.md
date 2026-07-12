@@ -1,13 +1,52 @@
 # Varve
 
-Varve is a bitemporal property-graph database written in Rust that speaks GQL. It is
-embedded-first, with storage and compute separated over any S3-API object store. A
-designated writer resolves GQL DML into effect events, group-commits them to a pluggable
-log, and flushes Arrow blocks + hash tries to object storage; stateless query nodes tail
-the log and answer reads through a DataFusion-based bitemporal engine.
+Varve is a bitemporal property-graph database written in Rust that speaks GQL. Every fact
+carries a system-time axis (what Varve *knew*, and *when*) and a valid-time axis (when the
+fact was *true in the world*); `_system_to` and effective valid ranges are derived at read
+time, never stored. Varve embeds as a library and serves over HTTP with a single writer and
+N read-scaling query nodes over any S3-API object store — no proprietary storage service
+required.
 
-See `docs/design/2026-07-04-varve-design.md` for the design contract and
-`docs/plans/varve-v1-roadmap.md` for the implementation roadmap.
+**Documentation:** [Book](docs/book/) · [Benchmarks vs targets](docs/benchmarks/v1.md) ·
+[Design contract](docs/design/2026-07-04-varve-design.md) ·
+[v1 roadmap](docs/plans/varve-v1-roadmap.md)
+
+## Install
+
+From v1.0.0, install the CLI, pull the image, or grab a static binary:
+
+```sh
+cargo install varve-cli                          # the `varve` CLI (from v1.0.0)
+docker run ghcr.io/ravan/varve:v1.0.0 --help     # varved server image (from v1.0.0)
+# or download varve-<version>-<target>.tar.gz (varve + varved) from GitHub Releases
+```
+
+Build from source today (any platform with a Rust toolchain):
+
+```sh
+cargo build --release -p varve-cli -p varve-server   # produces `varve` and `varved`
+```
+
+## 30-second tour (GQL)
+
+The bitemporal distinction in six statements — a retro-dated insert, current state, a
+system-time-travel read that predates the insert, and a GDPR `ERASE`. Full walkthrough with
+output: [docs/book/src/getting-started.md](docs/book/src/getting-started.md).
+
+```gql
+INSERT (:Person {_id: 1, name: 'Ada'})-[:KNOWS]->(:Person {_id: 2, name: 'Bob'});
+MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name;
+
+-- Cleo was valid from 2020, though we only record her now:
+INSERT (:Person {_id: 3, name: 'Cleo'}) VALID FROM DATE '2020-01-01';
+MATCH (p:Person) RETURN p._id, p.name ORDER BY p._id;           -- Ada, Bob, Cleo
+
+-- What did Varve KNOW before Cleo's insert? (her valid-time 2020 is irrelevant here)
+FOR SYSTEM_TIME AS OF TIMESTAMP '2026-07-12T12:20:28.657968Z'
+  MATCH (p:Person) RETURN p._id, p.name ORDER BY p._id;         -- only Ada, Bob
+
+MATCH (p:Person) WHERE p._id = 3 DETACH ERASE p;                -- GDPR hard-delete
+```
 
 ## Workspace
 
@@ -179,3 +218,9 @@ brings up pinned Garage + one writer + two query nodes, loads the reduced Slice 
 over HTTP, verifies both query nodes agree under a basis read, decodes an Arrow stream,
 round-trips the `varve` shell and admin surface, and always tears the stack (and volumes)
 down. It prints `=== compose-demo: PASSED ===` on success.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE). Unless you explicitly state
+otherwise, any contribution intentionally submitted for inclusion in Varve shall be
+licensed as above, without any additional terms or conditions.

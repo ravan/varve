@@ -3,15 +3,17 @@ name = "varve-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Command-line client (varve shell, JSONL import/export, admin) for Varve, the bitemporal graph database."
 
 [[bin]]
 name = "varve"
 path = "src/main.rs"
 
 [dependencies]
-varve = { path = "../varve" }
-varve-gql = { path = "../varve-gql" }
-varve-server = { path = "../varve-server", default-features = false }
+varve = { path = "../varve", version = "1.0.0" }
+varve-gql = { path = "../varve-gql", version = "1.0.0" }
+varve-server = { path = "../varve-server", version = "1.0.0", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 arrow = { workspace = true }

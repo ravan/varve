@@ -3,11 +3,13 @@ name = "varve-plan"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "DataFusion query planning and graph traversal (PathExpand) for Varve, the bitemporal graph database."
 
 [dependencies]
-varve-gql = { path = "../varve-gql" }
-varve-index = { path = "../varve-index" }
-varve-types = { path = "../varve-types" }
+varve-gql = { path = "../varve-gql", version = "1.0.0" }
+varve-index = { path = "../varve-index", version = "1.0.0" }
+varve-types = { path = "../varve-types", version = "1.0.0" }
 datafusion = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }

@@ -3,11 +3,13 @@ name = "varve"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Bitemporal property-graph database speaking GQL — embedded facade."
 
 [dependencies]
-varve-engine = { path = "../varve-engine" }
-varve-types = { path = "../varve-types" }
-varve-config = { path = "../varve-config" }
+varve-engine = { path = "../varve-engine", version = "1.0.0" }
+varve-types = { path = "../varve-types", version = "1.0.0" }
+varve-config = { path = "../varve-config", version = "1.0.0" }
 datafusion = { workspace = true }
 arrow-json = { workspace = true }
 serde_json = { workspace = true }
