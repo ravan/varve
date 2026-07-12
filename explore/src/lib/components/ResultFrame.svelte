@@ -13,7 +13,7 @@
   import type { NormalizedQueryResponse, NormalizedTxReceipt } from '$lib/logic/results';
   import { extractGraph, type GraphExtraction } from '$lib/logic/graph';
   import { extractQueryShape } from '$lib/logic/gql';
-  import type { ExecutionFrame } from '$lib/logic/workspace';
+  import type { ExecutionFrame, ResultTab } from '$lib/logic/workspace';
   import type { WorkspaceStore } from '$lib/stores/workspace.svelte';
   import type { ExplorerErrorCode } from '$lib/types';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
@@ -24,6 +24,7 @@
   import Pin from '@lucide/svelte/icons/pin';
   import PinOff from '@lucide/svelte/icons/pin-off';
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
+  import { toast } from 'svelte-sonner';
 
   let {
     frame,
@@ -38,7 +39,7 @@
   } = $props();
 
   let open = $state(true);
-  let copyStatus = $state<'idle' | 'copied' | 'failed'>('idle');
+  let readTab = $state<ResultTab>('table');
 
   let queryResult = $derived(asQueryResult(frame.response));
   let receipt = $derived(asTxReceipt(frame.response));
@@ -52,12 +53,20 @@
   let rawValue = $derived(frame.rawResponse ?? queryResult?.raw ?? receipt?.raw ?? frame.response);
   let graphExtraction = $derived(extractFrameGraph(frame.gql, queryResult));
 
+  $effect(() => {
+    if (frame.state !== 'success' || frame.mode !== 'read' || queryResult === null) return;
+    readTab =
+      workspace.settings.defaultResultTab === 'graph' && !graphExtraction.available
+        ? 'table'
+        : workspace.settings.defaultResultTab;
+  });
+
   async function copyGql(): Promise<void> {
     try {
       await navigator.clipboard.writeText(frame.gql);
-      copyStatus = 'copied';
+      toast.success('GQL copied');
     } catch {
-      copyStatus = 'failed';
+      toast.error('Could not copy GQL');
     }
   }
 
@@ -73,6 +82,7 @@
       createdAt: now,
       updatedAt: now,
     });
+    toast.success('Added to favorites');
   }
 
   function togglePinned(): void {
@@ -308,21 +318,31 @@
               <AlertDescription>The query completed successfully without returning rows.</AlertDescription>
             </Alert>
           {/if}
-          <Tabs.Root value={workspace.settings.defaultResultTab} class="min-w-0">
+          {#if !graphExtraction.available}
+            <Alert>
+              <AlertTitle>Graph unavailable</AlertTitle>
+              <AlertDescription>
+                {graphExtraction.reason ?? 'Graph topology is unavailable for this result.'}
+              </AlertDescription>
+            </Alert>
+          {/if}
+          <Tabs.Root bind:value={readTab} class="min-w-0">
             <Tabs.List aria-label="Read result views">
-              <Tabs.Trigger value="graph">Graph</Tabs.Trigger>
+              <Tabs.Trigger value="graph" disabled={!graphExtraction.available}>Graph</Tabs.Trigger>
               <Tabs.Trigger value="table">Table</Tabs.Trigger>
               <Tabs.Trigger value="raw">Raw</Tabs.Trigger>
             </Tabs.List>
-            <Tabs.Content value="graph">
-              <GraphResult
-                extraction={graphExtraction}
-                rows={queryResult.rows}
-                sourceId={frame.id}
-                motion={workspace.settings.graphMotion}
-                {workspace}
-              />
-            </Tabs.Content>
+            {#if graphExtraction.available}
+              <Tabs.Content value="graph">
+                <GraphResult
+                  extraction={graphExtraction}
+                  rows={queryResult.rows}
+                  sourceId={frame.id}
+                  motion={workspace.settings.graphMotion}
+                  {workspace}
+                />
+              </Tabs.Content>
+            {/if}
             <Tabs.Content value="table">
               {#if queryResult.rows.length > 0}
                 <ResultTable result={queryResult} />
@@ -380,13 +400,6 @@
           </Alert>
         {/if}
 
-        <p class="sr-only" aria-live="polite">
-          {copyStatus === 'copied'
-            ? 'GQL copied to the clipboard.'
-            : copyStatus === 'failed'
-              ? 'GQL could not be copied.'
-              : ''}
-        </p>
       </Card.Content>
     </Collapsible.Content>
   </Collapsible.Root>

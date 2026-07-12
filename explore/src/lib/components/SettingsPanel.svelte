@@ -13,6 +13,27 @@
   let { workspace }: { workspace: WorkspaceStore } = $props();
 
   let clearOpen = $state(false);
+  let clearAcknowledged = $state(false);
+
+  $effect(() => {
+    if (!clearOpen) clearAcknowledged = false;
+  });
+
+  function openClearDialog(): void {
+    clearAcknowledged = false;
+    clearOpen = true;
+  }
+
+  function closeClearDialog(): void {
+    clearOpen = false;
+    clearAcknowledged = false;
+  }
+
+  function clearWorkspace(): void {
+    workspace.clearWorkspace(true);
+    workspace.clearInspection();
+    closeClearDialog();
+  }
 
   const themes: { value: ThemeSetting; label: string }[] = [
     { value: 'system', label: 'System' },
@@ -115,8 +136,10 @@
           onCheckedChange={(checked) => workspace.updateSettings({ confirmBeforeClear: checked === true })}
         />
         <div>
-          <Label for="confirm-clear">Always confirm clear data</Label>
-          <p class="text-muted-foreground text-sm">Require a confirmation before deleting local workspace data.</p>
+          <Label for="confirm-clear">Require clear-data acknowledgment</Label>
+          <p class="text-muted-foreground text-sm">
+            Require an extra acknowledgment inside the confirmation dialog before clearing.
+          </p>
         </div>
       </div>
     </Card.Content>
@@ -128,7 +151,7 @@
       <Card.Description>Remove results, history, favorites, observed schema, and settings. Your authenticated session cookie is preserved.</Card.Description>
     </Card.Header>
     <Card.Content>
-      <Button variant="destructive" onclick={() => (clearOpen = true)}>Clear data</Button>
+      <Button variant="destructive" onclick={openClearDialog}>Clear data</Button>
     </Card.Content>
   </Card.Root>
 </section>
@@ -141,15 +164,24 @@
         This removes local workspace data but preserves the authenticated session cookie.
       </Dialog.Description>
     </Dialog.Header>
+    {#if workspace.settings.confirmBeforeClear}
+      <div class="flex items-start gap-3 rounded-lg border p-3">
+        <Checkbox
+          id="clear-data-acknowledgment"
+          checked={clearAcknowledged}
+          onCheckedChange={(checked) => (clearAcknowledged = checked === true)}
+        />
+        <Label for="clear-data-acknowledgment" class="leading-5">
+          I understand this permanently deletes local Explorer data.
+        </Label>
+      </div>
+    {/if}
     <Dialog.Footer>
-      <Button variant="outline" onclick={() => (clearOpen = false)}>Cancel</Button>
+      <Button variant="outline" onclick={closeClearDialog}>Cancel</Button>
       <Button
         variant="destructive"
-        onclick={() => {
-          workspace.clearWorkspace(true);
-          workspace.clearInspection();
-          clearOpen = false;
-        }}
+        disabled={workspace.settings.confirmBeforeClear && !clearAcknowledged}
+        onclick={clearWorkspace}
       >Clear data</Button>
     </Dialog.Footer>
   </Dialog.Content>
