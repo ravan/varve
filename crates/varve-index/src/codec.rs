@@ -151,7 +151,41 @@ pub fn encode_events(events: &[Event]) -> Result<Vec<u8>, IndexError> {
 }
 
 /// Deserializes events from one Arrow IPC stream produced by `encode_events`.
+///
+/// Task-6 fuzzing found that arrow-rs 58.3.0's IPC `StreamReader` PANICS
+/// (rather than returning an `Err`) on several classes of adversarial
+/// flatbuffer/record-batch bytes — see `fuzz/regressions/events/*.bin` and
+/// `fuzz/regressions/block_meta/*.bin` (the panics are in shared
+/// `arrow_ipc`/`arrow_buffer` internals used by both decoders). No public
+/// arrow API avoids these panics (confirmed by reading arrow-ipc's
+/// `convert`/`reader` source directly). `decode_events` is a pure function
+/// of `bytes` with no shared mutable state, so catching the unwind here and
+/// converting it to a clean `IndexError` at this pure-function trust
+/// boundary is sound (owner-approved, narrow override of the plan's general
+/// no-`catch_unwind` rule for this specific case — see `decode_meta` in
+/// `block.rs` for the mirrored guard AND the panic-hook scope-swap
+/// reasoning (both why we swap the hook and why the resulting cross-thread
+/// race window is judged acceptable), which applies identically here: this
+/// guard was empirically re-fuzzed and, without the scoped no-op hook
+/// swap, `libfuzzer-sys`'s abort-before-unwind hook defeats `catch_unwind`
+/// outright inside a `cargo fuzz` target even though it works correctly
+/// under plain `cargo test`.
 pub fn decode_events(bytes: &[u8]) -> Result<Vec<Event>, IndexError> {
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        decode_events_uncaught(bytes)
+    }));
+    std::panic::set_hook(prev_hook);
+    match result {
+        Ok(result) => result,
+        Err(_) => Err(IndexError::Codec(
+            "arrow IPC decode panicked (corrupt input)".into(),
+        )),
+    }
+}
+
+fn decode_events_uncaught(bytes: &[u8]) -> Result<Vec<Event>, IndexError> {
     let reader = StreamReader::try_new(std::io::Cursor::new(bytes), None)?;
     if reader.schema() != event_schema() {
         return Err(codec_err("event batch schema mismatch"));
@@ -277,6 +311,18 @@ mod tests {
         ];
         let bytes = encode_events(&events).unwrap();
         assert_eq!(decode_events(&bytes).unwrap(), events);
+    }
+
+    /// Regression for Task 6's fuzzing: `panic!("Interval type with unit of
+    /// {z:?} unsupported")` in `arrow_ipc::convert::get_data_type` for an
+    /// out-of-range `IntervalUnit` flatbuffer enum discriminant. Pre-fix,
+    /// this input made `decode_events` unwind the process; post-fix, the
+    /// `catch_unwind` guard converts it to a clean `Err`.
+    #[test]
+    fn decode_events_rejects_interval_unit_panic_bytes() {
+        let bytes: &[u8] =
+            include_bytes!("../../../fuzz/regressions/events/interval-unit-panic.bin");
+        assert!(decode_events(bytes).is_err());
     }
 
     #[test]
