@@ -4,6 +4,7 @@
   import { copyableJson } from '$lib/logic/results';
   import Check from '@lucide/svelte/icons/check';
   import Copy from '@lucide/svelte/icons/copy';
+  import { toast } from 'svelte-sonner';
 
   let { value }: { value: unknown } = $props();
   let copyState = $state<'idle' | 'copied' | 'failed'>('idle');
@@ -13,8 +14,10 @@
     try {
       await navigator.clipboard.writeText(json);
       copyState = 'copied';
+      toast.success('Raw JSON copied');
     } catch {
       copyState = 'failed';
+      toast.error('Could not copy raw JSON');
     }
   }
 </script>
@@ -34,11 +37,4 @@
   <ScrollArea.Root orientation="both" class="raw-result max-h-[32rem] rounded-lg border bg-muted/35">
     <pre aria-label="Raw result JSON"><code>{json}</code></pre>
   </ScrollArea.Root>
-  <p class="sr-only" aria-live="polite">
-    {copyState === 'copied'
-      ? 'Raw JSON copied to the clipboard.'
-      : copyState === 'failed'
-        ? 'Raw JSON could not be copied.'
-        : ''}
-  </p>
 </div>
