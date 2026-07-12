@@ -26,10 +26,12 @@
     frame,
     workspace,
     onRerun,
+    rerunDisabled,
   }: {
     frame: ExecutionFrame;
     workspace: WorkspaceStore;
     onRerun: (frame: ExecutionFrame) => void;
+    rerunDisabled: boolean;
   } = $props();
 
   let open = $state(true);
@@ -206,7 +208,12 @@
       </div>
 
       <Card.Action class="flex items-center gap-1">
-        <Button variant="ghost" size="sm" onclick={() => onRerun(frame)}>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={rerunDisabled}
+          onclick={() => onRerun(frame)}
+        >
           <RotateCcw aria-hidden="true" />
           Rerun query
         </Button>

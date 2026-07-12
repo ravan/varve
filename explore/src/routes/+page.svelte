@@ -17,11 +17,16 @@
   const connection = createConnectionStore(fetch);
   const workspace = createWorkspaceStore(browser ? window.localStorage : memoryStorage);
   let composer = $state<{ rerunQuery: (frame: ExecutionFrame) => Promise<void> } | null>(null);
+  let requestActive = $state(false);
 </script>
 
 <AppShell {connection} {workspace}>
   <div class="grid gap-8">
-    <QueryComposer bind:this={composer} {connection} {workspace} />
-    <ResultFeed {workspace} onRerun={(frame) => void composer?.rerunQuery(frame)} />
+    <QueryComposer bind:this={composer} bind:active={requestActive} {connection} {workspace} />
+    <ResultFeed
+      {workspace}
+      rerunDisabled={requestActive}
+      onRerun={(frame) => void composer?.rerunQuery(frame)}
+    />
   </div>
 </AppShell>
