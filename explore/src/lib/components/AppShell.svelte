@@ -1,6 +1,11 @@
 <script lang="ts">
   import ConnectionDialog from '$lib/components/ConnectionDialog.svelte';
   import ConnectionStatus from '$lib/components/ConnectionStatus.svelte';
+  import ElementInspector from '$lib/components/ElementInspector.svelte';
+  import FavoritesPanel from '$lib/components/FavoritesPanel.svelte';
+  import HistoryPanel from '$lib/components/HistoryPanel.svelte';
+  import ObservedSchemaPanel from '$lib/components/ObservedSchemaPanel.svelte';
+  import SettingsPanel from '$lib/components/SettingsPanel.svelte';
   import { Button } from '$lib/components/ui/button';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
   import { Separator } from '$lib/components/ui/separator';
@@ -8,6 +13,7 @@
   import * as Tooltip from '$lib/components/ui/tooltip';
   import type { ConnectionStore } from '$lib/stores/connection.svelte';
   import type { WorkspaceStore } from '$lib/stores/workspace.svelte';
+  import type { Favorite, HistoryEntry } from '$lib/logic/workspace';
   import Database from '@lucide/svelte/icons/database';
   import History from '@lucide/svelte/icons/history';
   import Menu from '@lucide/svelte/icons/menu';
@@ -16,16 +22,18 @@
   import Settings from '@lucide/svelte/icons/settings';
   import Star from '@lucide/svelte/icons/star';
   import SunMoon from '@lucide/svelte/icons/sun-moon';
-  import { toggleMode } from 'mode-watcher';
+  import { setMode } from 'mode-watcher';
   import { onMount, type Snippet } from 'svelte';
 
   let {
     connection,
     workspace,
+    onRunSaved,
     children,
   }: {
     connection: ConnectionStore;
     workspace: WorkspaceStore;
+    onRunSaved: (item: HistoryEntry | Favorite) => void;
     children: Snippet;
   } = $props();
 
@@ -33,6 +41,7 @@
   let inspectorOpen = $state(false);
   let connectionOpen = $state(false);
   let reconnectButton = $state<HTMLButtonElement | null>(null);
+  let activePanel = $state<'Observed schema' | 'History' | 'Favorites' | 'Settings' | null>(null);
 
   const navigation = [
     { name: 'New query', icon: Plus },
@@ -50,9 +59,33 @@
     return () => window.clearInterval(interval);
   });
 
+  $effect(() => {
+    setMode(workspace.settings.theme);
+  });
+
   function selectNavigation(name: (typeof navigation)[number]['name']): void {
-    if (name === 'New query') workspace.startNewQuery();
+    if (name === 'New query') {
+      workspace.startNewQuery();
+      activePanel = null;
+    } else {
+      activePanel = name;
+    }
     navigationOpen = false;
+  }
+
+  function startSchemaQuery(gql: string): void {
+    workspace.startNewQuery();
+    workspace.setQueryDraft(gql);
+    activePanel = null;
+  }
+
+  function runSaved(item: HistoryEntry | Favorite): void {
+    activePanel = null;
+    onRunSaved(item);
+  }
+
+  function cycleTheme(): void {
+    workspace.updateSettings({ theme: workspace.settings.theme === 'dark' ? 'light' : 'dark' });
   }
 </script>
 
@@ -77,7 +110,7 @@
                 {#snippet child({ props })}
                   <Button
                     {...props}
-                    variant={item.name === 'New query' ? 'secondary' : 'ghost'}
+                    variant={(item.name === 'New query' && activePanel === null) || item.name === activePanel ? 'secondary' : 'ghost'}
                     class="w-full justify-start"
                     onclick={() => selectNavigation(item.name)}
                   >
@@ -113,7 +146,7 @@
               <nav class="grid gap-1" aria-label="Mobile workspace navigation">
                 {#each navigation as item}
                   <Button
-                    variant={item.name === 'New query' ? 'secondary' : 'ghost'}
+                    variant={(item.name === 'New query' && activePanel === null) || item.name === activePanel ? 'secondary' : 'ghost'}
                     class="w-full justify-start"
                     onclick={() => selectNavigation(item.name)}
                   >
@@ -142,7 +175,7 @@
         <Tooltip.Root>
           <Tooltip.Trigger>
             {#snippet child({ props })}
-              <Button {...props} variant="ghost" size="icon-sm" aria-label="Theme" onclick={toggleMode}>
+              <Button {...props} variant="ghost" size="icon-sm" aria-label="Theme" onclick={cycleTheme}>
                 <SunMoon aria-hidden="true" />
               </Button>
             {/snippet}
@@ -160,20 +193,32 @@
           <Sheet.Content side="right" class="w-80">
             <Sheet.Header class="p-4 pb-0">
               <Sheet.Title>Inspector</Sheet.Title>
-              <Sheet.Description>Selection details appear here with graph results.</Sheet.Description>
+              <Sheet.Description>Selection details from the active graph result.</Sheet.Description>
             </Sheet.Header>
+            <ScrollArea class="min-h-0 flex-1 px-4 pb-4">
+              <ElementInspector inspection={workspace.inspection} />
+            </ScrollArea>
           </Sheet.Content>
         </Sheet.Root>
       </header>
 
-      <main class="min-w-0 overflow-x-hidden p-4 sm:p-6">{@render children()}</main>
+      <main class="min-w-0 overflow-x-hidden p-4 sm:p-6">
+        {#if activePanel === 'Observed schema'}
+          <ObservedSchemaPanel schema={workspace.observedSchema} onQuery={startSchemaQuery} />
+        {:else if activePanel === 'History'}
+          <HistoryPanel {workspace} onRun={runSaved} />
+        {:else if activePanel === 'Favorites'}
+          <FavoritesPanel {workspace} onRun={runSaved} />
+        {:else if activePanel === 'Settings'}
+          <SettingsPanel {workspace} />
+        {:else}
+          {@render children()}
+        {/if}
+      </main>
     </div>
 
     <aside class="desktop-inspector border-l bg-card p-4">
-      <h2 class="text-sm font-semibold">Inspector</h2>
-      <p class="text-muted-foreground mt-2 text-sm">
-        Selection details appear here with graph results.
-      </p>
+      <ElementInspector inspection={workspace.inspection} />
     </aside>
   </div>
 </Tooltip.Provider>
