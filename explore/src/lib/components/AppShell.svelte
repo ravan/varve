@@ -23,7 +23,7 @@
   import Star from '@lucide/svelte/icons/star';
   import SunMoon from '@lucide/svelte/icons/sun-moon';
   import { setMode } from 'mode-watcher';
-  import { onMount, tick, type Snippet } from 'svelte';
+  import { onMount, tick, untrack, type Snippet } from 'svelte';
 
   let {
     connection,
@@ -60,7 +60,8 @@
   });
 
   $effect(() => {
-    setMode(workspace.settings.theme);
+    const theme = workspace.settings.theme;
+    untrack(() => setMode(theme));
   });
 
   function selectNavigation(name: (typeof navigation)[number]['name']): void {
