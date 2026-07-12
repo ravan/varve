@@ -32,6 +32,44 @@ describe('normalizeQueryResponse', () => {
     expect(raw).toEqual({ rows: [{ value: { nested: true } }] });
   });
 
+  it('isolates normalized formatting and sorting from later raw object and array mutations', () => {
+    const raw = {
+      rows: [
+        { id: 'one', value: { key: 'a', nested: ['before'] } },
+        { id: 'two', value: { key: 'b', nested: ['later'] } },
+      ],
+    };
+    const result = normalizeQueryResponse(raw);
+    const firstValue = result.rows[0].value;
+
+    raw.rows[0].value.key = 'z';
+    raw.rows[0].value.nested[0] = 'changed';
+    raw.rows[0].value.nested.push('added');
+
+    expect(formatCell(firstValue)).toBe('{"key":"a","nested":["before"]}');
+    expect(sortRows(result.rows, 'value').map((row) => formatCell(row.id))).toEqual(['one', 'two']);
+    expect(result.raw).toBe(raw);
+  });
+
+  it('prevents mutation through a normalized cell without changing raw or normalized data', () => {
+    const raw = { rows: [{ value: { nested: { enabled: true }, list: [1, 2] } }] };
+    const result = normalizeQueryResponse(raw);
+    const cell = result.rows[0].value;
+    if (cell.kind !== 'value') throw new Error('expected a normalized value cell');
+    const value = cell.value as { nested: { enabled: boolean }; list: number[] };
+
+    expect(() => {
+      value.nested.enabled = false;
+    }).toThrow(TypeError);
+    expect(() => value.list.push(3)).toThrow(TypeError);
+
+    expect(raw.rows[0].value).toEqual({ nested: { enabled: true }, list: [1, 2] });
+    expect(formatCell(cell)).toBe('{"list":[1,2],"nested":{"enabled":true}}');
+    expect(Object.isFrozen(value)).toBe(true);
+    expect(Object.isFrozen(value.nested)).toBe(true);
+    expect(Object.isFrozen(value.list)).toBe(true);
+  });
+
   it('rejects malformed query envelopes', () => {
     expect(() => normalizeQueryResponse({ rows: 'not-an-array' })).toThrow('rows');
     expect(() => normalizeQueryResponse({ rows: [null] })).toThrow('row 1');
