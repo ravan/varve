@@ -110,8 +110,6 @@
             if (update.docChanged) workspace.setQueryDraft(update.state.doc.toString());
           }),
           keymap.of([
-            ...defaultKeymap,
-            ...historyKeymap,
             {
               key: 'Mod-Enter',
               preventDefault: true,
@@ -120,6 +118,8 @@
                 return true;
               },
             },
+            ...defaultKeymap,
+            ...historyKeymap,
           ]),
         ],
       }),
