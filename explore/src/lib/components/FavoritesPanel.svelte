@@ -7,7 +7,7 @@
   import { Label } from '$lib/components/ui/label';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
   import { Textarea } from '$lib/components/ui/textarea';
-  import type { Favorite } from '$lib/logic/workspace';
+  import { isSensitiveParameterKey, type Favorite } from '$lib/logic/workspace';
   import type { WorkspaceStore } from '$lib/stores/workspace.svelte';
   import type { QueryParameters } from '$lib/types';
   import Plus from '@lucide/svelte/icons/plus';
@@ -70,7 +70,7 @@
 
   function visibleParameters(params: Favorite['params']): string {
     const visible = Object.fromEntries(
-      Object.entries(params).filter(([key]) => !/(?:token|session|authorization|credential|secret)/i.test(key)),
+      Object.entries(params).filter(([key]) => !isSensitiveParameterKey(key)),
     );
     return JSON.stringify(visible, null, 2);
   }

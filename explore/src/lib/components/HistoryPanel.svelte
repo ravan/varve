@@ -3,7 +3,7 @@
   import { Button } from '$lib/components/ui/button';
   import * as Card from '$lib/components/ui/card';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
-  import type { HistoryEntry } from '$lib/logic/workspace';
+  import { isSensitiveParameterKey, type HistoryEntry } from '$lib/logic/workspace';
   import type { WorkspaceStore } from '$lib/stores/workspace.svelte';
 
   let {
@@ -22,7 +22,7 @@
 
   function visibleParameters(params: HistoryEntry['params']): string {
     const visible = Object.fromEntries(
-      Object.entries(params).filter(([key]) => !/(?:token|session|authorization|credential|secret)/i.test(key)),
+      Object.entries(params).filter(([key]) => !isSensitiveParameterKey(key)),
     );
     return JSON.stringify(visible, null, 2);
   }
