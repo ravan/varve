@@ -380,18 +380,18 @@ shown (2 query nodes serve concurrent reads while writer ingests).
 
 **Sessions:** 2. **Depends:** slice 9.
 
-- [ ] `Coordinator` trait + registry: `designated-writer` (default) — writer heartbeats
+- [x] `Coordinator` trait + registry: `designated-writer` (default) — writer heartbeats
       `v1/writer.json` (plain PUT, timestamped); second writer starting while heartbeat is
       fresh refuses with clear error (best-effort guard, documented as such).
-- [ ] `cas-failover` coordinator (feature-gated): lease object via `If-None-Match`/`If-Match`
+- [x] `cas-failover` coordinator (feature-gated): lease object via `If-None-Match`/`If-Match`
       through `object_store` `PutMode`; log **epoch increment on takeover** fences the old
       writer (stale appends land in a dead epoch and are ignored); only enabled when the
       slice-5 probe passes at startup, else hard error naming the backend capability.
-- [ ] Failover test (MinIO or local CAS-semantics store): kill writer, standby takes over
+- [x] Failover test (MinIO or local CAS-semantics store): kill writer, standby takes over
       < 10s, zero acked-tx loss, zombie writer's late appends provably ignored.
-- [ ] Backpressure: bounded submission queue (429/wait on full); live-index memory watermark
+- [x] Backpressure: bounded submission queue (429/wait on full); live-index memory watermark
       forces early flush; slow query node lag metric (never affects writer).
-- [ ] Observability completion: `tracing` spans across submit→commit→apply→flush and
+- [x] Observability completion: `tracing` spans across submit→commit→apply→flush and
       parse→plan→execute; Prometheus metrics per spec §12 list; OpenTelemetry export behind
       `MetricsSink`.
 

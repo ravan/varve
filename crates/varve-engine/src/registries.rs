@@ -1,4 +1,8 @@
 use crate::clock::{Clock, SystemClockFactory};
+#[cfg(feature = "cas-failover")]
+use crate::coord::cas::CasFailoverFactory;
+use crate::coord::designated::DesignatedWriterFactory;
+use crate::coord::Coordinator;
 use varve_config::Registry;
 use varve_log::Log;
 use varve_storage::{CacheTier, ObjectStore};
@@ -11,6 +15,7 @@ pub struct Registries {
     pub clock: Registry<dyn Clock>,
     pub storage: Registry<dyn ObjectStore>,
     pub cache: Registry<dyn CacheTier>,
+    pub coordinator: Registry<dyn Coordinator>,
 }
 
 impl Registries {
@@ -20,11 +25,20 @@ impl Registries {
         if let Err(e) = clock.register(Box::new(SystemClockFactory)) {
             unreachable!("duplicate builtin clock factory: {e}");
         }
+        let mut coordinator = Registry::new("coordinator");
+        if let Err(e) = coordinator.register(Box::new(DesignatedWriterFactory)) {
+            unreachable!("duplicate builtin coordinator factory: {e}");
+        }
+        #[cfg(feature = "cas-failover")]
+        if let Err(e) = coordinator.register(Box::new(CasFailoverFactory)) {
+            unreachable!("duplicate builtin coordinator factory: {e}");
+        }
         Registries {
             log: varve_log::log_registry(),
             clock,
             storage: varve_storage::storage_registry(),
             cache: varve_storage::cache_registry(),
+            coordinator,
         }
     }
 }
@@ -44,6 +58,13 @@ mod tests {
         assert_eq!(registries.clock.names(), vec!["system"]);
         assert_eq!(registries.storage.names(), vec!["local", "memory", "s3"]);
         assert_eq!(registries.cache.names(), vec!["disk", "memory"]);
+        #[cfg(feature = "cas-failover")]
+        assert_eq!(
+            registries.coordinator.names(),
+            vec!["cas-failover", "designated-writer"]
+        );
+        #[cfg(not(feature = "cas-failover"))]
+        assert_eq!(registries.coordinator.names(), vec!["designated-writer"]);
     }
 
     #[test]

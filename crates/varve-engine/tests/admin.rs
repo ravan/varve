@@ -1,9 +1,14 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
+
 use bytes::Bytes;
+use common::{put_record, shared_registries};
+use std::sync::Arc;
 use tempfile::TempDir;
 use varve_config::Config;
 use varve_engine::{Db, EngineError, NodeRole};
+use varve_log::{Log, ObjectStoreLog};
 
 fn config(root: &TempDir, roles: &[&str], max_block_rows: usize) -> Config {
     let roles = roles
@@ -133,4 +138,48 @@ async fn verify_reports_truncated_referenced_data_as_corruption() {
         query.verify().await,
         Err(EngineError::Storage(_) | EngineError::Index(_))
     ));
+}
+
+#[tokio::test]
+async fn verify_walks_across_a_fenced_epoch_boundary() {
+    // Epoch 0 is fenced from offset 0 (entirely dead) before anything lands
+    // in it, so the record appended below is a zombie. Epoch 1 then holds
+    // the two real, live records. An epoch-unaware walk stops the moment it
+    // hits the empty read just past the zombie and never reaches epoch 1 —
+    // it would report 1 (the miscounted zombie), not 2.
+    let store = varve_storage::memory_store();
+    store
+        .put(
+            &varve_storage::keys::epoch_fence_key(0),
+            Bytes::from(
+                serde_json::json!({
+                    "epoch": 0, "fence_offset": 0, "fenced_by": "test", "fenced_at_us": 0
+                })
+                .to_string(),
+            ),
+        )
+        .await
+        .unwrap();
+    let log = ObjectStoreLog::new(Arc::clone(&store));
+    log.append(vec![put_record(99, 99)]).await.unwrap(); // (0,0) — DEAD zombie
+    let log2 = ObjectStoreLog::new(Arc::clone(&store));
+    log2.start_epoch(1).await.unwrap();
+    log2.append(vec![put_record(1, 1)]).await.unwrap(); // (1,0) live
+    log2.append(vec![put_record(2, 2)]).await.unwrap(); // (1,1) live
+
+    let config = Config::from_toml_str(
+        "[node]\nroles = [\"writer\", \"query\"]\n\
+         [log]\nbackend = \"object-store\"\n\
+         [storage]\nbackend = \"shared\"\n",
+    )
+    .unwrap();
+    let db = Db::open_with(&config, &shared_registries(store))
+        .await
+        .unwrap();
+
+    let report = db.verify().await.unwrap();
+    assert_eq!(
+        report.log_records_checked, 2,
+        "zombie checked-but-skipped records are not counted"
+    );
 }

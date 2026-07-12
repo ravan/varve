@@ -50,6 +50,7 @@ impl CommandClient for FakeClient {
             applied_log_position: 42,
             manifest_block_id: Some(3),
             manifest_watermark: 9,
+            log_head_position: 42,
             follower_error: Some("lagging".to_string()),
             probe: ProbeResponse {
                 verdict: "supported".to_string(),
@@ -114,6 +115,7 @@ async fn admin_status_calls_client_once_and_human_output_has_every_field() {
         "applied_log_position: 42",
         "manifest_block_id: 3",
         "manifest_watermark: 9",
+        "log_head_position: 42",
         "follower_error: lagging",
         "probe: supported",
     ] {
@@ -134,6 +136,7 @@ async fn admin_status_json_emits_exact_server_dto() {
     assert_eq!(value["applied_log_position"], json!(42));
     assert_eq!(value["manifest_block_id"], json!(3));
     assert_eq!(value["manifest_watermark"], json!(9));
+    assert_eq!(value["log_head_position"], json!(42));
     assert_eq!(value["follower_error"], json!("lagging"));
     assert_eq!(value["probe"]["verdict"], json!("supported"));
 }

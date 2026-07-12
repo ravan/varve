@@ -6,6 +6,7 @@ on:
   schedule:
     - cron: "0 3 * * *"
     - cron: "0 4 * * 1" # weekly: Ceph demo backend
+    - cron: "0 5 * * *" # nightly: chaos harness
 
 env:
   CARGO_TERM_COLOR: always
@@ -90,6 +91,17 @@ jobs:
       - run: cargo test -p varve-testkit --release
         env:
           PROPTEST_CASES: "200000"
+
+  chaos-nightly:
+    if: github.event_name == 'schedule' && github.event.schedule == '0 5 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p varve-testkit --release --test chaos -- --nocapture
+        env:
+          VARVE_CHAOS_SECS: "1800"
 
   fuzz-nightly:
     if: github.event_name == 'schedule' && github.event.schedule == '0 3 * * *'

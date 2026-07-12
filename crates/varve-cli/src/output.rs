@@ -61,6 +61,7 @@ pub(crate) fn format_status(status: &StatusResponse) -> String {
         None => lines.push("manifest_block_id: none".to_string()),
     }
     lines.push(format!("manifest_watermark: {}", status.manifest_watermark));
+    lines.push(format!("log_head_position: {}", status.log_head_position));
     if let Some(reason) = &status.follower_error {
         lines.push(format!("follower_error: {reason}"));
     }

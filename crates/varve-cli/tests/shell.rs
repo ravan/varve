@@ -90,6 +90,7 @@ impl CommandClient for FakeClient {
             applied_log_position: 1,
             manifest_block_id: None,
             manifest_watermark: 0,
+            log_head_position: 1,
             follower_error: None,
             probe: ProbeResponse {
                 verdict: "supported".to_string(),

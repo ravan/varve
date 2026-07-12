@@ -14,6 +14,8 @@ pub use frontend::{
 };
 #[cfg(feature = "http")]
 pub use http::{http_router, HttpContext, HttpFrontend};
+#[cfg(feature = "otel")]
+pub use metrics::OtlpMetrics;
 pub use metrics::{MetricsSink, PrometheusMetrics};
 
 use varve_config::{Registry, RegistryError};
@@ -34,6 +36,8 @@ impl ServerRegistries {
         authenticator.register(Box::new(auth::StaticAuthFactory))?;
         let mut metrics = Registry::new("metrics");
         metrics.register(Box::new(metrics::PrometheusMetricsFactory))?;
+        #[cfg(feature = "otel")]
+        metrics.register(Box::new(metrics::OtlpMetricsFactory))?;
         Ok(Self {
             frontend,
             authenticator,

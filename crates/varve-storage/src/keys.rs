@@ -383,6 +383,35 @@ pub fn parse_log_key(key: &str) -> Option<varve_types::LogPosition> {
     varve_types::LogPosition::new(epoch, offset).ok()
 }
 
+/// Epoch-fence object keys (spec §12): `v1/epochs/<epoch-4hex>.json` marks a
+/// DEAD epoch — a durable "epoch E ends here" record written by the
+/// failover coordinator that seized the next epoch. Fixed-width u16 hex, as
+/// with the log's epoch directory, though listing order is not load-bearing
+/// here (each epoch has at most one fence object).
+pub const EPOCH_FENCE_PREFIX: &str = "v1/epochs";
+
+pub fn epoch_fence_key(epoch: u16) -> String {
+    format!("{EPOCH_FENCE_PREFIX}/{epoch:04x}.json")
+}
+
+/// Parses the epoch out of a fence key; `None` for anything else (foreign
+/// keys under the prefix are ignored, never an error — same policy as
+/// `parse_log_key`/`manifest_block_id`).
+pub fn parse_epoch_fence_key(key: &str) -> Option<u16> {
+    let hex = key
+        .strip_prefix(EPOCH_FENCE_PREFIX)?
+        .strip_prefix('/')?
+        .strip_suffix(".json")?;
+    if hex.len() != 4
+        || hex
+            .chars()
+            .any(|c| !c.is_ascii_hexdigit() || c.is_ascii_uppercase())
+    {
+        return None;
+    }
+    u16::from_str_radix(hex, 16).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,6 +554,15 @@ mod tests {
         assert_eq!(parse_log_key("v1/log/0000/1FF.vlog"), None); // uppercase body
         assert_eq!(parse_log_key("v1/blocks/00.vlog"), None); // wrong prefix
         assert_eq!(parse_log_key("v1/log/0000.vlog"), None); // missing segment
+    }
+
+    #[test]
+    fn epoch_fence_keys_round_trip() {
+        assert_eq!(epoch_fence_key(0), "v1/epochs/0000.json");
+        assert_eq!(epoch_fence_key(0xBEEF), "v1/epochs/beef.json");
+        assert_eq!(parse_epoch_fence_key("v1/epochs/beef.json"), Some(0xBEEF));
+        assert_eq!(parse_epoch_fence_key("v1/epochs/nope.txt"), None);
+        assert_eq!(parse_epoch_fence_key("v1/blocks/0001.manifest"), None);
     }
 
     #[test]

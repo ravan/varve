@@ -5,9 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["http", "tls"]
+default = ["http", "tls", "otel"]
 http = ["dep:axum-server", "dep:url"]
 tls = ["http", "dep:rustls", "axum-server/tls-rustls-no-provider"]
+otel = ["dep:reqwest"]
 
 [[bin]]
 name = "varved"
@@ -33,6 +34,7 @@ axum = { workspace = true }
 axum-server = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true }

@@ -113,6 +113,8 @@ pub struct StatusResponse {
     pub applied_log_position: u64,
     pub manifest_block_id: Option<u64>,
     pub manifest_watermark: u64,
+    /// Latest known log head (Task 12, spec §12): see `NodeStatus::log_head`.
+    pub log_head_position: u64,
     pub follower_error: Option<String>,
     pub probe: ProbeResponse,
 }
@@ -130,6 +132,7 @@ impl StatusResponse {
             applied_log_position: status.applied.log_position.as_u64(),
             manifest_block_id: status.manifest_block_id,
             manifest_watermark: status.manifest_watermark.as_u64(),
+            log_head_position: status.log_head.as_u64(),
             follower_error: status.follower_error.clone(),
             probe: ProbeResponse::from_report(report),
         }

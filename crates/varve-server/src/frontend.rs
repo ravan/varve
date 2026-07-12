@@ -92,6 +92,11 @@ mod tests {
             .unwrap_or_else(|error| panic!("builtin registries must construct: {error}"));
         assert_eq!(registries.frontend.names(), vec!["http"]);
         assert_eq!(registries.authenticator.names(), vec!["static"]);
+        // `Registry::names()` is sorted (backed by a `BTreeMap`), not
+        // insertion order — "otlp" < "prometheus".
+        #[cfg(feature = "otel")]
+        assert_eq!(registries.metrics.names(), vec!["otlp", "prometheus"]);
+        #[cfg(not(feature = "otel"))]
         assert_eq!(registries.metrics.names(), vec!["prometheus"]);
     }
 

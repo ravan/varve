@@ -8,6 +8,7 @@ use crate::state::{PersistedTrie, TableKind, EDGES_TABLE};
 use crate::writer::WriterState;
 use bytes::Bytes;
 use std::sync::Arc;
+use tracing::Instrument;
 use varve_index::block::{encode_block, encode_block_by, EncodedBlock, PageMeta, SortOrder};
 use varve_index::LiveTable;
 use varve_storage::{keys, BlockManifest, TableTries, TrieEntry};
@@ -128,177 +129,199 @@ pub(crate) async fn flush_block(state: &mut WriterState) -> Result<(), EngineErr
     }
 
     let block_id = state.next_block_id;
-    let trie_key = keys::l0_trie_key(block_id);
-    let mut flushed = Vec::new();
-    let mut flushed_adj = Vec::new();
+    // `varve.flush_block` (field `block_id`): wraps everything from here
+    // through the trie-swap/log-trim tail, i.e. every `.await` this
+    // function still has left. An inline `async move` block (rather than a
+    // thin-wrapper `_impl` split) because `GraphFlushSnapshot`/
+    // `PrimaryFlush`/`AdjFlush` are locally-scoped structs that would need
+    // to move to module scope to cross an extracted function boundary.
+    async move {
+        let trie_key = keys::l0_trie_key(block_id);
+        let mut flushed = Vec::new();
+        let mut flushed_adj = Vec::new();
 
-    for snapshot in &snapshots {
-        for (kind, enc) in [
-            (TableKind::Nodes, &snapshot.nodes_enc),
-            (TableKind::Edges, &snapshot.edges_enc),
-        ] {
-            let Some(EncodedBlock { data, meta, pages }) = enc else {
-                continue;
-            };
-            let entry = TrieEntry {
-                trie_key: trie_key.clone(),
-                row_count: pages.iter().map(|p| p.rows).sum(),
-                data_len: data.len() as u64,
-            };
-            state
-                .store
-                .put(
-                    &keys::data_key(&snapshot.graph, kind.name(), &trie_key),
-                    Bytes::from(data.clone()),
-                )
-                .await?;
-            state
-                .store
-                .put(
-                    &keys::meta_key(&snapshot.graph, kind.name(), &trie_key),
-                    Bytes::from(meta.clone()),
-                )
-                .await?;
-            flushed.push(PrimaryFlush {
-                graph: snapshot.graph.clone(),
-                kind,
-                entry,
-                pages: pages.clone(),
-            });
-        }
-
-        for (family, enc) in [
-            (varve_storage::ADJ_OUT, &snapshot.adj_out_enc),
-            (varve_storage::ADJ_IN, &snapshot.adj_in_enc),
-        ] {
-            let Some(EncodedBlock { data, meta, pages }) = enc else {
-                continue;
-            };
-            let entry = TrieEntry {
-                trie_key: trie_key.clone(),
-                row_count: pages.iter().map(|p| p.rows).sum(),
-                data_len: data.len() as u64,
-            };
-            state
-                .store
-                .put(
-                    &keys::adj_data_key(&snapshot.graph, EDGES_TABLE, family, &trie_key),
-                    Bytes::from(data.clone()),
-                )
-                .await?;
-            state
-                .store
-                .put(
-                    &keys::adj_meta_key(&snapshot.graph, EDGES_TABLE, family, &trie_key),
-                    Bytes::from(meta.clone()),
-                )
-                .await?;
-            flushed_adj.push(AdjFlush {
-                graph: snapshot.graph.clone(),
-                family,
-                entry,
-                pages: pages.clone(),
-            });
-        }
-    }
-
-    crash_point("pre-manifest-put");
-
-    let mut tables = Vec::new();
-    for snapshot in &snapshots {
-        for (kind, prior) in [
-            (TableKind::Nodes, &snapshot.prior_nodes),
-            (TableKind::Edges, &snapshot.prior_edges),
-        ] {
-            let mut tries = prior.clone();
-            if let Some(flush) = flushed
-                .iter()
-                .find(|flush| flush.graph == snapshot.graph && flush.kind == kind)
-            {
-                tries.push(flush.entry.clone());
-            }
-            if !tries.is_empty() {
-                tables.push(TableTries {
+        for snapshot in &snapshots {
+            for (kind, enc) in [
+                (TableKind::Nodes, &snapshot.nodes_enc),
+                (TableKind::Edges, &snapshot.edges_enc),
+            ] {
+                let Some(EncodedBlock { data, meta, pages }) = enc else {
+                    continue;
+                };
+                let entry = TrieEntry {
+                    trie_key: trie_key.clone(),
+                    row_count: pages.iter().map(|p| p.rows).sum(),
+                    data_len: data.len() as u64,
+                };
+                state
+                    .store
+                    .put(
+                        &keys::data_key(&snapshot.graph, kind.name(), &trie_key),
+                        Bytes::from(data.clone()),
+                    )
+                    .await?;
+                state
+                    .store
+                    .put(
+                        &keys::meta_key(&snapshot.graph, kind.name(), &trie_key),
+                        Bytes::from(meta.clone()),
+                    )
+                    .await?;
+                flushed.push(PrimaryFlush {
                     graph: snapshot.graph.clone(),
-                    table: kind.name().to_string(),
-                    family: String::new(),
-                    tries,
+                    kind,
+                    entry,
+                    pages: pages.clone(),
+                });
+            }
+
+            for (family, enc) in [
+                (varve_storage::ADJ_OUT, &snapshot.adj_out_enc),
+                (varve_storage::ADJ_IN, &snapshot.adj_in_enc),
+            ] {
+                let Some(EncodedBlock { data, meta, pages }) = enc else {
+                    continue;
+                };
+                let entry = TrieEntry {
+                    trie_key: trie_key.clone(),
+                    row_count: pages.iter().map(|p| p.rows).sum(),
+                    data_len: data.len() as u64,
+                };
+                state
+                    .store
+                    .put(
+                        &keys::adj_data_key(&snapshot.graph, EDGES_TABLE, family, &trie_key),
+                        Bytes::from(data.clone()),
+                    )
+                    .await?;
+                state
+                    .store
+                    .put(
+                        &keys::adj_meta_key(&snapshot.graph, EDGES_TABLE, family, &trie_key),
+                        Bytes::from(meta.clone()),
+                    )
+                    .await?;
+                flushed_adj.push(AdjFlush {
+                    graph: snapshot.graph.clone(),
+                    family,
+                    entry,
+                    pages: pages.clone(),
                 });
             }
         }
 
-        for (family, prior) in [
-            (varve_storage::ADJ_OUT, &snapshot.prior_adj_out),
-            (varve_storage::ADJ_IN, &snapshot.prior_adj_in),
-        ] {
-            let mut tries = prior.clone();
-            if let Some(flush) = flushed_adj
-                .iter()
-                .find(|flush| flush.graph == snapshot.graph && flush.family == family)
-            {
-                tries.push(flush.entry.clone());
+        crash_point("pre-manifest-put");
+
+        let mut tables = Vec::new();
+        for snapshot in &snapshots {
+            for (kind, prior) in [
+                (TableKind::Nodes, &snapshot.prior_nodes),
+                (TableKind::Edges, &snapshot.prior_edges),
+            ] {
+                let mut tries = prior.clone();
+                if let Some(flush) = flushed
+                    .iter()
+                    .find(|flush| flush.graph == snapshot.graph && flush.kind == kind)
+                {
+                    tries.push(flush.entry.clone());
+                }
+                if !tries.is_empty() {
+                    tables.push(TableTries {
+                        graph: snapshot.graph.clone(),
+                        table: kind.name().to_string(),
+                        family: String::new(),
+                        tries,
+                    });
+                }
             }
-            if !tries.is_empty() {
-                tables.push(TableTries {
-                    graph: snapshot.graph.clone(),
-                    table: EDGES_TABLE.to_string(),
-                    family: family.to_string(),
-                    tries,
+
+            for (family, prior) in [
+                (varve_storage::ADJ_OUT, &snapshot.prior_adj_out),
+                (varve_storage::ADJ_IN, &snapshot.prior_adj_in),
+            ] {
+                let mut tries = prior.clone();
+                if let Some(flush) = flushed_adj
+                    .iter()
+                    .find(|flush| flush.graph == snapshot.graph && flush.family == family)
+                {
+                    tries.push(flush.entry.clone());
+                }
+                if !tries.is_empty() {
+                    tables.push(TableTries {
+                        graph: snapshot.graph.clone(),
+                        table: EDGES_TABLE.to_string(),
+                        family: family.to_string(),
+                        tries,
+                    });
+                }
+            }
+        }
+
+        let manifest = BlockManifest {
+            block_id,
+            watermark: state.durable_watermark.as_u64(),
+            max_tx_id: state.next_tx_id,
+            max_system_time_us: max_system_us,
+            tables,
+        };
+
+        // KNOWN LIMITATION (Slice-10 final-review finding 2): this manifest
+        // PUT is not itself epoch-fenced (only the log is) — a fenced-but-alive
+        // writer's in-flight `flush_block` could still land this PUT before the
+        // Task-8 post-check lease gate fires. The lease ack-gate makes such a
+        // writer fatal and never-acking, which contains the v1 blast radius,
+        // but robust manifest fencing (e.g. selecting latest by (watermark,
+        // block_id)) is a documented v1 limitation — see STATUS.md Slice-10
+        // known limitations.
+        state
+            .store
+            .put(
+                &keys::manifest_key(block_id),
+                Bytes::from(manifest.to_wire()),
+            )
+            .await?;
+
+        crash_point("post-manifest-put");
+
+        {
+            let mut s = state.state.write().map_err(|_| EngineError::Poisoned)?;
+            for flush in flushed {
+                let Some(table) = s.graph_mut(&flush.graph) else {
+                    continue;
+                };
+                let core = table.core_mut(flush.kind);
+                core.tries.push(PersistedTrie {
+                    entry: flush.entry,
+                    pages: Arc::new(flush.pages),
                 });
+                core.live = LiveTable::new();
+            }
+            for flush in flushed_adj {
+                let Some(table) = s.graph_mut(&flush.graph) else {
+                    continue;
+                };
+                let trie = PersistedTrie {
+                    entry: flush.entry,
+                    pages: Arc::new(flush.pages),
+                };
+                if flush.family == varve_storage::ADJ_OUT {
+                    table.adj_out.push(trie);
+                } else {
+                    table.adj_in.push(trie);
+                }
             }
         }
+
+        state.next_block_id += 1;
+        let _ = state.log.trim(state.durable_watermark).await;
+        state
+            .metrics
+            .flush_blocks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
-
-    let manifest = BlockManifest {
-        block_id,
-        watermark: state.durable_watermark.as_u64(),
-        max_tx_id: state.next_tx_id,
-        max_system_time_us: max_system_us,
-        tables,
-    };
-
-    state
-        .store
-        .put(
-            &keys::manifest_key(block_id),
-            Bytes::from(manifest.to_wire()),
-        )
-        .await?;
-
-    crash_point("post-manifest-put");
-
-    {
-        let mut s = state.state.write().map_err(|_| EngineError::Poisoned)?;
-        for flush in flushed {
-            let Some(table) = s.graph_mut(&flush.graph) else {
-                continue;
-            };
-            let core = table.core_mut(flush.kind);
-            core.tries.push(PersistedTrie {
-                entry: flush.entry,
-                pages: Arc::new(flush.pages),
-            });
-            core.live = LiveTable::new();
-        }
-        for flush in flushed_adj {
-            let Some(table) = s.graph_mut(&flush.graph) else {
-                continue;
-            };
-            let trie = PersistedTrie {
-                entry: flush.entry,
-                pages: Arc::new(flush.pages),
-            };
-            if flush.family == varve_storage::ADJ_OUT {
-                table.adj_out.push(trie);
-            } else {
-                table.adj_in.push(trie);
-            }
-        }
-    }
-
-    state.next_block_id += 1;
-    let _ = state.log.trim(state.durable_watermark).await;
-    Ok(())
+    .instrument(tracing::info_span!("varve.flush_block", block_id))
+    .await
 }
 
 /// Test-only crash hook for the `varve-testkit` `kill -9` harness, mirroring
@@ -330,7 +353,9 @@ fn crash_point(_point: &str) {}
 #[cfg(test)]
 mod tests {
     use crate::clock::{Clock, MonotonicClock};
+    use crate::coord::LeaseState;
     use crate::db::{EngineError, TxReceipt};
+    use crate::metrics::EngineMetrics;
     use crate::node::ProgressState;
     use crate::scan::merged_snapshot;
     use crate::state::{GraphsState, TableKind, DEFAULT_GRAPH};
@@ -354,7 +379,11 @@ mod tests {
     ) -> (WriterHandle, Arc<RwLock<GraphsState>>, Arc<MemoryLog>) {
         let log = Arc::new(MemoryLog::new());
         let state = Arc::new(RwLock::new(GraphsState::new()));
-        let (progress, _progress_rx) = watch::channel(ProgressState::running(0, LogPosition::ZERO));
+        let (progress, _progress_rx) = watch::channel(ProgressState::running(
+            0,
+            LogPosition::ZERO,
+            LogPosition::ZERO,
+        ));
         let writer_state = WriterState {
             state: Arc::clone(&state),
             store,
@@ -367,12 +396,18 @@ mod tests {
             next_block_id: 0,
             durable_watermark: LogPosition::ZERO,
             progress,
+            lease: watch::channel(LeaseState::Unfenced).1,
+            metrics: Arc::new(EngineMetrics::default()),
         };
         let cfg = WriterConfig {
             window: Duration::ZERO,
             max_bytes: 8 * 1024 * 1024,
             max_block_rows,
+            // Row-count trigger is what these tests exercise; the byte
+            // watermark (Task 11) stays out of reach so it never fires here.
+            max_live_bytes: usize::MAX,
             flush_interval,
+            queue_len: 256,
         };
         (spawn_writer(writer_state, cfg), state, log)
     }
@@ -386,13 +421,15 @@ mod tests {
             .use_graph
             .unwrap_or_else(|| DEFAULT_GRAPH.to_string());
         let (ack, rx) = oneshot::channel();
-        sender.try_submit(Submission {
-            statements: program.statements,
-            params: BTreeMap::new(),
-            graph,
-            user: String::new(),
-            ack,
-        });
+        sender
+            .try_submit(Submission {
+                statements: program.statements,
+                params: BTreeMap::new(),
+                graph,
+                user: String::new(),
+                ack,
+            })
+            .unwrap();
         rx
     }
 
