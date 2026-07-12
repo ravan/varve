@@ -1,7 +1,7 @@
 import type { ObservedSchema } from '$lib/logic/schema';
 import type { GraphInspection } from '$lib/logic/graph';
 import { classifyGql } from '$lib/logic/gql';
-import type { Basis, ExecutionMode } from '$lib/types';
+import type { Basis, ExecutionMode, QueryParameters } from '$lib/types';
 import {
   addFavorite as addFavoriteTransition,
   addFrame as addFrameTransition,
@@ -39,6 +39,7 @@ export function createWorkspaceStore(storage: StorageLike) {
   let queryModeOverride = $state<ExecutionMode | null>(null);
   let defaultReadBasis = $state<Basis | undefined>(undefined);
   let inspection = $state<GraphInspection | null>(null);
+  let queryParametersDraft = $state<QueryParameters | null>({});
 
   function snapshot(): WorkspaceState {
     return { frames, history, favorites, observedSchema, settings };
@@ -91,6 +92,9 @@ export function createWorkspaceStore(storage: StorageLike) {
     get inspection() {
       return inspection;
     },
+    get queryParametersDraft() {
+      return queryParametersDraft;
+    },
     setQueryDraft(gql: string): void {
       queryDraft = gql;
     },
@@ -112,6 +116,9 @@ export function createWorkspaceStore(storage: StorageLike) {
     },
     clearInspection(sourceId?: string): void {
       if (sourceId === undefined || inspection?.sourceId === sourceId) inspection = null;
+    },
+    setQueryParametersDraft(params: QueryParameters | null): void {
+      queryParametersDraft = params === null || hasSensitiveParameter(params) ? null : params;
     },
     addFrame(frame: ExecutionFrame): void {
       apply(addFrameTransition(snapshot(), frame));
@@ -150,6 +157,19 @@ export function createWorkspaceStore(storage: StorageLike) {
       apply(clearWorkspaceTransition(snapshot(), confirmed));
     },
   };
+}
+
+function hasSensitiveParameter(params: QueryParameters): boolean {
+  return Object.keys(params).some((key) => {
+    const normalized = key.toLowerCase().replaceAll('_', '').replaceAll('-', '');
+    return (
+      normalized.includes('token') ||
+      normalized.includes('session') ||
+      normalized.includes('authorization') ||
+      normalized.includes('credential') ||
+      normalized.includes('secret')
+    );
+  });
 }
 
 export type WorkspaceStore = ReturnType<typeof createWorkspaceStore>;

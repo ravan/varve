@@ -9,14 +9,17 @@
   import { Textarea } from '$lib/components/ui/textarea';
   import type { Favorite } from '$lib/logic/workspace';
   import type { WorkspaceStore } from '$lib/stores/workspace.svelte';
+  import type { QueryParameters } from '$lib/types';
   import Plus from '@lucide/svelte/icons/plus';
 
   let {
     workspace,
     onRun,
+    parametersDraft,
   }: {
     workspace: WorkspaceStore;
     onRun: (favorite: Favorite) => void;
+    parametersDraft: QueryParameters | null;
   } = $props();
 
   let dialogOpen = $state(false);
@@ -41,7 +44,7 @@
 
   function saveFavorite(): void {
     const name = favoriteName.trim();
-    if (name === '') return;
+    if (name === '' || parametersDraft === null) return;
     const now = Date.now();
     if (editingId === null) {
       workspace.addFavorite({
@@ -49,7 +52,7 @@
         name,
         gql: workspace.queryDraft,
         mode: workspace.queryMode,
-        params: {},
+        params: parametersDraft,
         ...(notes.trim() === '' ? {} : { notes: notes.trim() }),
         createdAt: now,
         updatedAt: now,
@@ -79,11 +82,17 @@
       <h1 id="favorites-heading" class="text-2xl font-semibold tracking-tight">Favorites</h1>
       <p class="text-muted-foreground mt-1 text-sm">Named queries and their parameters.</p>
     </div>
-    <Button disabled={workspace.queryDraft.trim() === ''} onclick={openCreate}>
+    <Button disabled={workspace.queryDraft.trim() === '' || parametersDraft === null} onclick={openCreate}>
       <Plus aria-hidden="true" />
       Add current query
     </Button>
   </div>
+
+  {#if parametersDraft === null}
+    <p class="text-destructive text-sm">
+      Add current query is unavailable while parameters are invalid or contain sensitive token/session fields.
+    </p>
+  {/if}
 
   {#if favorites.length === 0}
     <Card.Root>
@@ -146,7 +155,7 @@
     </div>
     <Dialog.Footer>
       <Button variant="outline" onclick={() => (dialogOpen = false)}>Cancel</Button>
-      <Button disabled={favoriteName.trim() === ''} onclick={saveFavorite}>Save favorite</Button>
+      <Button disabled={favoriteName.trim() === '' || parametersDraft === null} onclick={saveFavorite}>Save favorite</Button>
     </Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>
