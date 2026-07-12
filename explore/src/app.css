@@ -148,6 +148,13 @@
   min-width: 0;
 }
 
+.desktop-inspector {
+  max-height: 100vh;
+  overflow: hidden;
+  position: sticky;
+  top: 0;
+}
+
 .mobile-only {
   display: none;
 }
@@ -206,6 +213,90 @@
 
 .result-frame {
   min-width: 0;
+}
+
+.graph-result {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in oklab, var(--card) 92%, var(--muted));
+}
+
+.graph-toolbar {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-bottom: 1px solid var(--border);
+  padding: 0.65rem;
+}
+
+.graph-canvas {
+  width: 100%;
+  height: clamp(22rem, 54vh, 40rem);
+  background-image: radial-gradient(
+    color-mix(in oklab, var(--border) 70%, transparent) 1px,
+    transparent 1px
+  );
+  background-size: 18px 18px;
+}
+
+.inspector-scroll {
+  height: min(24rem, 50vh);
+}
+
+.inspector-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.panel-page {
+  display: grid;
+  width: 100%;
+  max-width: 64rem;
+  margin-inline: auto;
+  gap: 1.5rem;
+}
+
+.panel-columns {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.panel-scroll,
+.panel-page-scroll {
+  height: min(38rem, calc(100vh - 14rem));
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.saved-parameters {
+  min-width: 0;
+  max-height: 10rem;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in oklab, var(--muted) 55%, transparent);
+  padding: 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .result-gql,
@@ -303,6 +394,21 @@
   .mobile-only {
     display: inline-flex;
   }
+
+  .panel-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 479px) {
+  .setting-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .graph-canvas {
+    height: 26rem;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -315,5 +421,9 @@
   .query-editor *::after {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
+  }
+
+  .graph-canvas {
+    scroll-behavior: auto !important;
   }
 }

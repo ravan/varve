@@ -1,6 +1,24 @@
 import type { NamedPathShape, QueryPatternShape, QueryShape, RelationshipDirection } from './gql';
 import { isCanonicalBytesObject, type NormalizedCell } from './results';
 
+export interface GraphInspectionValue {
+  readonly column: string;
+  readonly value: NormalizedCell;
+}
+
+export interface GraphInspection {
+  readonly sourceId: string;
+  readonly kind: 'node' | 'relationship';
+  readonly id: string;
+  readonly labels: readonly string[];
+  readonly relationshipType?: string;
+  readonly source?: string;
+  readonly target?: string;
+  readonly inferred: true;
+  readonly relatedRowCount: number;
+  readonly relatedValues: readonly GraphInspectionValue[];
+}
+
 export interface GraphNode {
   readonly id: string;
   readonly labels: readonly string[];

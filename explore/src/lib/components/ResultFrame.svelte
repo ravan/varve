@@ -1,5 +1,6 @@
 <script lang="ts">
   import RawResult from '$lib/components/RawResult.svelte';
+  import GraphResult from '$lib/components/GraphResult.svelte';
   import ResultTable from '$lib/components/ResultTable.svelte';
   import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert';
   import { Badge } from '$lib/components/ui/badge';
@@ -10,6 +11,8 @@
   import { Skeleton } from '$lib/components/ui/skeleton';
   import * as Tabs from '$lib/components/ui/tabs';
   import type { NormalizedQueryResponse, NormalizedTxReceipt } from '$lib/logic/results';
+  import { extractGraph, type GraphExtraction } from '$lib/logic/graph';
+  import { extractQueryShape } from '$lib/logic/gql';
   import type { ExecutionFrame } from '$lib/logic/workspace';
   import type { WorkspaceStore } from '$lib/stores/workspace.svelte';
   import type { ExplorerErrorCode } from '$lib/types';
@@ -47,6 +50,7 @@
   );
   let sideEffectCount = $derived(sideEffects.reduce((total, [, count]) => total + count, 0));
   let rawValue = $derived(frame.rawResponse ?? queryResult?.raw ?? receipt?.raw ?? frame.response);
+  let graphExtraction = $derived(extractFrameGraph(frame.gql, queryResult));
 
   async function copyGql(): Promise<void> {
     try {
@@ -179,6 +183,29 @@
   function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
   }
+
+  function extractFrameGraph(gql: string, result: NormalizedQueryResponse | null): GraphExtraction {
+    if (result === null) {
+      return {
+        available: false,
+        reason: 'Graph topology is unavailable because this result has no normalized rows.',
+        nodes: [],
+        edges: [],
+        truncated: false,
+      };
+    }
+    try {
+      return extractGraph(extractQueryShape(gql), result.rows, 1_000);
+    } catch {
+      return {
+        available: false,
+        reason: 'Graph topology cannot be proven from the returned query values.',
+        nodes: [],
+        edges: [],
+        truncated: false,
+      };
+    }
+  }
 </script>
 
 <Card.Root class="result-frame overflow-hidden" data-state={frame.state}>
@@ -288,12 +315,13 @@
               <Tabs.Trigger value="raw">Raw</Tabs.Trigger>
             </Tabs.List>
             <Tabs.Content value="graph">
-              <Alert>
-                <AlertTitle>Graph unavailable</AlertTitle>
-                <AlertDescription>
-                  Interactive graph rendering is added in the next Explorer task. Table and Raw remain available.
-                </AlertDescription>
-              </Alert>
+              <GraphResult
+                extraction={graphExtraction}
+                rows={queryResult.rows}
+                sourceId={frame.id}
+                motion={workspace.settings.graphMotion}
+                {workspace}
+              />
             </Tabs.Content>
             <Tabs.Content value="table">
               {#if queryResult.rows.length > 0}

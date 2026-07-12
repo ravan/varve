@@ -1,4 +1,5 @@
 import type { ObservedSchema } from '$lib/logic/schema';
+import type { GraphInspection } from '$lib/logic/graph';
 import { classifyGql } from '$lib/logic/gql';
 import type { Basis, ExecutionMode } from '$lib/types';
 import {
@@ -37,6 +38,7 @@ export function createWorkspaceStore(storage: StorageLike) {
   let queryDraft = $state('');
   let queryModeOverride = $state<ExecutionMode | null>(null);
   let defaultReadBasis = $state<Basis | undefined>(undefined);
+  let inspection = $state<GraphInspection | null>(null);
 
   function snapshot(): WorkspaceState {
     return { frames, history, favorites, observedSchema, settings };
@@ -86,6 +88,9 @@ export function createWorkspaceStore(storage: StorageLike) {
     get defaultReadBasis() {
       return defaultReadBasis;
     },
+    get inspection() {
+      return inspection;
+    },
     setQueryDraft(gql: string): void {
       queryDraft = gql;
     },
@@ -101,6 +106,12 @@ export function createWorkspaceStore(storage: StorageLike) {
     },
     setDefaultReadBasis(basis: Basis): void {
       defaultReadBasis = basis;
+    },
+    inspectGraphElement(value: GraphInspection): void {
+      inspection = value;
+    },
+    clearInspection(sourceId?: string): void {
+      if (sourceId === undefined || inspection?.sourceId === sourceId) inspection = null;
     },
     addFrame(frame: ExecutionFrame): void {
       apply(addFrameTransition(snapshot(), frame));
