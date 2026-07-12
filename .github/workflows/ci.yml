@@ -33,6 +33,16 @@ jobs:
             target/tck-outcomes.tsv
           if-no-files-found: error
 
+  docs:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install mdbook --locked --version 0.5.4
+      - run: mdbook build docs/book
+
   gql-differential:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest

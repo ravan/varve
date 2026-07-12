@@ -41,3 +41,12 @@ compose-demo:
 # NOTE: libFuzzer treats -malloc_limit_mb=0 as "inherit -rss_limit_mb", so 0 does NOT disable the single-malloc hook. Raise it to 1 TiB so the request-size hook is effectively unbounded while -rss_limit_mb=4096 stays the real (touched-memory) gate.
 fuzz target="parse" secs="60":
     cargo +nightly fuzz run {{target}} -- -max_total_time={{secs}} -rss_limit_mb=4096 -malloc_limit_mb=1048576
+
+# Slice 11 task 11: build the mdBook docs site (fails if any SUMMARY.md entry
+# is missing a stub — create-missing = false in book.toml).
+docs:
+    mdbook build docs/book
+
+# Serve the docs site locally with live reload.
+docs-serve:
+    mdbook serve docs/book --open
