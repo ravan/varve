@@ -32,7 +32,7 @@ official GQL ANTLR grammar.
 - **`max_path_depth` caps unbounded quantifiers.** An unbounded quantifier (`*` or `{m,}`) on a
   path hop is lowered to this configured cap rather than truly unbounded traversal — default
   **10**, tunable via `[query] max_path_depth` (`crates/varve-engine/src/db.rs`).
-- **The full 61-keyword reserved-word list** (`crates/varve-gql/src/token.rs`) can never be used
+- **The full 59-keyword reserved-word list** (`crates/varve-gql/src/token.rs`) can never be used
   as a bare identifier (property/label/variable name) without becoming a keyword token: `INSERT,
   MATCH, WHERE, RETURN, AS, TRUE, FALSE, NULL, FOR, VALID_TIME, SYSTEM_TIME, OF, ALL, FROM, TO,
   BETWEEN, AND, VALID, DELETE, TIMESTAMP, DATE, DETACH, NOT, OR, XOR, IS, CASE, WHEN, THEN, ELSE,
@@ -52,7 +52,7 @@ Varve runs an adapted subset of the openCypher Technology Compatibility Kit
 `crates/varve-testkit/src/tck/`) as a CI gate. Scenarios are drawn from the vendored TCK feature
 corpus, translated from Cypher into Varve GQL, and run against a real in-memory `Db`; every
 excluded scenario carries a **reasoned** entry in
-`resources/tck/exclusions.toml` (14,000+ lines — one section per excluded scenario, each with a
+`resources/tck/exclusions.toml` (13,546 lines — one section per excluded scenario, each with a
 `reason` explaining *why*, e.g. "TCK uses multi-CREATE Cypher clauses in one query; the v1
 adapter does not rewrite that form into Varve multi-statement INSERT safely"), and the
 `exclusions_do_not_hide_current_failures` test independently asserts no exclusion reason is

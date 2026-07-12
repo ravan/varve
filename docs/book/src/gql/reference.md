@@ -219,7 +219,10 @@ program:
 ```gql
 CREATE GRAPH g; USE g; MATCH (n) RETURN n; DROP GRAPH g;
 ```
-*(parser test, `parse_program`)*
+*(parser test, `parse_program` — this parses as shown, but catalog and data statements cannot
+share one transaction at execute time (see [Deviations](deviations.md)), so in practice this
+must be run as three separate transactions: `CREATE GRAPH g;`, then `USE g; MATCH (n) RETURN
+n;`, then `DROP GRAPH g;`)*
 
 ## Parameters
 
