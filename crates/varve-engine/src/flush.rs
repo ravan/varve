@@ -265,14 +265,15 @@ pub(crate) async fn flush_block(state: &mut WriterState) -> Result<(), EngineErr
             tables,
         };
 
-        // KNOWN LIMITATION (Slice-10 final-review finding 2): this manifest
-        // PUT is not itself epoch-fenced (only the log is) — a fenced-but-alive
-        // writer's in-flight `flush_block` could still land this PUT before the
-        // Task-8 post-check lease gate fires. The lease ack-gate makes such a
-        // writer fatal and never-acking, which contains the v1 blast radius,
-        // but robust manifest fencing (e.g. selecting latest by (watermark,
-        // block_id)) is a documented v1 limitation — see STATUS.md Slice-10
-        // known limitations.
+        // This manifest PUT is not itself epoch-fenced (only the log is) — a
+        // fenced-but-alive writer's in-flight `flush_block` could still land
+        // this PUT before the Task-8 post-check lease gate fires. The before
+        // +after lease ack-gate remains the liveness guard: it makes such a
+        // writer fatal and never-acking. Should the stray PUT still land,
+        // `latest_manifest` (slice 11) selects the newest manifest by
+        // `(watermark, block_id)` rather than max `block_id` alone, so a
+        // stray manifest with a newer block id but a stale watermark can
+        // never be selected during recovery/verify/follower reads.
         state
             .store
             .put(
