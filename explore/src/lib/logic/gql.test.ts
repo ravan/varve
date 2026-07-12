@@ -112,6 +112,9 @@ describe('extractQueryShape', () => {
     'MATCH (a:Person RETURN a',
     'MATCH shortestPath((a)-[:KNOWS]->(b)) RETURN a',
     "MATCH (a:Person {name: 'Ada}) RETURN a",
+    'MATCH (a)-foo-(b) RETURN a',
+    'MATCH (a unexpected)-[:KNOWS]->(b) RETURN a',
+    'MATCH (a:Person unexpected)-[:KNOWS]->(b) RETURN a',
   ])('returns an empty ambiguous shape for unsupported input %s', (gql) => {
     expect(extractQueryShape(gql)).toEqual({
       ambiguous: true,

@@ -244,8 +244,13 @@ export function classifyGql(gql: string): ExecutionMode {
     : 'read';
 }
 
-function matchingClose(tokens: Token[], start: number, open: '(' | '[', close: ')' | ']'): number {
-  const depthKey = open === '(' ? 'parenDepth' : 'bracketDepth';
+function matchingClose(
+  tokens: Token[],
+  start: number,
+  open: '(' | '[' | '{',
+  close: ')' | ']' | '}',
+): number {
+  const depthKey = open === '(' ? 'parenDepth' : open === '[' ? 'bracketDepth' : 'braceDepth';
   const expectedDepth = tokens[start][depthKey] + 1;
 
   for (let index = start + 1; index < tokens.length; index += 1) {
@@ -264,28 +269,30 @@ function parseNode(tokens: Token[], start: number): { node: QueryNodeShape; end:
   const open = tokens[start];
   const node: QueryNodeShape = { labels: [] };
   let index = start + 1;
+  const isAtNodeLevel = (token: Token | undefined) =>
+    token !== undefined &&
+    token.parenDepth === open.parenDepth + 1 &&
+    token.bracketDepth === open.bracketDepth &&
+    token.braceDepth === open.braceDepth;
 
-  if (isIdentifier(tokens[index]) && tokens[index].braceDepth === open.braceDepth) {
+  if (isIdentifier(tokens[index]) && isAtNodeLevel(tokens[index])) {
     node.variable = tokens[index].text;
-  }
-
-  while (index < end) {
-    const token = tokens[index];
-    if (
-      token.text === ':' &&
-      token.parenDepth === open.parenDepth + 1 &&
-      token.bracketDepth === open.bracketDepth &&
-      token.braceDepth === open.braceDepth
-    ) {
-      if (!isIdentifier(tokens[index + 1])) return null;
-      node.labels.push(tokens[index + 1].text);
-      index += 2;
-      continue;
-    }
     index += 1;
   }
 
-  return { node, end };
+  while (tokens[index]?.text === ':' && isAtNodeLevel(tokens[index])) {
+    if (!isIdentifier(tokens[index + 1]) || !isAtNodeLevel(tokens[index + 1])) return null;
+    node.labels.push(tokens[index + 1].text);
+    index += 2;
+  }
+
+  if (tokens[index]?.text === '{' && isAtNodeLevel(tokens[index])) {
+    const propertyEnd = matchingClose(tokens, index, '{', '}');
+    if (propertyEnd === -1 || propertyEnd >= end) return null;
+    index = propertyEnd + 1;
+  }
+
+  return index === end ? { node, end } : null;
 }
 
 function parseRelationship(
@@ -326,17 +333,33 @@ function parseRelationship(
     }
   }
 
-  const connector = tokens.slice(start, end);
-  if (!connector.some((token) => token.text === '-')) return null;
+  const prefix = tokens
+    .slice(start, bracketStart === -1 ? end : bracketStart)
+    .map((token) => token.text)
+    .join('');
+  const suffix =
+    bracketStart === -1
+      ? ''
+      : tokens
+          .slice(bracketEnd + 1, end)
+          .map((token) => token.text)
+          .join('');
 
-  const incoming = connector.some((token) => token.text === '<');
-  const outgoing = connector.some((token) => token.text === '>');
-  if (incoming && outgoing) return null;
+  let direction: RelationshipDirection;
+  if ((bracketStart === -1 && prefix === '<--') || (prefix === '<-' && suffix === '-')) {
+    direction = 'incoming';
+  } else if ((bracketStart === -1 && prefix === '-->') || (prefix === '-' && suffix === '->')) {
+    direction = 'outgoing';
+  } else if ((bracketStart === -1 && prefix === '--') || (prefix === '-' && suffix === '-')) {
+    direction = 'undirected';
+  } else {
+    return null;
+  }
 
   return {
     variable,
     types,
-    direction: incoming ? 'incoming' : outgoing ? 'outgoing' : 'undirected',
+    direction,
   };
 }
 

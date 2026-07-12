@@ -3,7 +3,22 @@ import type { Basis, JsonScalar, QueryParameters } from '../types';
 export type ValidationResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const MAX_PACKED_POSITION = 18_446_744_073_709_551_615n;
+
+function isCanonicalBase64(value: string): boolean {
+  if (!BASE64_PATTERN.test(value)) return false;
+
+  if (value.endsWith('==')) {
+    return (BASE64_ALPHABET.indexOf(value[value.length - 3]) & 0b1111) === 0;
+  }
+
+  if (value.endsWith('=')) {
+    return (BASE64_ALPHABET.indexOf(value[value.length - 2]) & 0b11) === 0;
+  }
+
+  return true;
+}
 
 function isBytes(value: object): value is { $bytes: string } {
   const record = value as Record<string, unknown>;
@@ -13,7 +28,7 @@ function isBytes(value: object): value is { $bytes: string } {
     keys.length === 1 &&
     keys[0] === '$bytes' &&
     typeof record.$bytes === 'string' &&
-    BASE64_PATTERN.test(record.$bytes)
+    isCanonicalBase64(record.$bytes)
   );
 }
 
