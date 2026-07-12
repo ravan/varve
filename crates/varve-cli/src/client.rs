@@ -30,6 +30,8 @@ pub enum CliError {
     InvalidInput(String),
     #[error("server issued a second writer redirect; refusing to follow it")]
     RedirectLoop,
+    #[error("server is applying backpressure (429): retry")]
+    Backpressure,
 }
 
 impl From<ServerError> for CliError {

@@ -1,3 +1,4 @@
+use crate::coord::fence::load_fences;
 use crate::replay::decode_log_record;
 use crate::EngineError;
 use varve_index::{decode_events, decode_meta, IndexError};
@@ -96,10 +97,19 @@ pub(crate) async fn verify_database(
         }
     }
 
+    // Epoch fences (spec §12), loaded once: verify is a one-shot batch walk,
+    // unlike the follower's continuous poll, so a single snapshot of the
+    // fence set is enough to walk every epoch boundary in this pass.
+    let fences = load_fences(store).await?;
+
     loop {
         let to = cursor.advance(1024)?;
         let records = log.read_range(cursor, to).await?;
         if records.is_empty() {
+            if let Some(next) = fences.jump(cursor)? {
+                cursor = next;
+                continue;
+            }
             break;
         }
         for (position, record) in records {
@@ -108,6 +118,13 @@ pub(crate) async fn verify_database(
                     expected: cursor,
                     actual: position,
                 });
+            }
+            if !fences.is_live(position) {
+                // Dead record: a fence reassigned this tx id, so it is
+                // checked-but-skipped — walked past without decoding or
+                // counting it as verified.
+                cursor = cursor.next()?;
+                continue;
             }
             decode_log_record(&record)?;
             report.log_records_checked += 1;

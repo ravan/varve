@@ -375,6 +375,18 @@ impl Log for LocalLog {
         .await
         .map_err(|e| LogError::Io(std::io::Error::other(e)))?
     }
+
+    async fn head(&self) -> Result<LogPosition, LogError> {
+        let inner = self.inner.lock().map_err(|_| LogError::Poisoned)?;
+        if inner.poisoned {
+            return Err(LogError::Poisoned);
+        }
+        Ok(inner.next)
+    }
+
+    async fn start_epoch(&self, _epoch: u16) -> Result<(), LogError> {
+        Err(LogError::EpochUnsupported("local"))
+    }
 }
 
 /// Test-only crash hook for the `varve-testkit` `kill -9` harness. Inert
@@ -500,6 +512,18 @@ mod tests {
             log.read_range(LogPosition::ZERO, LogPosition::ZERO.advance(2).unwrap())
                 .await,
             Err(LogError::Corrupt { .. })
+        ));
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn local_log_reports_head_and_refuses_epochs() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = LocalLog::open(dir.path(), DEFAULT_SEGMENT_MAX_BYTES).unwrap();
+        assert_eq!(log.head().await.unwrap(), LogPosition::ZERO);
+        assert!(matches!(
+            log.start_epoch(1).await,
+            Err(LogError::EpochUnsupported("local"))
         ));
     }
 }

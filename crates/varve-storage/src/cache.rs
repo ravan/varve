@@ -118,17 +118,42 @@ impl CacheTier for MemoryCache {
     }
 }
 
+/// Engine-metrics (Task 12, spec §12) hit/miss counters for one cache tier.
+/// Plain atomics: reading them is I/O-free and lock-free, matching the
+/// engine's I/O-free scrape rule (decision 10).
+#[derive(Debug, Default)]
+pub struct CacheStats {
+    pub hits: std::sync::atomic::AtomicU64,
+    pub misses: std::sync::atomic::AtomicU64,
+}
+
 /// Read-through cache wrapper: `get`/`get_range` fill the cache, `put`
 /// invalidates its path, `list` always hits the backend (a fresh manifest
 /// must be visible immediately).
 pub struct CachedStore {
     inner: Arc<dyn ObjectStore>,
     cache: Arc<dyn CacheTier>,
+    stats: Arc<CacheStats>,
 }
 
 impl CachedStore {
     pub fn new(inner: Arc<dyn ObjectStore>, cache: Arc<dyn CacheTier>) -> CachedStore {
-        CachedStore { inner, cache }
+        CachedStore::with_stats(inner, cache, Arc::new(CacheStats::default()))
+    }
+
+    /// Instrumented constructor: `stats` is shared with the caller so it can
+    /// be read (I/O-free) for engine metrics without touching `CachedStore`
+    /// itself.
+    pub fn with_stats(
+        inner: Arc<dyn ObjectStore>,
+        cache: Arc<dyn CacheTier>,
+        stats: Arc<CacheStats>,
+    ) -> CachedStore {
+        CachedStore {
+            inner,
+            cache,
+            stats,
+        }
     }
 }
 
@@ -145,8 +170,14 @@ impl ObjectStore for CachedStore {
             range: None,
         };
         if let Some(hit) = self.cache.get(&cache_key) {
+            self.stats
+                .hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(hit);
         }
+        self.stats
+            .misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let value = self.inner.get(key).await?;
         self.cache.insert(cache_key, value.clone());
         Ok(value)
@@ -158,8 +189,14 @@ impl ObjectStore for CachedStore {
             range: Some((range.start, range.end)),
         };
         if let Some(hit) = self.cache.get(&cache_key) {
+            self.stats
+                .hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(hit);
         }
+        self.stats
+            .misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let value = self.inner.get_range(key, range).await?;
         self.cache.insert(cache_key, value.clone());
         Ok(value)
@@ -386,6 +423,22 @@ mod tests {
         // 2 + 4 = 6 <= 8: both fit only if the old 4-byte "a" was released.
         assert!(cache.get(&key("a")).is_some());
         assert!(cache.get(&key("b")).is_some());
+    }
+
+    #[tokio::test]
+    async fn with_stats_counts_hits_and_misses() {
+        let counting = CountingStore::new();
+        let stats = Arc::new(CacheStats::default());
+        let store = CachedStore::with_stats(
+            Arc::clone(&counting) as Arc<dyn ObjectStore>,
+            Arc::new(MemoryCache::new(1024)),
+            Arc::clone(&stats),
+        );
+        store.put("k", Bytes::from_static(b"value")).await.unwrap();
+        assert_eq!(store.get("k").await.unwrap(), Bytes::from_static(b"value"));
+        assert_eq!(store.get("k").await.unwrap(), Bytes::from_static(b"value"));
+        assert_eq!(stats.misses.load(Ordering::SeqCst), 1);
+        assert_eq!(stats.hits.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

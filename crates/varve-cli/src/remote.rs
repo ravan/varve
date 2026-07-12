@@ -89,10 +89,14 @@ impl RemoteClient {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
-    /// Turns a non-2xx, non-421 response into a `CliError`: a structured
-    /// `ErrorResponse` becomes `CliError::Api`, anything else becomes
-    /// `CliError::Status`. Never surfaces response headers.
+    /// Turns a non-2xx, non-421 response into a `CliError`: a 429 (writer
+    /// backpressure, slice 10) becomes `CliError::Backpressure`, a
+    /// structured `ErrorResponse` becomes `CliError::Api`, anything else
+    /// becomes `CliError::Status`. Never surfaces response headers.
     async fn error_for(&self, response: Response) -> CliError {
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            return CliError::Backpressure;
+        }
         let status = response.status().as_u16();
         match self.read_bounded(response).await {
             Ok(bytes) => match serde_json::from_slice::<ErrorResponse>(&bytes) {
@@ -236,5 +240,41 @@ mod tests {
     fn nonzero_max_response_bytes_is_applied() {
         let client = client().with_max_response_bytes(64);
         assert_eq!(client.max_response_bytes, 64);
+    }
+
+    /// Slice 10: a bare 429 (no JSON body needed -- the server's own
+    /// `/v1/tx` 429 always carries `Retry-After`, but `error_for` must map
+    /// on status alone) becomes `CliError::Backpressure`, with the exact
+    /// Display message the brief specifies.
+    #[tokio::test]
+    async fn a_429_response_maps_to_backpressure() {
+        let router = axum::Router::new().route(
+            "/always-429",
+            axum::routing::get(|| async { StatusCode::TOO_MANY_REQUESTS }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("listener must bind: {error}"));
+        let addr = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("addr must resolve: {error}"));
+        tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .unwrap_or_else(|error| panic!("server must serve: {error}"));
+        });
+
+        let response = reqwest::get(format!("http://{addr}/always-429"))
+            .await
+            .unwrap_or_else(|error| panic!("request must succeed: {error}"));
+        let error = client().error_for(response).await;
+        assert!(
+            matches!(error, CliError::Backpressure),
+            "expected Backpressure, got {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "server is applying backpressure (429): retry"
+        );
     }
 }

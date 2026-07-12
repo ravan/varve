@@ -1,4 +1,4 @@
-use varve_types::{Doc, Iid, Instant};
+use varve_types::{Doc, Iid, Instant, Value};
 
 /// The operation carried by an event (spec §5.2). Node labels ride in the Put
 /// alongside the document (spec §5.1 label set).
@@ -27,4 +27,32 @@ pub struct Event {
     pub src: Option<Iid>,
     pub dst: Option<Iid>,
     pub op: Op,
+}
+
+fn doc_approx_bytes(doc: &Doc) -> usize {
+    doc.iter()
+        .map(|(key, value)| {
+            key.len()
+                + match value {
+                    Value::Str(s) => s.len(),
+                    Value::Bytes(b) => b.len(),
+                    Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) => 8,
+                }
+        })
+        .sum()
+}
+
+impl Event {
+    /// Rough in-memory footprint: fixed overhead + label and doc byte
+    /// lengths. Used only for the flush watermark — never for correctness
+    /// (block encoding, query results, and replay all ignore this value).
+    pub fn approx_bytes(&self) -> usize {
+        let payload = match &self.op {
+            Op::Put { labels, doc } => {
+                labels.iter().map(String::len).sum::<usize>() + doc_approx_bytes(doc)
+            }
+            Op::Delete | Op::Erase => 0,
+        };
+        64 + payload
+    }
 }

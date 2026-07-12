@@ -22,6 +22,10 @@ pub enum LogError {
     #[cfg(feature = "object-store")]
     #[error("log storage backend error: {0}")]
     Storage(#[from] varve_storage::StorageError),
+    #[error("log backend '{0}' does not support epochs; cas-failover requires the shared object-store log")]
+    EpochUnsupported(&'static str),
+    #[error("cannot start epoch {requested}: log head is already at epoch {head}")]
+    EpochRegression { requested: u16, head: u16 },
 }
 
 /// Ordered, durable stream of transaction records (spec §6). One `LogRecord`
@@ -52,4 +56,25 @@ pub trait Log: Send + Sync {
     /// writer once a block manifest commits (spec §9: the manifest trims
     /// the log-replay watermark).
     async fn trim(&self, up_to: LogPosition) -> Result<(), LogError>;
+    /// Position the NEXT appended record will receive (== the exclusive end
+    /// of the durable prefix). For the object-store log the first call scans
+    /// the store and primes the internal cursor; later calls return the
+    /// cached value.
+    async fn head(&self) -> Result<LogPosition, LogError>;
+    /// Repositions the next append at `(epoch, 0)`. `epoch` must be at or
+    /// above the current head's epoch; moving INTO an epoch that already
+    /// holds records is `EpochRegression`. Idempotent when the head is
+    /// already `(epoch, 0)`.
+    async fn start_epoch(&self, epoch: u16) -> Result<(), LogError>;
+}
+
+/// `EpochRegression` unless `(epoch, 0)` is at or beyond `head`.
+pub(crate) fn validate_epoch_start(epoch: u16, head: LogPosition) -> Result<(), LogError> {
+    if epoch < head.epoch() || (epoch == head.epoch() && head.offset() > 0) {
+        return Err(LogError::EpochRegression {
+            requested: epoch,
+            head: head.epoch(),
+        });
+    }
+    Ok(())
 }

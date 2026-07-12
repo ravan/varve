@@ -61,21 +61,31 @@ async fn two_query_processes_scale_out_reads_while_the_writer_ingests() {
         let basis = Arc::clone(&basis);
         let done = Arc::clone(&done);
         tokio::spawn(async move {
-            let mut counts: Vec<usize> = Vec::new();
-            let mut successes = 0usize;
-            loop {
-                let published = basis.load(Ordering::SeqCst);
-                let attach = (published > 0).then_some(published);
-                if let Ok(count) = cluster.query_row_count(&query_url, TRAVERSAL, attach).await {
-                    counts.push(count);
-                    successes += 1;
+            tokio::time::timeout(Duration::from_secs(120), async move {
+                let mut counts: Vec<usize> = Vec::new();
+                let mut successes = 0usize;
+                loop {
+                    let published = basis.load(Ordering::SeqCst);
+                    let attach = (published > 0).then_some(published);
+                    if let Ok(count) = cluster.query_row_count(&query_url, TRAVERSAL, attach).await
+                    {
+                        counts.push(count);
+                        successes += 1;
+                    }
+                    if done.load(Ordering::SeqCst) && successes >= 20 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
                 }
-                if done.load(Ordering::SeqCst) && successes >= 20 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-            (successes, counts)
+                (successes, counts)
+            })
+            .await
+            .expect(
+                "reader loop did not finish within 120s: a persistent read-path error \
+                 (e.g. query_row_count failing on every attempt) would otherwise retry \
+                 forever without ever reaching `successes >= 20`, hanging this test \
+                 indefinitely instead of failing loudly (slice-9 deferred fix)",
+            )
         })
     };
 

@@ -351,6 +351,10 @@ async fn status_metrics_admin_and_response_headers_follow_contracts() {
         text.contains("method=\"GET\",route=\"/healthz\",status=\"200\""),
         "{text}"
     );
+    // Task 12 (spec §12): the engine-metrics gauges (log lag, cache hit
+    // ratios) must be present on the same /metrics scrape.
+    assert!(text.contains("varve_log_lag_records"), "{text}");
+    assert!(text.contains("varve_cache_hits_total"), "{text}");
     for path in ["/v1/status", "/metrics"] {
         let response = call(app.clone(), Method::GET, path, None, true).await;
         assert_eq!(response.status(), StatusCode::OK, "{path}");

@@ -260,6 +260,13 @@ mod tests {
         ) -> Result<CondPut, StorageError> {
             self.put_if_absent(key, bytes).await
         }
+        async fn get_versioned(&self, key: &str) -> Result<Option<(Bytes, String)>, StorageError> {
+            match self.inner.get(key).await {
+                Ok(bytes) => Ok(Some((bytes, "blind".to_string()))),
+                Err(StorageError::NotFound(_)) => Ok(None),
+                Err(e) => Err(e),
+            }
+        }
     }
 
     #[tokio::test]
@@ -335,6 +342,13 @@ mod tests {
             Ok(CondPut::Stored {
                 etag: Some(self.next_etag()),
             })
+        }
+        async fn get_versioned(&self, key: &str) -> Result<Option<(Bytes, String)>, StorageError> {
+            match self.inner.get(key).await {
+                Ok(bytes) => Ok(Some((bytes, "stale".to_string()))),
+                Err(StorageError::NotFound(_)) => Ok(None),
+                Err(e) => Err(e),
+            }
         }
     }
 

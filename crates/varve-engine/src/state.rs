@@ -98,6 +98,12 @@ impl TableState {
     pub fn live_rows(&self) -> usize {
         self.nodes.live.event_count() + self.edges.live.event_count()
     }
+
+    /// Total unflushed approximate bytes across both tables — the writer's
+    /// memory-watermark flush trigger (Task 11). Never used for correctness.
+    pub fn live_bytes(&self) -> usize {
+        self.nodes.live.approx_bytes() + self.edges.live.approx_bytes()
+    }
 }
 
 pub(crate) struct GraphsState {
@@ -134,5 +140,11 @@ impl GraphsState {
 
     pub fn live_rows(&self) -> usize {
         self.graphs.values().map(TableState::live_rows).sum()
+    }
+
+    /// Total unflushed approximate bytes across every graph — the writer's
+    /// memory-watermark flush trigger (Task 11).
+    pub fn live_bytes(&self) -> usize {
+        self.graphs.values().map(TableState::live_bytes).sum()
     }
 }

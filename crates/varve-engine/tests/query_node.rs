@@ -190,6 +190,14 @@ impl Log for CorruptAfterRecoveryLog {
     async fn trim(&self, _up_to: LogPosition) -> Result<(), LogError> {
         unreachable!("query-only test node never trims")
     }
+
+    async fn head(&self) -> Result<LogPosition, LogError> {
+        unreachable!("test double")
+    }
+
+    async fn start_epoch(&self, _epoch: u16) -> Result<(), LogError> {
+        unreachable!("test double")
+    }
 }
 
 struct CorruptAfterRecoveryFactory;

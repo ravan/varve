@@ -10,7 +10,7 @@ pub mod probe;
 pub mod s3;
 pub mod store;
 
-pub use cache::{CacheKey, CacheTier, CachedStore, MemoryCache, MemoryCacheFactory};
+pub use cache::{CacheKey, CacheStats, CacheTier, CachedStore, MemoryCache, MemoryCacheFactory};
 pub use catalog::{ScopedTrieEntry, TrieCatalog};
 pub use disk::{DiskCache, DiskCacheFactory};
 pub use keys::{

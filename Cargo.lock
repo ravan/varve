@@ -3986,6 +3986,7 @@ dependencies = [
  "varve-config",
  "varve-engine",
  "varve-index",
+ "varve-log",
  "varve-storage",
  "varve-testkit",
  "varve-types",
@@ -4038,6 +4039,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "varve-config",
  "varve-gql",
  "varve-index",
@@ -4045,6 +4048,7 @@ dependencies = [
  "varve-plan",
  "varve-storage",
  "varve-types",
+ "xxhash-rust",
 ]
 
 [[package]]

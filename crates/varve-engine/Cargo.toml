@@ -19,15 +19,24 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
+xxhash-rust = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
-async-trait = { workspace = true }
 tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [features]
+default = ["cas-failover"]
 # Test-only crash hooks for the varve-testkit kill -9 harness (mirrors
 # varve-log's). Inert unless VARVE_CRASH_TRIGGER points at an armed file.
 fault-injection = []
+# The cas-failover coordinator (spec §12, D5/D7): CAS-lease-based writer
+# failover with epoch fencing. Opt-in per backend (capability-probed at
+# startup); default on since every builtin backend either supports it or
+# refuses cleanly naming the missing capability.
+cas-failover = []
 
 [lints]
 workspace = true

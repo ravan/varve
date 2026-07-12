@@ -148,7 +148,14 @@ impl DiskCache {
                 .and_then(|b| decode_entry(&b).map(|(key, _)| (key, b.len() as u64)))
             {
                 Some((key, len)) => {
-                    let meta = fs::metadata(&path)?;
+                    // TOCTOU: the file may vanish (e.g. a concurrent evictor)
+                    // between the successful read above and this metadata
+                    // call. Skip just this entry rather than aborting the
+                    // whole open — best-effort sweep, matching the malformed
+                    // and foreign-file arms above.
+                    let Ok(meta) = fs::metadata(&path) else {
+                        continue;
+                    };
                     let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
                     found.push((mtime, key, path, len));
                 }
@@ -523,5 +530,52 @@ mod tests {
             "the broken file was removed"
         );
         assert_eq!(cache.get(&key("v1/a", None)), None, "stays a clean miss");
+    }
+
+    /// Regression coverage for the `open()` scan-loop TOCTOU fix: a single
+    /// per-file failure encountered while walking `dir` must not abort the
+    /// whole `open()` call — every other valid entry must still load.
+    ///
+    /// The fix changed `let meta = fs::metadata(&path)?;` (which would
+    /// propagate the error and abort `open()` entirely) to
+    /// `let Ok(meta) = fs::metadata(&path) else { continue };` (skip just
+    /// that file). This test exercises the sibling arm in the very same
+    /// `match` — `decode_entry` returning `None` — rather than the
+    /// `fs::metadata` arm itself: on POSIX, `stat` cannot fail on a path for
+    /// which `read` on the *same, unmutated* path just succeeded (`stat`'s
+    /// precondition — directory search permission — is already implied by a
+    /// successful `open`+`read`, which additionally requires file read
+    /// permission). The only way to make `fs::metadata` fail right after a
+    /// successful `fs::read` on the same path is to delete the file in the
+    /// nanosecond gap between the two calls — a genuine, non-deterministic
+    /// race, not something a static directory fixture can force. See the
+    /// fix-pass report for the RED/GREEN evidence covering both this arm and
+    /// (by inspection) the `fs::metadata` arm.
+    #[test]
+    fn open_skips_a_malformed_entry_and_still_loads_the_valid_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::open(dir.path(), 4096).unwrap();
+        cache.insert(key("v1/a", None), Bytes::from_static(b"good-a"));
+        cache.insert(key("v1/b", None), Bytes::from_static(b"good-b"));
+        // Well-formed extension (so it isn't swept as foreign/tmp) but a
+        // body too short to decode: trips `decode_entry` -> `None`, the
+        // "skip this one, keep scanning" arm alongside the metadata guard.
+        std::fs::write(
+            dir.path().join("0000000000000000000000000000dead.vcache"),
+            b"short",
+        )
+        .unwrap();
+
+        let reopened = DiskCache::open(dir.path(), 4096).unwrap();
+        assert_eq!(
+            reopened.get(&key("v1/a", None)),
+            Some(Bytes::from_static(b"good-a")),
+            "a valid entry must still load despite the malformed sibling"
+        );
+        assert_eq!(
+            reopened.get(&key("v1/b", None)),
+            Some(Bytes::from_static(b"good-b")),
+            "a valid entry must still load despite the malformed sibling"
+        );
     }
 }

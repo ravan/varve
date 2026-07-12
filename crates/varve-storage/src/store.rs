@@ -14,6 +14,8 @@ pub enum StorageError {
     Decode(#[from] prost::DecodeError),
     #[error("invalid storage key: {0}")]
     InvalidKey(String),
+    #[error("object {0} has no ETag; conditional workflows are inexpressible")]
+    NoEtag(String),
 }
 
 /// Maps a backend error, preserving the key when it was not found.
@@ -58,6 +60,12 @@ pub trait ConditionalStore: Send + Sync {
         bytes: Bytes,
         etag: &str,
     ) -> Result<CondPut, StorageError>;
+    /// Reads the object together with its version tag (ETag); `None` if
+    /// absent. A backend that stores the object but returns no ETag yields
+    /// `NoEtag` (such a backend cannot pass the probe anyway, so this is only
+    /// reachable via a hand-rolled `ConditionalStore`, never the blanket
+    /// `object_store` impl once the probe has verified `Supported`).
+    async fn get_versioned(&self, key: &str) -> Result<Option<(Bytes, String)>, StorageError>;
 }
 
 /// Varve's object-store interface (spec §4, §9). Sovereignty (spec §1, D7):
@@ -200,5 +208,56 @@ impl<T: object_store::ObjectStore> ConditionalStore for T {
             )
             .await,
         )
+    }
+
+    async fn get_versioned(&self, key: &str) -> Result<Option<(Bytes, String)>, StorageError> {
+        let path = object_store::path::Path::from(key);
+        let result = match object_store::ObjectStoreExt::get(self, &path).await {
+            Ok(result) => result,
+            Err(object_store::Error::NotFound { .. }) => return Ok(None),
+            Err(e) => return Err(convert(key, e)),
+        };
+        let etag = result.meta.e_tag.clone();
+        let bytes = result.bytes().await.map_err(|e| convert(key, e))?;
+        match etag {
+            Some(etag) => Ok(Some((bytes, etag))),
+            None => Err(StorageError::NoEtag(key.to_string())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory_store;
+
+    #[tokio::test]
+    async fn get_versioned_rotates_etags_and_is_none_when_absent() {
+        let store = memory_store();
+        let cond = store.conditional().unwrap();
+        assert_eq!(cond.get_versioned("v1/x").await.unwrap(), None);
+
+        let CondPut::Stored { etag: Some(etag1) } = cond
+            .put_if_absent("v1/x", Bytes::from_static(b"one"))
+            .await
+            .unwrap()
+        else {
+            panic!("expected Stored with an etag");
+        };
+        let (bytes1, observed1) = cond.get_versioned("v1/x").await.unwrap().unwrap();
+        assert_eq!(bytes1, Bytes::from_static(b"one"));
+        assert_eq!(observed1, etag1);
+
+        let CondPut::Stored { etag: Some(etag2) } = cond
+            .put_if_matches("v1/x", Bytes::from_static(b"two"), &etag1)
+            .await
+            .unwrap()
+        else {
+            panic!("expected Stored with an etag");
+        };
+        assert_ne!(etag1, etag2, "an update must rotate the etag");
+        let (bytes2, observed2) = cond.get_versioned("v1/x").await.unwrap().unwrap();
+        assert_eq!(bytes2, Bytes::from_static(b"two"));
+        assert_eq!(observed2, etag2);
     }
 }

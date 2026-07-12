@@ -10,10 +10,12 @@ use crate::compact::{
     CompactionReport,
 };
 use crate::const_eval::const_value;
+use crate::coord::LeaseState;
 use crate::db::{
     bounds_per_clause, scan_inputs_for, validate_user_graph_name, EngineError, Overlay,
     SideEffects, TxReceipt,
 };
+use crate::metrics::EngineMetrics;
 use crate::node::ProgressState;
 use crate::scan::{incident_edges, AdjDirection};
 use crate::state::{
@@ -29,6 +31,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
+use tracing::Instrument;
 use varve_gql::ast::{
     Clause, Direction, Expr, GraphStmt, InsertStmt, LabelSpec, MatchPart, MutKind, MutateStmt,
     NodePattern, QueryBody, RemoveItem, RemoveStmt, ReturnClause, SetItem, SetStmt, SortItem,
@@ -38,10 +41,6 @@ use varve_index::{decode_events, encode_events, visible_events, Event, Op};
 use varve_log::{Log, LogRecord, TableEffects};
 use varve_storage::{keys, manifest_history, TrieCatalog, TrieEntry};
 use varve_types::{Doc, Iid, Instant, LogPosition, TemporalBounds, TemporalDimension, Value};
-
-/// Bounded submission queue (roadmap slice 3). Config-driven backpressure
-/// semantics arrive in slice 10.
-pub(crate) const SUBMISSION_QUEUE_LEN: usize = 256;
 
 pub(crate) struct Submission {
     pub statements: Vec<Statement>,
@@ -78,24 +77,44 @@ impl WriterHandle {
         rx.await.map_err(|_| EngineError::WriterUnavailable)?
     }
 
-    #[cfg(test)]
-    pub(crate) fn try_submit(&self, submission: Submission) {
-        self.sender.try_send(Command::Submit(submission)).unwrap();
+    /// Non-blocking submit (slice 10): the server's 429 path. A full queue
+    /// rejects immediately with `Backpressure` instead of waiting for room;
+    /// a closed channel (writer task gone) reports `WriterUnavailable`, same
+    /// as [`Self::submit`].
+    pub fn try_submit(&self, submission: Submission) -> Result<(), EngineError> {
+        self.sender
+            .try_send(Command::Submit(submission))
+            .map_err(|err| match err {
+                mpsc::error::TrySendError::Full(_) => EngineError::Backpressure,
+                mpsc::error::TrySendError::Closed(_) => EngineError::WriterUnavailable,
+            })
     }
 }
 
 /// Group-commit tuning (spec §6): a batch flushes when its window elapses OR
 /// its encoded size reaches `max_bytes`, whichever comes first. Block-flush
 /// tuning (spec §9, slice-4 plan): the live table flushes to a block once it
-/// reaches `max_block_rows`, or once `flush_interval` elapses since the
-/// first unflushed row landed — whichever comes first. `Duration::ZERO`
-/// disables the timer (size-only flushing).
+/// reaches `max_block_rows`, once its approximate in-memory footprint
+/// reaches `max_live_bytes` (Task 11 — bounds writer memory when rows are
+/// large), or once `flush_interval` elapses since the first unflushed row
+/// landed — whichever comes first. `Duration::ZERO` disables the timer
+/// (size-only flushing).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct WriterConfig {
     pub window: Duration,
     pub max_bytes: usize,
     pub max_block_rows: usize,
+    /// Approximate live-index memory watermark (Task 11): once
+    /// `GraphsState::live_bytes` reaches this, the writer flushes early even
+    /// if `max_block_rows` is far away. Heuristic only — see
+    /// `Event::approx_bytes` — never affects correctness.
+    pub max_live_bytes: usize,
     pub flush_interval: Duration,
+    /// Bounded capacity of the submission channel (`[node]
+    /// submission_queue_len`, slice 10; was the fixed `SUBMISSION_QUEUE_LEN`
+    /// const through slice 9). `Db::try_execute_as` rejects with
+    /// `EngineError::Backpressure` once this many submissions are queued.
+    pub queue_len: usize,
 }
 
 impl Default for WriterConfig {
@@ -104,7 +123,9 @@ impl Default for WriterConfig {
             window: Duration::from_millis(15),
             max_bytes: 8 * 1024 * 1024,
             max_block_rows: 100_000,
+            max_live_bytes: 512 * 1024 * 1024,
             flush_interval: Duration::from_secs(300),
+            queue_len: 256,
         }
     }
 }
@@ -124,6 +145,12 @@ pub(crate) struct WriterState {
     /// flushed block's manifest watermark (decision 6).
     pub durable_watermark: LogPosition,
     pub progress: watch::Sender<ProgressState>,
+    /// Published by the coordinator's heartbeat task (Task 6 plumbing): every
+    /// ack is gated on this via `lease_block` (Task 8) — `Lost`/expired
+    /// `ValidUntil` fences the whole staged batch and stops the writer.
+    pub lease: watch::Receiver<LeaseState>,
+    /// I/O-free engine counters (Task 12, spec §12), shared with `DbInner`.
+    pub metrics: Arc<EngineMetrics>,
 }
 
 /// One staged-but-not-yet-durable transaction: its log record, the per-table
@@ -229,7 +256,7 @@ enum Received {
 /// Spawns the writer loop on a dedicated task and returns the command handle
 /// `Db` uses for transactions and inventory mutations.
 pub(crate) fn spawn_writer(mut state: WriterState, cfg: WriterConfig) -> WriterHandle {
-    let (sender, mut rx) = mpsc::channel::<Command>(SUBMISSION_QUEUE_LEN);
+    let (sender, mut rx) = mpsc::channel::<Command>(cfg.queue_len);
     tokio::spawn(async move {
         // Armed (Some) while unflushed rows exist and a flush interval is
         // configured; disarmed after every flush and whenever the live
@@ -249,16 +276,49 @@ pub(crate) fn spawn_writer(mut state: WriterState, cfg: WriterConfig) -> WriterH
             };
             match received {
                 Received::Command(Some(Command::Submit(first))) => {
-                    pending = run_batch(&mut state, &cfg, &mut rx, first).await;
-                    if live_rows(&state) >= cfg.max_block_rows {
+                    let (next, outcome) = run_batch(&mut state, &cfg, &mut rx, first).await;
+                    if let FlushOutcome::Fatal(reason) = outcome {
+                        // Lease loss / post-durability apply failure: publish
+                        // the failure so /healthz degrades, drain every
+                        // subsequent command with WriterFenced, and stop —
+                        // no block flush after fatal.
+                        publish_fatal(&state, &reason);
+                        drain(&mut rx, reason).await;
+                        break;
+                    }
+                    pending = next;
+                    if live_rows(&state) >= cfg.max_block_rows
+                        || live_bytes(&state) >= cfg.max_live_bytes
+                    {
                         // A failed flush leaves the live table intact and
                         // retries at the next trigger (decision 10).
-                        let _ = crate::flush::flush_block(&mut state).await;
+                        if let Err(error) = crate::flush::flush_block(&mut state).await {
+                            tracing::error!(
+                                error = %error,
+                                "flush_block failed; live table retained, will retry at the next flush trigger"
+                            );
+                            state
+                                .metrics
+                                .flush_failures
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
                     flush_deadline = next_deadline(&state, &cfg, flush_deadline);
                 }
                 Received::Command(Some(Command::Compact(ack))) => {
-                    let _ = ack.send(compact_once(&mut state).await);
+                    // The mid-batch Compact arm in `run_batch` defers to this
+                    // very call site whenever `staged` is empty — it returns
+                    // the command as `pending` instead of running
+                    // compaction itself — so gating here closes the fencing
+                    // hole for both the bare-Compact path and that deferred
+                    // case (Task 8 review finding 1: every ack must be
+                    // lease-gated, and `compact_once` performs real durable
+                    // writes).
+                    if let Some(reason) = gated_compact(&mut state, ack).await {
+                        publish_fatal(&state, &reason);
+                        drain(&mut rx, reason).await;
+                        break;
+                    }
                     flush_deadline = next_deadline(&state, &cfg, flush_deadline);
                 }
                 Received::Command(None) => {
@@ -267,7 +327,16 @@ pub(crate) fn spawn_writer(mut state: WriterState, cfg: WriterConfig) -> WriterH
                     break;
                 }
                 Received::FlushTimeout => {
-                    let _ = crate::flush::flush_block(&mut state).await;
+                    if let Err(error) = crate::flush::flush_block(&mut state).await {
+                        tracing::error!(
+                            error = %error,
+                            "flush_block failed; live table retained, will retry at the next flush trigger"
+                        );
+                        state
+                            .metrics
+                            .flush_failures
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     flush_deadline = next_deadline(&state, &cfg, None);
                 }
             }
@@ -278,6 +347,13 @@ pub(crate) fn spawn_writer(mut state: WriterState, cfg: WriterConfig) -> WriterH
 
 fn live_rows(state: &WriterState) -> usize {
     state.state.read().map(|s| s.live_rows()).unwrap_or(0)
+}
+
+/// Approximate unflushed live-index bytes (Task 11 memory watermark). Same
+/// lock-poisoned-is-empty fallback as `live_rows` — a poisoned lock never
+/// forces a spurious flush attempt here either.
+fn live_bytes(state: &WriterState) -> usize {
+    state.state.read().map(|s| s.live_bytes()).unwrap_or(0)
 }
 
 /// The flush timer is armed once (on the OLDEST unflushed row) and left
@@ -296,12 +372,15 @@ fn next_deadline(
 
 /// One group-commit batch: stage `first`, then keep staging until the window
 /// elapses, the size threshold trips, or the channel closes — then flush.
+/// Returns the next already-received command (if any) alongside the flush
+/// outcome — `Fatal` short-circuits the batch immediately (Task 8): no
+/// further staging or block flush happens once the writer is fenced.
 async fn run_batch(
     state: &mut WriterState,
     cfg: &WriterConfig,
     rx: &mut mpsc::Receiver<Command>,
     first: Submission,
-) -> Option<Command> {
+) -> (Option<Command>, FlushOutcome) {
     let deadline = tokio::time::Instant::now() + cfg.window;
     let mut staged: Vec<Staged> = Vec::new();
     let mut staged_bytes = 0usize;
@@ -313,7 +392,11 @@ async fn run_batch(
             if !staged.is_empty()
                 && (program_reads(&sub.statements) || staged_touches_catalog(&staged))
             {
-                flush(state, std::mem::take(&mut staged)).await;
+                if let FlushOutcome::Fatal(reason) = flush(state, std::mem::take(&mut staged)).await
+                {
+                    let _ = sub.ack.send(Err(EngineError::WriterFenced(reason.clone())));
+                    return (None, FlushOutcome::Fatal(reason));
+                }
                 staged_bytes = 0;
             }
             match resolve_program(state, sub.statements, &sub.params, &sub.graph, &sub.user).await {
@@ -337,22 +420,36 @@ async fn run_batch(
         }
         match tokio::time::timeout_at(deadline, rx.recv()).await {
             Ok(Some(Command::Submit(sub))) => pending = Some(sub),
-            Ok(Some(command @ Command::Compact(_))) => {
+            Ok(Some(Command::Compact(ack))) => {
                 if !staged.is_empty() {
-                    flush(state, std::mem::take(&mut staged)).await;
+                    if let FlushOutcome::Fatal(reason) =
+                        flush(state, std::mem::take(&mut staged)).await
+                    {
+                        let _ = ack.send(Err(EngineError::WriterFenced(reason.clone())));
+                        return (None, FlushOutcome::Fatal(reason));
+                    }
                 }
-                return Some(command);
+                return (Some(Command::Compact(ack)), FlushOutcome::Continue);
             }
             Ok(None) | Err(_) => break, // channel closed or window elapsed
         }
     }
     if !staged.is_empty() {
-        flush(state, staged).await;
+        return (None, flush(state, staged).await);
     }
-    None
+    (None, FlushOutcome::Continue)
 }
 
+/// `varve.compact` (Task 13): no fields — the span wraps the whole compaction
+/// pass, created inside the function itself so it stays observable no matter
+/// how `compact_once` is called (currently only ever via `gated_compact`).
 async fn compact_once(state: &mut WriterState) -> Result<CompactionReport, EngineError> {
+    compact_once_impl(state)
+        .instrument(tracing::info_span!("varve.compact"))
+        .await
+}
+
+async fn compact_once_impl(state: &mut WriterState) -> Result<CompactionReport, EngineError> {
     let history = manifest_history(state.store.as_ref()).await?;
     let Some(latest) = history.iter().max_by_key(|manifest| manifest.block_id) else {
         return Ok(CompactionReport::default());
@@ -440,6 +537,10 @@ async fn compact_once(state: &mut WriterState) -> Result<CompactionReport, Engin
         job.replace_inputs_with_outputs(tries, persisted, |trie| trie.entry.trie_key.as_str());
     }
 
+    state
+        .metrics
+        .compaction_runs
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok(CompactionReport {
         jobs: 1,
         input_tries: job.input_trie_keys.len(),
@@ -485,7 +586,28 @@ fn append_effects_to_overlay(overlay: &mut Overlay, effects: &Effects) -> Result
 
 /// Assigns one `(tx_id, system_time)` and resolves a full mutation program into
 /// one per-table effect batch and log record.
+///
+/// `varve.resolve` (Task 13, field `tx_id`): the span is created HERE, inside
+/// the function itself, rather than at its `run_batch` call site — the
+/// writer.rs unit test calls `resolve_program` directly (bypassing
+/// `run_batch`/`spawn_writer` entirely), so the span must be self-contained
+/// to be observable there. `tx_id` isn't known until partway through the
+/// body, so the field starts `Empty` and is filled in via
+/// `Span::current().record` once assigned.
 async fn resolve_program(
+    state: &mut WriterState,
+    statements: Vec<Statement>,
+    params: &BTreeMap<String, Value>,
+    graph: &str,
+    user: &str,
+) -> Result<(LogRecord, Effects, TxReceipt, String), EngineError> {
+    let span = tracing::info_span!("varve.resolve", tx_id = tracing::field::Empty);
+    resolve_program_impl(state, statements, params, graph, user)
+        .instrument(span)
+        .await
+}
+
+async fn resolve_program_impl(
     state: &mut WriterState,
     statements: Vec<Statement>,
     params: &BTreeMap<String, Value>,
@@ -522,6 +644,7 @@ async fn resolve_program(
 
     state.next_tx_id += 1;
     let tx_id = state.next_tx_id;
+    tracing::Span::current().record("tx_id", tx_id);
     let system = state.clock.next();
 
     let mut overlay = Overlay::default();
@@ -1705,12 +1828,124 @@ async fn resolve_delete(
     Ok(effects)
 }
 
-/// Durable append → apply → ack, strictly in that order (decision 1).
-async fn flush(state: &mut WriterState, mut staged: Vec<Staged>) {
+/// Result of one flush attempt (Task 8): `Fatal` means the writer must stop
+/// serving — a lost/expired lease or a post-durability apply failure both
+/// break the invariants the loop otherwise relies on (epoch takeover means a
+/// stale writer can no longer assume its acks are safe; an apply failure
+/// after durability means the live index and the durable log have diverged).
+pub(crate) enum FlushOutcome {
+    Continue,
+    Fatal(String),
+}
+
+/// `None` if acks may proceed under the current lease; `Some(reason)` if the
+/// lease is lost or its deadline has passed — the caller must fence instead.
+fn lease_block(lease: &watch::Receiver<LeaseState>) -> Option<String> {
+    match &*lease.borrow() {
+        LeaseState::Unfenced => None,
+        LeaseState::ValidUntil(deadline) if tokio::time::Instant::now() < *deadline => None,
+        LeaseState::ValidUntil(_) => Some("lease expired before ack".to_string()),
+        LeaseState::Lost(reason) => Some(reason.clone()),
+    }
+}
+
+/// Acks every staged tx `Err(WriterFenced(reason))` and reports `Fatal` —
+/// used both before append (never even durable) and after a durable append
+/// discovers the fence too late to ack (never visible either way).
+fn fence_all(staged: Vec<Staged>, reason: String) -> FlushOutcome {
+    for s in staged {
+        let _ = s.ack.send(Err(EngineError::WriterFenced(reason.clone())));
+    }
+    FlushOutcome::Fatal(reason)
+}
+
+/// Lease-gates a Compact ack exactly like `flush` gates a staged batch (Task
+/// 8 review finding 1) — with the SAME two checkpoints `flush` uses (Task 8
+/// review pass 2 finding): `compact_once` is a long multi-`.await` durable
+/// operation (manifest history fetch, per-trie get/put, final manifest put),
+/// so the lease checked once BEFORE it runs can no longer speak for the
+/// lease's state once it returns. Acks `Err(WriterFenced(reason))` and
+/// returns `Some(reason)` instead of compacting when the PRE-check finds the
+/// lease invalid; if `compact_once` succeeds, the lease is re-checked once
+/// more — a lease lost mid-flight must still fence the ack (the compaction's
+/// durable writes may already be persisted, but a fenced writer must never
+/// ack `Ok`) — only a lease still valid after compaction acks the real
+/// result. A `compact_once` error is acked as-is, unchanged from before this
+/// fix: its failure is not itself evidence of a lease problem.
+///
+/// KNOWN LIMITATION (Slice-10 final-review finding 2): a fenced-but-alive
+/// writer's in-flight manifest PUT (inside `compact_once`/`flush_block`) is
+/// not itself epoch-fenced — only the log is. This gate is what contains
+/// that for v1 (a fenced writer never acks `Ok` and instead goes fatal), but
+/// it's a narrow alive-zombie race: robust manifest fencing (e.g. selecting
+/// latest by `(watermark, block_id)`) is a documented v1 limitation — see
+/// STATUS.md Slice-10 known limitations.
+async fn gated_compact(
+    state: &mut WriterState,
+    ack: oneshot::Sender<Result<CompactionReport, EngineError>>,
+) -> Option<String> {
+    if let Some(reason) = lease_block(&state.lease) {
+        let _ = ack.send(Err(EngineError::WriterFenced(reason.clone())));
+        return Some(reason);
+    }
+    match compact_once(state).await {
+        Ok(report) => {
+            if let Some(reason) = lease_block(&state.lease) {
+                let _ = ack.send(Err(EngineError::WriterFenced(reason.clone())));
+                return Some(reason);
+            }
+            let _ = ack.send(Ok(report));
+            None
+        }
+        Err(e) => {
+            let _ = ack.send(Err(e));
+            None
+        }
+    }
+}
+
+/// Durable append → apply → ack, strictly in that order (decision 1), gated
+/// by the lease both before append (never durable) and after (durable but
+/// possibly beyond the fence — never ack). A post-durability apply failure
+/// is FATAL (Task 8): epoch takeover breaks the monotonicity argument that
+/// once made "keep serving" safe, since the live index and the durable log
+/// have now diverged.
+///
+/// `varve.commit` (Task 13, fields `batch`, `first_position`): created HERE,
+/// inside `flush` itself, rather than at its `run_batch` call sites — the
+/// writer.rs unit test calls `flush` directly, so the span must be
+/// self-contained to be observable there. `batch` (`staged.len()`) is known
+/// up front; `first_position` isn't known until `log.append` returns, so
+/// that field starts `Empty` and is recorded once the append succeeds.
+async fn flush(state: &mut WriterState, staged: Vec<Staged>) -> FlushOutcome {
+    let batch = staged.len() as u64;
+    let span = tracing::info_span!(
+        "varve.commit",
+        batch,
+        first_position = tracing::field::Empty
+    );
+    flush_impl(state, staged).instrument(span).await
+}
+
+async fn flush_impl(state: &mut WriterState, mut staged: Vec<Staged>) -> FlushOutcome {
+    if let Some(reason) = lease_block(&state.lease) {
+        return fence_all(staged, reason);
+    }
     let records: Vec<LogRecord> = staged.iter().map(|s| s.record.clone()).collect();
     let count = records.len() as u64;
+    // Captured before `apply` (which `mem::take`s each staged tx's event
+    // vecs) so the Task 12 `events_committed` counter still sees them.
+    let batch_len = staged.len() as u64;
+    let event_count: u64 = staged
+        .iter()
+        .map(|s| (s.events.nodes.len() + s.events.edges.len()) as u64)
+        .sum();
     match state.log.append(records).await {
         Ok(first) => {
+            tracing::Span::current().record("first_position", first.as_u64());
+            if let Some(reason) = lease_block(&state.lease) {
+                return fence_all(staged, reason);
+            }
             // Exclusive end of the durable prefix — becomes the next
             // manifest's watermark (decision 6; positions are consecutive
             // per the `Log` contract). On (unreachable) 48-bit offset
@@ -1718,28 +1953,90 @@ async fn flush(state: &mut WriterState, mut staged: Vec<Staged>) {
             if let Ok(end) = first.advance(count) {
                 state.durable_watermark = end;
             }
-            let applied = apply(state, &mut staged);
-            if applied.is_ok() {
-                if let (Some(last), Ok(end)) = (staged.last(), first.advance(count)) {
+            // `varve.apply` (field `batch`): `apply` is a plain sync
+            // function with no `.await` inside it, so this is a plain
+            // `entered()` guard — never held across an await.
+            let applied = {
+                let _g = tracing::info_span!("varve.apply", batch = batch_len).entered();
+                apply(state, &mut staged)
+            };
+            match applied {
+                Ok(()) => {
+                    if let (Some(last), Ok(end)) = (staged.last(), first.advance(count)) {
+                        // `log_head = durable_watermark`: lag 0 by
+                        // construction (Task 12) — the writer always
+                        // publishes its own just-flushed watermark.
+                        state.progress.send_replace(ProgressState::running(
+                            last.receipt.tx_id,
+                            end,
+                            end,
+                        ));
+                    }
                     state
-                        .progress
-                        .send_replace(ProgressState::running(last.receipt.tx_id, end));
+                        .metrics
+                        .txs_committed
+                        .fetch_add(batch_len, std::sync::atomic::Ordering::Relaxed);
+                    state
+                        .metrics
+                        .events_committed
+                        .fetch_add(event_count, std::sync::atomic::Ordering::Relaxed);
+                    for s in staged {
+                        let _ = s.ack.send(Ok(s.receipt));
+                    }
+                    FlushOutcome::Continue
                 }
-            }
-            for s in staged {
-                let _ = s.ack.send(match &applied {
-                    Ok(()) => Ok(s.receipt),
-                    Err(msg) => Err(EngineError::CommitFailed(msg.clone())),
-                });
+                Err(msg) => {
+                    tracing::error!(
+                        error = %msg,
+                        "apply failed after durable append; writer stopping (fatal): the live \
+                         index and durable log have diverged"
+                    );
+                    for s in staged {
+                        let _ = s.ack.send(Err(EngineError::CommitFailed(msg.clone())));
+                    }
+                    FlushOutcome::Fatal(format!("apply failed after durable append: {msg}"))
+                }
             }
         }
         Err(e) => {
             // Nothing applied, so live-index state is untouched: fail the
             // whole batch and keep serving (the log itself, not this
-            // in-memory index, is what may need operator attention).
+            // in-memory index, is what may need operator attention) — a
+            // PRE-durability append failure is not fatal (unchanged).
+            tracing::error!(error = %e, "log append failed; batch not durable, acked as failed");
+            state
+                .metrics
+                .commit_failures
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let msg = e.to_string();
             for s in staged {
                 let _ = s.ack.send(Err(EngineError::CommitFailed(msg.clone())));
+            }
+            FlushOutcome::Continue
+        }
+    }
+}
+
+/// Marks the writer FATAL on the shared progress channel — `/healthz` and
+/// `Db::follower_error()` both read `follower_error` off this state, so a
+/// fatal writer degrades health exactly like a stalled follower does.
+fn publish_fatal(state: &WriterState, reason: &str) {
+    let mut next = state.progress.borrow().clone();
+    next.follower_error = Some(format!("writer stopped: {reason}"));
+    state.progress.send_replace(next);
+}
+
+/// Acks every subsequent command `Err(WriterFenced(reason))` until the
+/// channel closes — entered once and only once, after `flush` reports
+/// `Fatal`; no block flush and no further staging happens past this point.
+async fn drain(rx: &mut mpsc::Receiver<Command>, reason: String) {
+    while let Some(command) = rx.recv().await {
+        match command {
+            Command::Submit(sub) => {
+                let _ = sub.ack.send(Err(EngineError::WriterFenced(reason.clone())));
+            }
+            Command::Compact(ack) => {
+                let _ = ack.send(Err(EngineError::WriterFenced(reason.clone())));
             }
         }
     }
@@ -1822,6 +2119,14 @@ mod tests {
         async fn trim(&self, up_to: LogPosition) -> Result<(), LogError> {
             self.inner.trim(up_to).await
         }
+
+        async fn head(&self) -> Result<LogPosition, LogError> {
+            self.inner.head().await
+        }
+
+        async fn start_epoch(&self, epoch: u16) -> Result<(), LogError> {
+            self.inner.start_epoch(epoch).await
+        }
     }
 
     struct WakeOrder {
@@ -1892,6 +2197,14 @@ mod tests {
         async fn trim(&self, up_to: LogPosition) -> Result<(), LogError> {
             self.inner.trim(up_to).await
         }
+
+        async fn head(&self) -> Result<LogPosition, LogError> {
+            self.inner.head().await
+        }
+
+        async fn start_epoch(&self, epoch: u16) -> Result<(), LogError> {
+            self.inner.start_epoch(epoch).await
+        }
     }
 
     /// Fails the first append with an I/O error, then delegates.
@@ -1920,6 +2233,14 @@ mod tests {
         async fn trim(&self, up_to: LogPosition) -> Result<(), LogError> {
             self.inner.trim(up_to).await
         }
+
+        async fn head(&self) -> Result<LogPosition, LogError> {
+            self.inner.head().await
+        }
+
+        async fn start_epoch(&self, epoch: u16) -> Result<(), LogError> {
+            self.inner.start_epoch(epoch).await
+        }
     }
 
     fn spawn_with_progress(
@@ -1931,7 +2252,11 @@ mod tests {
         watch::Receiver<ProgressState>,
     ) {
         let state = Arc::new(RwLock::new(GraphsState::new()));
-        let (progress, progress_rx) = watch::channel(ProgressState::running(0, LogPosition::ZERO));
+        let (progress, progress_rx) = watch::channel(ProgressState::running(
+            0,
+            LogPosition::ZERO,
+            LogPosition::ZERO,
+        ));
         let writer_state = WriterState {
             state: Arc::clone(&state),
             store: varve_storage::memory_store(),
@@ -1944,6 +2269,8 @@ mod tests {
             next_block_id: 0,
             durable_watermark: LogPosition::ZERO,
             progress,
+            lease: watch::channel(LeaseState::Unfenced).1,
+            metrics: Arc::new(EngineMetrics::default()),
         };
         (spawn_writer(writer_state, cfg), state, progress_rx)
     }
@@ -1963,14 +2290,414 @@ mod tests {
             .use_graph
             .unwrap_or_else(|| DEFAULT_GRAPH.to_string());
         let (ack, rx) = oneshot::channel();
-        sender.try_submit(Submission {
-            statements: program.statements,
-            params: BTreeMap::new(),
-            graph,
-            user: String::new(),
-            ack,
-        });
+        sender
+            .try_submit(Submission {
+                statements: program.statements,
+                params: BTreeMap::new(),
+                graph,
+                user: String::new(),
+                ack,
+            })
+            .unwrap();
         rx
+    }
+
+    /// Like `spawn`, but with an explicit lease receiver (Task 8) instead of
+    /// the always-`Unfenced` default, and the progress receiver exposed so
+    /// tests can assert on `follower_error` (review finding 2). Callers pick
+    /// the `WriterConfig` — most want `window: Duration::ZERO` so every
+    /// submission flushes without waiting for the group-commit window, but a
+    /// non-zero window lets a test keep a write staged (review finding 3).
+    fn spawn_with_lease(
+        lease: watch::Receiver<LeaseState>,
+        cfg: WriterConfig,
+    ) -> (
+        WriterHandle,
+        Arc<RwLock<GraphsState>>,
+        watch::Receiver<ProgressState>,
+    ) {
+        let state = Arc::new(RwLock::new(GraphsState::new()));
+        let (progress, progress_rx) = watch::channel(ProgressState::running(
+            0,
+            LogPosition::ZERO,
+            LogPosition::ZERO,
+        ));
+        let writer_state = WriterState {
+            state: Arc::clone(&state),
+            store: varve_storage::memory_store(),
+            clock: Arc::new(MonotonicClock::new()),
+            functions: Arc::new(varve_plan::FunctionRegistry::with_builtins()),
+            max_path_depth: 10,
+            query_limits: varve_plan::QueryLimits::default(),
+            log: Arc::new(MemoryLog::new()),
+            next_tx_id: 0,
+            next_block_id: 0,
+            durable_watermark: LogPosition::ZERO,
+            progress,
+            lease,
+            metrics: Arc::new(EngineMetrics::default()),
+        };
+        (spawn_writer(writer_state, cfg), state, progress_rx)
+    }
+
+    /// `spawn_with_lease` with the common zero-window config (immediate
+    /// per-submission flush).
+    fn spawn_with_lease_zero_window(
+        lease: watch::Receiver<LeaseState>,
+    ) -> (
+        WriterHandle,
+        Arc<RwLock<GraphsState>>,
+        watch::Receiver<ProgressState>,
+    ) {
+        spawn_with_lease(
+            lease,
+            WriterConfig {
+                window: Duration::ZERO,
+                max_bytes: 8 * 1024 * 1024,
+                ..WriterConfig::default()
+            },
+        )
+    }
+
+    /// Live (unflushed) node-event count in the default graph.
+    fn live_event_count(live: &Arc<RwLock<GraphsState>>) -> usize {
+        live.read()
+            .unwrap()
+            .graph(DEFAULT_GRAPH)
+            .unwrap()
+            .nodes
+            .live
+            .event_count()
+    }
+
+    #[tokio::test]
+    async fn a_lost_lease_fences_acks_and_stops_the_writer() {
+        let (lease_tx, lease_rx) = watch::channel(LeaseState::Unfenced);
+        let (sender, live, progress_rx) = spawn_with_lease_zero_window(lease_rx);
+        submit(&sender, "INSERT (:P {_id: 1})")
+            .await
+            .unwrap()
+            .unwrap();
+
+        lease_tx.send_replace(LeaseState::Lost("seized in test".into()));
+        let fenced = submit(&sender, "INSERT (:P {_id: 2})").await.unwrap();
+        assert!(
+            matches!(&fenced, Err(EngineError::WriterFenced(reason)) if reason.contains("seized")),
+            "expected WriterFenced(\"seized...\"), got {fenced:?}"
+        );
+
+        // The writer has stopped and drains — later submissions also fence,
+        // and nothing beyond the first tx was ever applied.
+        let again = submit(&sender, "INSERT (:P {_id: 3})").await.unwrap();
+        assert!(matches!(again, Err(EngineError::WriterFenced(_))));
+        assert_eq!(live_event_count(&live), 1);
+
+        // Review finding 2: Fatal must publish `follower_error` so /healthz
+        // degrades. By now `again`'s ack (sent from inside `drain`) has
+        // resolved, so `publish_fatal` — called before `drain` starts — has
+        // already run.
+        let follower_error = progress_rx.borrow().follower_error.clone();
+        assert!(
+            matches!(&follower_error, Some(msg) if msg.contains("writer stopped") && msg.contains("seized")),
+            "expected follower_error to report the writer-stopped/lease reason, got {follower_error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_lease_deadline_blocks_acks() {
+        let (_lease_tx, lease_rx) = watch::channel(LeaseState::ValidUntil(
+            tokio::time::Instant::now() - Duration::from_millis(1),
+        ));
+        let (sender, _live, _progress_rx) = spawn_with_lease_zero_window(lease_rx);
+        let fenced = submit(&sender, "INSERT (:P {_id: 1})").await.unwrap();
+        assert!(matches!(fenced, Err(EngineError::WriterFenced(_))));
+    }
+
+    #[tokio::test]
+    async fn a_lost_lease_fences_a_bare_compact() {
+        // Review finding 1: `Command::Compact` must be lease-gated exactly
+        // like a submission batch — `compact_once` performs real durable
+        // writes (new blocks + a manifest entry) and must never run (nor
+        // ack `Ok`) once the lease is lost.
+        let (lease_tx, lease_rx) = watch::channel(LeaseState::Unfenced);
+        let (sender, _live, _progress_rx) = spawn_with_lease_zero_window(lease_rx);
+
+        lease_tx.send_replace(LeaseState::Lost("seized in test".into()));
+        let compacted = sender.compact_once().await;
+        assert!(
+            matches!(&compacted, Err(EngineError::WriterFenced(reason)) if reason.contains("seized")),
+            "expected WriterFenced(\"seized...\"), got {compacted:?}"
+        );
+
+        // The writer has stopped and drains: a subsequent submission fences too.
+        let fenced = submit(&sender, "INSERT (:P {_id: 1})").await.unwrap();
+        assert!(matches!(fenced, Err(EngineError::WriterFenced(_))));
+    }
+
+    /// A `varve_storage::ObjectStore` wrapper that flips a lease to `Lost`
+    /// the moment it sees a PUT to a manifest key — `compact_once`'s LAST
+    /// durable write — but only once armed. This lands the lease loss
+    /// deterministically between "compaction's durable work is done" and
+    /// "`compact_once` returns", with no sleep or timing dependency: the
+    /// trap fires exactly once, on exactly the call that ends `compact_once`.
+    struct LeaseDropOnManifestPut {
+        inner: Arc<dyn varve_storage::ObjectStore>,
+        lease_tx: watch::Sender<LeaseState>,
+        armed: Arc<AtomicBool>,
+        reason: String,
+    }
+
+    #[async_trait::async_trait]
+    impl varve_storage::ObjectStore for LeaseDropOnManifestPut {
+        async fn put(&self, key: &str, bytes: Bytes) -> Result<(), varve_storage::StorageError> {
+            let result = self.inner.put(key, bytes).await;
+            if self.armed.load(AtomicOrdering::SeqCst) && keys::manifest_block_id(key).is_some() {
+                self.lease_tx
+                    .send_replace(LeaseState::Lost(self.reason.clone()));
+            }
+            result
+        }
+
+        async fn get(&self, key: &str) -> Result<Bytes, varve_storage::StorageError> {
+            self.inner.get(key).await
+        }
+
+        async fn get_range(
+            &self,
+            key: &str,
+            range: std::ops::Range<u64>,
+        ) -> Result<Bytes, varve_storage::StorageError> {
+            self.inner.get_range(key, range).await
+        }
+
+        async fn list(&self, prefix: &str) -> Result<Vec<String>, varve_storage::StorageError> {
+            self.inner.list(prefix).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), varve_storage::StorageError> {
+            self.inner.delete(key).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lease_lost_during_compact_once_fences_the_ack_not_ok() {
+        // Task 8 review pass 2: `compact_once` performs several durable
+        // `.await`s (manifest history, per-trie get/put, final manifest
+        // put) after `gated_compact`'s pre-check already found the lease
+        // valid. If the lease is lost during that window, `compact_once`
+        // still returns `Ok` — the fix is a SECOND lease check after it
+        // returns, mirroring `flush`'s before+after checkpoints. Without
+        // that post-check, this test's ack would be `Ok(_)` instead of
+        // `Err(WriterFenced(_))`.
+        let (lease_tx, lease_rx) = watch::channel(LeaseState::Unfenced);
+        let armed = Arc::new(AtomicBool::new(false));
+        let store: Arc<dyn varve_storage::ObjectStore> = Arc::new(LeaseDropOnManifestPut {
+            inner: varve_storage::memory_store(),
+            lease_tx,
+            armed: Arc::clone(&armed),
+            reason: "seized mid-compact".to_string(),
+        });
+
+        let graphs = Arc::new(RwLock::new(GraphsState::new()));
+        let (progress, progress_rx) = watch::channel(ProgressState::running(
+            0,
+            LogPosition::ZERO,
+            LogPosition::ZERO,
+        ));
+        let mut state = WriterState {
+            state: Arc::clone(&graphs),
+            store,
+            clock: Arc::new(MonotonicClock::new()),
+            functions: Arc::new(varve_plan::FunctionRegistry::with_builtins()),
+            max_path_depth: 10,
+            query_limits: varve_plan::QueryLimits::default(),
+            log: Arc::new(MemoryLog::new()),
+            next_tx_id: 0,
+            next_block_id: 0,
+            durable_watermark: LogPosition::ZERO,
+            progress,
+            lease: lease_rx,
+            metrics: Arc::new(EngineMetrics::default()),
+        };
+
+        // `select_compaction_jobs`'s L0 job needs `CompactionConfig::default()
+        // .log_limit` (64) live L0 tries before it selects anything at all
+        // (see `crates/varve-engine/src/compact.rs`), so build 64 one-row L0
+        // blocks by flushing directly, bypassing the writer queue and its
+        // batching thresholds entirely.
+        for i in 0..64u64 {
+            let event = Event {
+                iid: Iid::derive(DEFAULT_GRAPH, NODES_TABLE, &i.to_be_bytes()),
+                system_from: Instant::from_micros(i as i64 + 1),
+                valid_from: Instant::from_micros(i as i64 + 1),
+                valid_to: Instant::END_OF_TIME,
+                src: None,
+                dst: None,
+                op: Op::Put {
+                    labels: vec!["P".to_string()],
+                    doc: Doc::new(),
+                },
+            };
+            graphs
+                .write()
+                .unwrap()
+                .graph_mut(DEFAULT_GRAPH)
+                .unwrap()
+                .nodes
+                .live
+                .append(event)
+                .unwrap();
+            crate::flush::flush_block(&mut state).await.unwrap();
+        }
+
+        // Arm the trap only now: the 64 setup flushes above must not trip it.
+        armed.store(true, AtomicOrdering::SeqCst);
+
+        let sender = spawn_writer(state, WriterConfig::default());
+        let compacted = sender.compact_once().await;
+        assert!(
+            matches!(&compacted, Err(EngineError::WriterFenced(reason)) if reason.contains("seized")),
+            "expected a mid-compaction lease loss to fence the ack as WriterFenced, got {compacted:?}"
+        );
+
+        // The writer must have gone fatal exactly like the pre-check path:
+        // a subsequent submission fences too, and follower_error is set.
+        let fenced = submit(&sender, "INSERT (:P {_id: 999})").await.unwrap();
+        assert!(matches!(fenced, Err(EngineError::WriterFenced(_))));
+        let follower_error = progress_rx.borrow().follower_error.clone();
+        assert!(
+            matches!(&follower_error, Some(msg) if msg.contains("writer stopped") && msg.contains("seized")),
+            "expected follower_error to report the writer-stopped/lease reason, got {follower_error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mid_batch_reading_statement_fences_its_trigger_and_the_staged_write() {
+        // Review finding 3: with a non-zero window, a staged (not-yet-durable)
+        // write must be fenced when a later reading statement forces a
+        // mid-batch flush under a lost lease — AND the trigger statement's
+        // own ack must be fenced too. mpsc is FIFO and both submissions
+        // below happen without any intervening `.await`, so the writer task
+        // cannot observe them out of order (see `submit`'s doc comment) —
+        // no sleeps or timing needed.
+        let (lease_tx, lease_rx) = watch::channel(LeaseState::Unfenced);
+        let cfg = WriterConfig {
+            window: Duration::from_secs(3600),
+            max_bytes: 8 * 1024 * 1024,
+            ..WriterConfig::default()
+        };
+        let (sender, live, _progress_rx) = spawn_with_lease(lease_rx, cfg);
+
+        let staged_write = submit(&sender, "INSERT (:P {_id: 1})");
+        lease_tx.send_replace(LeaseState::Lost("seized in test".into()));
+        let trigger = submit(&sender, "MATCH (p:P) DELETE p");
+
+        let staged_result = staged_write.await.unwrap();
+        assert!(
+            matches!(&staged_result, Err(EngineError::WriterFenced(reason)) if reason.contains("seized")),
+            "expected the staged write to be fenced by the forced flush, got {staged_result:?}"
+        );
+        let trigger_result = trigger.await.unwrap();
+        assert!(
+            matches!(&trigger_result, Err(EngineError::WriterFenced(reason)) if reason.contains("seized")),
+            "expected the trigger statement itself to be fenced, got {trigger_result:?}"
+        );
+        assert_eq!(
+            live_event_count(&live),
+            0,
+            "the staged write must never be applied once fenced"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_failure_after_durable_append_is_fatal() {
+        // Pre-seed the live table with an event whose system_from is LATER
+        // than the "bad" staged event below, so `apply()` trips
+        // `LiveTable::append`'s monotonicity check (out-of-order rejection).
+        let graphs = Arc::new(RwLock::new(GraphsState::new()));
+        let seeded = Event {
+            iid: Iid::derive(DEFAULT_GRAPH, NODES_TABLE, b"seeded"),
+            system_from: Instant::from_micros(200),
+            valid_from: Instant::from_micros(200),
+            valid_to: Instant::END_OF_TIME,
+            src: None,
+            dst: None,
+            op: Op::Put {
+                labels: vec!["P".to_string()],
+                doc: Doc::new(),
+            },
+        };
+        graphs
+            .write()
+            .unwrap()
+            .graph_mut(DEFAULT_GRAPH)
+            .unwrap()
+            .nodes
+            .live
+            .append(seeded)
+            .unwrap();
+
+        let bad_event = Event {
+            iid: Iid::derive(DEFAULT_GRAPH, NODES_TABLE, b"bad"),
+            system_from: Instant::from_micros(100), // precedes the seeded event
+            valid_from: Instant::from_micros(100),
+            valid_to: Instant::END_OF_TIME,
+            src: None,
+            dst: None,
+            op: Op::Put {
+                labels: vec!["P".to_string()],
+                doc: Doc::new(),
+            },
+        };
+        let (ack, ack_rx) = oneshot::channel();
+        let bad_staged = Staged {
+            graph: DEFAULT_GRAPH.to_string(),
+            record: LogRecord {
+                tx_id: 1,
+                system_time_us: 100,
+                user: String::new(),
+                effects: Vec::new(),
+            },
+            events: Effects {
+                nodes: vec![bad_event],
+                ..Effects::default()
+            },
+            receipt: TxReceipt {
+                tx_id: 1,
+                system_time: Instant::from_micros(100),
+                side_effects: SideEffects::default(),
+            },
+            ack,
+        };
+
+        let (progress, _progress_rx) = watch::channel(ProgressState::running(
+            0,
+            LogPosition::ZERO,
+            LogPosition::ZERO,
+        ));
+        let mut state = WriterState {
+            state: graphs,
+            store: varve_storage::memory_store(),
+            clock: Arc::new(MonotonicClock::new()),
+            functions: Arc::new(varve_plan::FunctionRegistry::with_builtins()),
+            max_path_depth: 10,
+            query_limits: varve_plan::QueryLimits::default(),
+            log: Arc::new(MemoryLog::new()),
+            next_tx_id: 1,
+            next_block_id: 0,
+            durable_watermark: LogPosition::ZERO,
+            progress,
+            lease: watch::channel(LeaseState::Unfenced).1,
+            metrics: Arc::new(EngineMetrics::default()),
+        };
+
+        let outcome = flush(&mut state, vec![bad_staged]).await;
+        assert!(matches!(outcome, FlushOutcome::Fatal(_)));
+        // the ack carried CommitFailed (apply failed after durable append):
+        assert!(matches!(
+            ack_rx.await.unwrap(),
+            Err(EngineError::CommitFailed(_))
+        ));
     }
 
     #[tokio::test]
@@ -1996,6 +2723,65 @@ mod tests {
             records.iter().map(|(_, r)| r.tx_id).collect::<Vec<_>>(),
             vec![1, 2, 3, 4, 5]
         );
+    }
+
+    /// Slice 10: with `queue_len = 1`, a third submission must be rejected
+    /// immediately (`Backpressure`) rather than waiting for room. `max_bytes:
+    /// 1` forces every single-record batch to flush on its own (as in
+    /// `size_threshold_flushes_without_waiting_for_the_window`), so the FIRST
+    /// submission alone drives the writer into `BlockingAppendLog::append`
+    /// and blocks it there — at that point the channel is empty (capacity 1,
+    /// 0 queued), so the SECOND submission fills the one free slot and the
+    /// THIRD must bounce off a full queue.
+    #[tokio::test]
+    async fn try_submit_on_a_full_queue_is_backpressure() {
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let log = Arc::new(BlockingAppendLog {
+            inner: MemoryLog::new(),
+            appends: AtomicUsize::new(0),
+            entered: Mutex::new(Some(entered_tx)),
+            release: Notify::new(),
+        });
+        let (sender, _live) = spawn(
+            Arc::clone(&log) as Arc<dyn Log>,
+            WriterConfig {
+                max_bytes: 1, // every record trips the threshold on its own
+                queue_len: 1,
+                ..WriterConfig::default()
+            },
+        );
+
+        let first = submit(&sender, "INSERT (:P {_id: 1})");
+        // Blocks until the writer loop has dequeued the first submission and
+        // entered `append` — only then is the queue guaranteed empty again.
+        entered_rx.await.unwrap();
+
+        let second = submit(&sender, "INSERT (:P {_id: 2})"); // occupies the one free slot
+
+        let program = varve_gql::parse_program("INSERT (:P {_id: 3})").unwrap();
+        let (third_ack, third_rx) = oneshot::channel();
+        let third = sender.try_submit(Submission {
+            statements: program.statements,
+            params: BTreeMap::new(),
+            graph: DEFAULT_GRAPH.to_string(),
+            user: String::new(),
+            ack: third_ack,
+        });
+        assert!(
+            matches!(third, Err(EngineError::Backpressure)),
+            "expected Backpressure on a full queue, got {third:?}"
+        );
+        drop(third_rx); // never submitted: no ack will ever arrive for it
+
+        // Release the first blocked append; by the time its ack resolves the
+        // writer loop — never having genuinely yielded in between on this
+        // single-threaded runtime — has already dequeued the second
+        // submission and is blocked on the SECOND `append` call.
+        log.release.notify_waiters();
+        first.await.unwrap().unwrap();
+        log.release.notify_waiters();
+        second.await.unwrap().unwrap();
+        assert_eq!(log.appends.load(AtomicOrdering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -2217,5 +3003,106 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(log.appends.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    /// Task 13 TDD (writer-path spans): `resolve_program` and `flush` create
+    /// `varve.resolve`, `varve.commit`, and `varve.apply` internally (see
+    /// their doc comments) precisely so those spans stay observable when
+    /// called directly here, bypassing `run_batch`/`spawn_writer` entirely —
+    /// a spawned writer task's spans aren't reliably observable through a
+    /// thread-local `set_default` subscriber (see `tests/tracing_spans.rs`).
+    #[tokio::test]
+    async fn resolve_flush_apply_emit_expected_spans() {
+        use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt};
+        use tracing_subscriber::{registry, Layer};
+
+        #[derive(Clone, Default)]
+        struct SpanNames(Arc<Mutex<Vec<&'static str>>>);
+
+        impl<S: tracing::Subscriber> Layer<S> for SpanNames {
+            fn on_new_span(
+                &self,
+                attrs: &tracing::span::Attributes<'_>,
+                _: &tracing::span::Id,
+                _: LayerContext<'_, S>,
+            ) {
+                self.0.lock().unwrap().push(attrs.metadata().name());
+            }
+        }
+
+        // `tracing` caches each span callsite's interest process-globally, keyed
+        // by whichever thread hits it FIRST. The ~120 other writer-path unit
+        // tests in this binary call `resolve_program`/`flush` under
+        // `NoSubscriber`, so a thread-local `set_default` here loses the race:
+        // if a no-subscriber thread registers `varve.resolve`/`varve.commit`/
+        // `varve.apply` before we do, it sticks as `Interest::never()` and our
+        // spans are compiled out (we'd intermittently see `[]` or a partial
+        // set). A GLOBAL default removes the `NoSubscriber` case entirely — every
+        // thread routes through our capturing subscriber, so those callsites
+        // always register as interested regardless of ordering — and
+        // `set_global_default` rebuilds the interest cache, repairing any
+        // callsite a prior test already poisoned. Concurrent tests also push
+        // their span names into `names`, but we only assert `.contains()`, so
+        // the extra entries are harmless.
+        let names = SpanNames::default();
+        let subscriber = registry().with(names.clone());
+        // Only this test installs a subscriber in the engine lib binary, so this
+        // is the sole `set_global_default` caller and cannot lose the one-shot.
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no other test installs a global subscriber");
+
+        let graphs = Arc::new(RwLock::new(GraphsState::new()));
+        let (progress, _progress_rx) = watch::channel(ProgressState::running(
+            0,
+            LogPosition::ZERO,
+            LogPosition::ZERO,
+        ));
+        let mut state = WriterState {
+            state: Arc::clone(&graphs),
+            store: varve_storage::memory_store(),
+            clock: Arc::new(MonotonicClock::new()),
+            functions: Arc::new(varve_plan::FunctionRegistry::with_builtins()),
+            max_path_depth: 10,
+            query_limits: varve_plan::QueryLimits::default(),
+            log: Arc::new(MemoryLog::new()),
+            next_tx_id: 0,
+            next_block_id: 0,
+            durable_watermark: LogPosition::ZERO,
+            progress,
+            lease: watch::channel(LeaseState::Unfenced).1,
+            metrics: Arc::new(EngineMetrics::default()),
+        };
+
+        let program = varve_gql::parse_program("INSERT (:P {_id: 1})").unwrap();
+        let (record, events, receipt, graph) = resolve_program(
+            &mut state,
+            program.statements,
+            &BTreeMap::new(),
+            DEFAULT_GRAPH,
+            "test-user",
+        )
+        .await
+        .unwrap();
+
+        let (ack, _rx) = oneshot::channel();
+        let staged = Staged {
+            graph,
+            record,
+            events,
+            receipt,
+            ack,
+        };
+        match flush(&mut state, vec![staged]).await {
+            FlushOutcome::Continue => {}
+            FlushOutcome::Fatal(reason) => panic!("unexpected fatal flush outcome: {reason}"),
+        }
+
+        let seen = names.0.lock().unwrap().clone();
+        for expected in ["varve.resolve", "varve.commit", "varve.apply"] {
+            assert!(
+                seen.contains(&expected),
+                "missing span {expected}; saw {seen:?}"
+            );
+        }
     }
 }

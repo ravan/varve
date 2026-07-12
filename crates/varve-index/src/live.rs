@@ -31,6 +31,12 @@ pub struct LiveTable {
     in_: BTreeMap<Iid, BTreeSet<Iid>>,
     last_system_from: Option<Instant>,
     event_count: usize,
+    /// Running sum of `Event::approx_bytes` for every appended event —
+    /// maintained incrementally in `append` (never recomputed by walking
+    /// `events`), and reset to 0 exactly when the table itself resets (a
+    /// fresh `LiveTable` on flush). Used only for the writer's byte-watermark
+    /// flush trigger — never for correctness.
+    approx_bytes: usize,
 }
 
 impl LiveTable {
@@ -52,6 +58,7 @@ impl LiveTable {
         }
         self.last_system_from = Some(event.system_from);
         self.event_count += 1;
+        self.approx_bytes += event.approx_bytes();
         if let (Some(src), Some(dst)) = (event.src, event.dst) {
             self.out.entry(src).or_default().insert(event.iid);
             self.in_.entry(dst).or_default().insert(event.iid);
@@ -62,6 +69,13 @@ impl LiveTable {
 
     pub fn event_count(&self) -> usize {
         self.event_count
+    }
+
+    /// Running-sum in-memory footprint of every appended event (spec: never
+    /// recomputed — see the field doc). Reset to 0 with a fresh table (i.e.
+    /// on flush, when the writer swaps in a new `LiveTable`).
+    pub fn approx_bytes(&self) -> usize {
+        self.approx_bytes
     }
 
     /// Max `system_from` ever appended (`None` on an empty/new table).
@@ -399,6 +413,22 @@ mod tests {
         })
         .unwrap();
         assert_eq!(live.out_edges(&Iid::derive("g", "nodes", &[0])).count(), 0);
+    }
+
+    #[test]
+    fn approx_bytes_grows_with_appends_and_reflects_payload_size() {
+        let mut table = LiveTable::new();
+        assert_eq!(table.approx_bytes(), 0);
+        table
+            .append(put(1, 1, 1, "P", doc(&[("x", Value::Int(1))])))
+            .unwrap();
+        let small = table.approx_bytes();
+        assert!(small > 0);
+        let big_string: String = "a".repeat(1024);
+        table
+            .append(put(2, 2, 2, "P", doc(&[("blob", Value::Str(big_string))])))
+            .unwrap();
+        assert!(table.approx_bytes() >= small + 1024);
     }
 
     /// A fresh table's FIRST event for an edge iid is a Delete (no prior

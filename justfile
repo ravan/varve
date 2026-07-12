@@ -14,6 +14,9 @@ test:
 crash:
     VARVE_CRASH_ITERS=10 cargo test -p varve-testkit --release --test crash_recovery
 
+chaos secs="60":
+    VARVE_CHAOS_SECS={{secs}} cargo test -p varve-testkit --release --test chaos -- --nocapture
+
 s3-matrix backends="garage,seaweedfs,minio":
     VARVE_S3_BACKENDS={{backends}} cargo test -p varve-testkit --test backend_matrix -- --nocapture
 

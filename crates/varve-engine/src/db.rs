@@ -1,8 +1,10 @@
 use crate::clock::{Clock, MonotonicClock};
 use crate::compact::CompactionReport;
 use crate::const_eval::const_value;
+use crate::coord::{spawn_heartbeat, Coordinator, HeartbeatHandle, LeaseState, WriterGrant};
 use crate::follower::{spawn_follower, FollowerConfig, FollowerHandle, FollowerState};
 use crate::gc::{execute_gc, GcConfig, GcReport};
+use crate::metrics::{CacheTierStats, EngineMetrics, EngineMetricsSnapshot};
 use crate::node::{
     AppliedProgress, BasisToken, NodeRole, NodeRoles, NodeStatus, NodeTuning, ProgressState,
 };
@@ -26,6 +28,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{oneshot, watch};
+use tracing::Instrument;
 use varve_config::{BuildContext, ByteSize, Config, ConfigError, ConfigSection, RegistryError};
 use varve_gql::ast::{Expr, LabelSpec, QueryBody, Statement};
 use varve_gql::token::GqlError;
@@ -33,7 +36,7 @@ use varve_index::{decode_events, IndexError, LabelFilter, LiveTable};
 use varve_log::{LocalLog, Log, LogError, MemoryLog, DEFAULT_SEGMENT_MAX_BYTES};
 use varve_plan::PlanError;
 use varve_storage::{
-    memory_store, CachedStore, MemoryCache, ObjectStore, ProbeReport, StorageError,
+    memory_store, CacheStats, CachedStore, MemoryCache, ObjectStore, ProbeReport, StorageError,
 };
 use varve_types::{Instant, LogPosition, TemporalBounds, TypeError, Value};
 
@@ -108,6 +111,24 @@ pub enum EngineError {
     },
     #[error("invalid node configuration: {0}")]
     InvalidNodeConfig(String),
+    #[error("log epoch space (u16) is exhausted")]
+    EpochExhausted,
+    #[error("another writer is active at '{address}' (heartbeat {age_ms} ms old; stale after {takeover_after_ms} ms). Stop it, or wait for its heartbeat to go stale. This guard is best-effort (spec §12).")]
+    WriterActive {
+        address: String,
+        age_ms: u64,
+        takeover_after_ms: u64,
+    },
+    #[error("invalid [coordinator] configuration: {0}")]
+    InvalidCoordinatorConfig(String),
+    #[error("cas-failover requires the shared \"object-store\" log; [log] backend is \"{0}\"")]
+    CasRequiresSharedLog(String),
+    #[error("storage backend cannot support cas-failover: {reason}. Use [coordinator] backend = \"designated-writer\" (spec §12, D5).")]
+    CasUnsupported { reason: String },
+    #[error("writer fenced: {0}")]
+    WriterFenced(String),
+    #[error("writer submission queue is full; retry")]
+    Backpressure,
 }
 
 fn label_filter(labels: &LabelSpec) -> LabelFilter<'_> {
@@ -153,12 +174,22 @@ fn default_group_commit_max_bytes() -> ByteSize {
 struct StorageTuning {
     #[serde(default = "default_max_block_rows")]
     max_block_rows: usize,
+    /// Live-index memory watermark (Task 11): forces an early block flush
+    /// once the live tables' approximate in-memory footprint
+    /// (`Event::approx_bytes`, summed) reaches this, independent of
+    /// `max_block_rows` — bounds writer memory when rows are large.
+    #[serde(default = "default_max_live_bytes")]
+    max_live_bytes: ByteSize,
     #[serde(default = "default_flush_interval_ms")]
     flush_interval_ms: u64,
 }
 
 fn default_max_block_rows() -> usize {
     100_000
+}
+
+fn default_max_live_bytes() -> ByteSize {
+    ByteSize::from_bytes(512 * 1024 * 1024)
 }
 
 fn default_flush_interval_ms() -> u64 {
@@ -339,11 +370,50 @@ pub struct TxReceipt {
     pub side_effects: SideEffects,
 }
 
-const WRITER_ADVERTISEMENT_KEY: &str = "v1/writer.json";
+pub(crate) const WRITER_ADVERTISEMENT_KEY: &str = "v1/writer.json";
 
+/// Published to `v1/writer.json` by the writer role (spec §12: query nodes
+/// read it to redirect mutations; the `designated-writer`/`cas-failover`
+/// coordinators read it for the startup guard and lease renewal). Field
+/// declaration order is the canonical JSON key order.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
 pub struct WriterAdvertisement {
     pub address: String,
+    /// The advertising node's identity (Task 1 `generate_node_id`); empty
+    /// for advertisements published outside a coordinator (pre-slice-10
+    /// callers, or `#[serde(default)]` on documents written before this
+    /// field existed).
+    #[serde(default)]
+    pub node_id: String,
+    /// The log epoch this writer is appending at.
+    #[serde(default)]
+    pub epoch: u16,
+    /// Wall-clock microseconds at last publish — the coordinator startup
+    /// guard's freshness clock (spec §12; best-effort, see
+    /// `EngineError::WriterActive`).
+    #[serde(default)]
+    pub heartbeat_us: i64,
+}
+
+/// Free fn extracted from `Db::writer_advertisement`'s list-then-get
+/// pattern: shared by `Db` and the coordinators, which both need to read the
+/// current advertisement without going through a `Db` handle.
+pub(crate) async fn read_writer_advertisement(
+    store: &dyn ObjectStore,
+) -> Result<Option<WriterAdvertisement>, EngineError> {
+    let mut keys = store.list(WRITER_ADVERTISEMENT_KEY).await?;
+    if !keys.iter().any(|key| key == WRITER_ADVERTISEMENT_KEY) {
+        // object_store treats a list prefix as a directory and excludes
+        // an object whose key equals that prefix. Keep the exact-prefix
+        // check above for backends that include it, then inspect the
+        // parent inventory without ever probing GET on an absent key.
+        keys = store.list("v1").await?;
+    }
+    if !keys.iter().any(|key| key == WRITER_ADVERTISEMENT_KEY) {
+        return Ok(None);
+    }
+    let bytes = store.get(WRITER_ADVERTISEMENT_KEY).await?;
+    Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
 /// Default in-memory cache budget for `Db::memory()`/`Db::local()`, which
@@ -512,13 +582,40 @@ struct DbInner {
     /// `scan_specs` quantifier bounds against it.
     max_path_depth: u32,
     query_limits: varve_plan::QueryLimits,
+    /// The writer-role startup gate and advertisement/lease heartbeat (spec
+    /// §12); `None` for `Db::memory()`/`Db::local()` and non-writer nodes.
+    coordinator: Option<Arc<dyn Coordinator>>,
+    /// This node's process-unique identity (Task 1 `generate_node_id`) —
+    /// used to tag the plain-PUT writer advertisement when no coordinator is
+    /// configured; the coordinator path tags its own copy internally.
+    node_id: String,
+    /// Abort-on-drop handle for the background heartbeat task; `None` when
+    /// no coordinator is configured, the node isn't writer-role, or
+    /// `coordinator.heartbeat_interval()` is `Duration::ZERO`.
+    #[allow(dead_code)] // ownership keeps the heartbeat task alive for the node lifetime
+    heartbeat: Option<HeartbeatHandle>,
+    /// Writer-owned counters (Task 12, spec §12), shared with `WriterState`;
+    /// reading them is I/O-free.
+    metrics: Arc<EngineMetrics>,
+    /// One `(tier name, stats)` pair per configured cache tier, in the same
+    /// order as `[cache] tiers` (Task 12); read I/O-free for `Db::metrics`.
+    cache_tiers: CacheTierList,
 }
 
-fn cached(store: Arc<dyn ObjectStore>) -> Arc<dyn ObjectStore> {
-    Arc::new(CachedStore::new(
+/// One `(tier name, stats)` pair per configured cache tier (Task 12); see
+/// `DbInner::cache_tiers` and `EngineMetricsSnapshot::cache_tiers`.
+type CacheTierList = Vec<(String, Arc<CacheStats>)>;
+
+/// `Db::memory`/`Db::local`'s single default cache tier, named `"memory"`
+/// for the `EngineMetricsSnapshot::cache_tiers` label.
+fn cached(store: Arc<dyn ObjectStore>) -> (Arc<dyn ObjectStore>, CacheTierList) {
+    let stats = Arc::new(CacheStats::default());
+    let wrapped = Arc::new(CachedStore::with_stats(
         store,
         Arc::new(MemoryCache::new(DEFAULT_CACHE_MEMORY_BYTES)),
-    ))
+        Arc::clone(&stats),
+    ));
+    (wrapped, vec![("memory".to_string(), stats)])
 }
 
 impl std::fmt::Debug for Db {
@@ -788,10 +885,12 @@ impl Db {
     /// Volatile database: memory log, zero group-commit window (there is no
     /// fsync to amortize — decision 11). Requires a Tokio runtime.
     pub fn memory() -> Db {
+        let (store, cache_tiers) = cached(memory_store());
         Db::assemble(
             GraphsState::new(),
             Arc::new(MemoryLog::new()),
-            cached(memory_store()),
+            store,
+            cache_tiers,
             Arc::new(MonotonicClock::new()),
             WriterConfig {
                 window: Duration::ZERO,
@@ -809,6 +908,7 @@ impl Db {
                 batch_records: 1024,
             },
             Duration::from_millis(5000),
+            None,
         )
     }
 
@@ -817,6 +917,7 @@ impl Db {
         graphs_state: GraphsState,
         log: Arc<dyn varve_log::Log>,
         store: Arc<dyn ObjectStore>,
+        cache_tiers: CacheTierList,
         clock: Arc<dyn Clock>,
         cfg: WriterConfig,
         next_tx_id: u64,
@@ -828,11 +929,17 @@ impl Db {
         roles: NodeRoles,
         follower_config: FollowerConfig,
         basis_timeout: Duration,
+        coordinator: Option<Arc<dyn Coordinator>>,
     ) -> Db {
         let state = Arc::new(RwLock::new(graphs_state));
         let functions = Arc::new(varve_plan::FunctionRegistry::with_builtins());
-        let (progress_tx, progress_rx) =
-            watch::channel(ProgressState::running(next_tx_id, durable_watermark));
+        let metrics = Arc::new(EngineMetrics::default());
+        let (progress_tx, progress_rx) = watch::channel(ProgressState::running(
+            next_tx_id,
+            durable_watermark,
+            durable_watermark,
+        ));
+        let (lease_tx, lease_rx) = watch::channel(LeaseState::Unfenced);
         let writer_state = WriterState {
             state: Arc::clone(&state),
             store: Arc::clone(&store),
@@ -845,11 +952,21 @@ impl Db {
             next_block_id,
             durable_watermark,
             progress: progress_tx.clone(),
+            lease: lease_rx,
+            metrics: Arc::clone(&metrics),
         };
-        let writer = roles
-            .contains(NodeRole::Writer)
-            .then(|| spawn_writer(writer_state, cfg));
-        let follower = if roles.contains(NodeRole::Writer) {
+        let is_writer = roles.contains(NodeRole::Writer);
+        // Heartbeat only for a writer-role node with a coordinator whose
+        // heartbeat_interval() is non-zero — Task 6's lifecycle wiring; the
+        // handle lives on DbInner so dropping the Db aborts the task.
+        let heartbeat = match (&coordinator, is_writer) {
+            (Some(c), true) if c.heartbeat_interval() > Duration::ZERO => {
+                Some(spawn_heartbeat(Arc::clone(c), lease_tx))
+            }
+            _ => None,
+        };
+        let writer = is_writer.then(|| spawn_writer(writer_state, cfg));
+        let follower = if is_writer {
             None
         } else {
             Some(spawn_follower(FollowerState {
@@ -859,6 +976,7 @@ impl Db {
                 cursor: durable_watermark,
                 config: follower_config,
                 progress: progress_tx,
+                fences: crate::coord::fence::FenceMap::default(),
             }))
         };
         Db {
@@ -876,6 +994,11 @@ impl Db {
                 follower,
                 max_path_depth,
                 query_limits,
+                coordinator,
+                node_id: crate::coord::identity::generate_node_id(),
+                heartbeat,
+                metrics,
+                cache_tiers,
             }),
         }
     }
@@ -921,10 +1044,16 @@ impl Db {
         let mut store: Arc<dyn ObjectStore> = Arc::clone(&raw_store);
         // Innermost tier wraps first, so the FIRST listed tier is the first
         // one checked on a read.
+        let mut cache_tiers: CacheTierList = Vec::new();
         for name in cache_config.tiers.iter().rev() {
             let tier = registries.cache.build(name, &cache_section, &ctx)?;
-            store = Arc::new(CachedStore::new(store, tier));
+            let stats = Arc::new(CacheStats::default());
+            store = Arc::new(CachedStore::with_stats(store, tier, Arc::clone(&stats)));
+            cache_tiers.push((name.clone(), stats));
         }
+        // Restore `[cache] tiers` declaration order (the loop above walked
+        // it in reverse to wrap innermost-first).
+        cache_tiers.reverse();
 
         let clock_section = config.section("clock").unwrap_or_else(ConfigSection::empty);
         let clock = registries.clock.build(
@@ -932,6 +1061,9 @@ impl Db {
             &clock_section,
             &ctx,
         )?;
+        // The coordinator factories (below) read the clock through the
+        // context, same as they read the raw store.
+        ctx.insert::<Arc<dyn Clock>>(Arc::clone(&clock));
 
         let log_tuning: LogTuning = log_section.get()?;
         let storage_tuning: StorageTuning = storage_section.get()?;
@@ -948,13 +1080,47 @@ impl Db {
             window: Duration::from_millis(log_tuning.group_commit_window_ms),
             max_bytes: log_tuning.group_commit_max_bytes.as_usize(),
             max_block_rows: storage_tuning.max_block_rows,
+            max_live_bytes: storage_tuning.max_live_bytes.as_usize(),
             flush_interval: Duration::from_millis(storage_tuning.flush_interval_ms),
+            queue_len: node_tuning.submission_queue_len,
         };
-        let recovered = recover(log.as_ref(), clock.as_ref(), &store).await?;
+
+        // Coordinator (spec §12): the writer-role startup gate. `acquire`
+        // runs BEFORE recovery — a cas-failover standby (Task 7) blocks
+        // here, so recovery only ever runs once this node holds the write
+        // lease (or designated-writer's best-effort guard has cleared).
+        let coord_section = config
+            .section("coordinator")
+            .unwrap_or_else(ConfigSection::empty);
+        let coord_backend = coord_section
+            .backend()
+            .unwrap_or("designated-writer")
+            .to_string();
+        if coord_backend == "cas-failover" && log_backend != "object-store" {
+            return Err(EngineError::CasRequiresSharedLog(log_backend));
+        }
+        let coordinator = if roles.contains(NodeRole::Writer) {
+            Some(
+                registries
+                    .coordinator
+                    .build(&coord_backend, &coord_section, &ctx)?,
+            )
+        } else {
+            None
+        };
+        let grant = match &coordinator {
+            Some(c) => c.acquire(&log).await?, // may BLOCK (cas standby)
+            None => WriterGrant { epoch: None },
+        };
+        let recovered = recover(log.as_ref(), clock.as_ref(), &store).await?; // fence-aware since Task 3
+        if let Some(epoch) = grant.epoch {
+            log.start_epoch(epoch).await?;
+        }
         Ok(Self::assemble(
             recovered.state,
             log,
             store,
+            cache_tiers,
             clock,
             cfg,
             recovered.next_tx_id,
@@ -969,6 +1135,7 @@ impl Db {
                 batch_records: node_tuning.tail_batch_records,
             },
             Duration::from_millis(node_tuning.basis_timeout_ms),
+            coordinator,
         ))
     }
 
@@ -980,13 +1147,14 @@ impl Db {
         let dir = dir.as_ref();
         let log: Arc<dyn Log> =
             Arc::new(LocalLog::open(&dir.join("log"), DEFAULT_SEGMENT_MAX_BYTES)?);
-        let store = cached(varve_storage::local_store(&dir.join("store"))?);
+        let (store, cache_tiers) = cached(varve_storage::local_store(&dir.join("store"))?);
         let clock: Arc<dyn Clock> = Arc::new(MonotonicClock::new());
         let recovered = recover(log.as_ref(), clock.as_ref(), &store).await?;
         Ok(Self::assemble(
             recovered.state,
             log,
             store,
+            cache_tiers,
             clock,
             WriterConfig::default(),
             recovered.next_tx_id,
@@ -1001,6 +1169,7 @@ impl Db {
                 batch_records: 1024,
             },
             Duration::from_millis(5000),
+            None,
         ))
     }
 
@@ -1009,30 +1178,26 @@ impl Db {
     /// is durable AND visible.
     pub async fn publish_writer(&self, address: &str) -> Result<(), EngineError> {
         self.require_role(NodeRole::Writer)?;
-        let bytes = serde_json::to_vec(&WriterAdvertisement {
-            address: address.to_string(),
-        })?;
-        self.inner
-            .store
-            .put(WRITER_ADVERTISEMENT_KEY, bytes::Bytes::from(bytes))
-            .await?;
-        Ok(())
+        match &self.inner.coordinator {
+            Some(coordinator) => coordinator.advertise(address).await,
+            None => {
+                let bytes = serde_json::to_vec(&WriterAdvertisement {
+                    address: address.to_string(),
+                    node_id: self.inner.node_id.clone(),
+                    epoch: 0,
+                    heartbeat_us: self.inner.clock.watermark().as_micros(),
+                })?;
+                self.inner
+                    .store
+                    .put(WRITER_ADVERTISEMENT_KEY, bytes::Bytes::from(bytes))
+                    .await?;
+                Ok(())
+            }
+        }
     }
 
     pub async fn writer_advertisement(&self) -> Result<Option<WriterAdvertisement>, EngineError> {
-        let mut keys = self.inner.store.list(WRITER_ADVERTISEMENT_KEY).await?;
-        if !keys.iter().any(|key| key == WRITER_ADVERTISEMENT_KEY) {
-            // object_store treats a list prefix as a directory and excludes
-            // an object whose key equals that prefix. Keep the exact-prefix
-            // check above for backends that include it, then inspect the
-            // parent inventory without ever probing GET on an absent key.
-            keys = self.inner.store.list("v1").await?;
-        }
-        if !keys.iter().any(|key| key == WRITER_ADVERTISEMENT_KEY) {
-            return Ok(None);
-        }
-        let bytes = self.inner.store.get(WRITER_ADVERTISEMENT_KEY).await?;
-        Ok(Some(serde_json::from_slice(&bytes)?))
+        read_writer_advertisement(self.inner.store.as_ref()).await
     }
 
     pub async fn verify(&self) -> Result<VerifyReport, EngineError> {
@@ -1046,12 +1211,7 @@ impl Db {
 
     pub async fn compact_once(&self) -> Result<CompactionReport, EngineError> {
         self.require_role(NodeRole::Compactor)?;
-        self.inner
-            .writer
-            .as_ref()
-            .ok_or(EngineError::RoleDisabled(NodeRole::Writer))?
-            .compact_once()
-            .await
+        self.writer_handle()?.compact_once().await
     }
 
     pub async fn gc_once(&self) -> Result<GcReport, EngineError> {
@@ -1078,6 +1238,60 @@ impl Db {
         params: &BTreeMap<String, Value>,
         user: &str,
     ) -> Result<TxReceipt, EngineError> {
+        let (graph, statements) = self.parse_mutation_program(gql)?;
+        let (ack, rx) = oneshot::channel();
+        // `varve.submit` (Task 13): the submit+ack future, instrumented
+        // rather than `entered()` since it awaits twice (the writer-queue
+        // send and the ack channel).
+        async {
+            self.writer_handle()?
+                .submit(Submission {
+                    statements,
+                    params: params.clone(),
+                    graph,
+                    user: user.to_string(),
+                    ack,
+                })
+                .await?;
+            rx.await.map_err(|_| EngineError::WriterUnavailable)?
+        }
+        .instrument(tracing::info_span!("varve.submit", user = %user))
+        .await
+    }
+
+    /// Like [`Self::execute_as`], but returns `EngineError::Backpressure`
+    /// instead of waiting when the writer's submission queue is full — the
+    /// server's `/v1/tx` 429 path (slice 10).
+    pub async fn try_execute_as(
+        &self,
+        gql: &str,
+        params: &BTreeMap<String, Value>,
+        user: &str,
+    ) -> Result<TxReceipt, EngineError> {
+        let (graph, statements) = self.parse_mutation_program(gql)?;
+        let (ack, rx) = oneshot::channel();
+        if let Err(error) = self.writer_handle()?.try_submit(Submission {
+            statements,
+            params: params.clone(),
+            graph,
+            user: user.to_string(),
+            ack,
+        }) {
+            if matches!(error, EngineError::Backpressure) {
+                self.inner
+                    .metrics
+                    .backpressure_rejections
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            return Err(error);
+        }
+        rx.await.map_err(|_| EngineError::WriterUnavailable)?
+    }
+
+    /// Shared preamble for `execute_as`/`try_execute_as`: requires the
+    /// Writer role, parses `gql`, resolves the target graph, and rejects a
+    /// query (or empty program) before it ever reaches the writer queue.
+    fn parse_mutation_program(&self, gql: &str) -> Result<(String, Vec<Statement>), EngineError> {
         self.require_role(NodeRole::Writer)?;
         let program = varve_gql::parse_program(gql)?;
         let graph = program
@@ -1092,20 +1306,16 @@ impl Db {
         {
             return Err(EngineError::NotAMutation);
         }
-        let (ack, rx) = oneshot::channel();
+        Ok((graph, program.statements))
+    }
+
+    /// Borrows the writer handle, or `RoleDisabled(Writer)` if this node has
+    /// no Writer role.
+    fn writer_handle(&self) -> Result<&WriterHandle, EngineError> {
         self.inner
             .writer
             .as_ref()
-            .ok_or(EngineError::RoleDisabled(NodeRole::Writer))?
-            .submit(Submission {
-                statements: program.statements,
-                params: params.clone(),
-                graph,
-                user: user.to_string(),
-                ack,
-            })
-            .await?;
-        rx.await.map_err(|_| EngineError::WriterUnavailable)?
+            .ok_or(EngineError::RoleDisabled(NodeRole::Writer))
     }
 
     /// Builds an owned read query. Await it to collect Arrow batches, or call
@@ -1153,87 +1363,132 @@ impl Db {
         gql: &str,
         params: &BTreeMap<String, Value>,
     ) -> Result<SendableRecordBatchStream, EngineError> {
-        let program = varve_gql::parse_program(gql)?;
-        let graph = program
-            .use_graph
-            .unwrap_or_else(|| DEFAULT_GRAPH.to_string());
-        validate_user_graph_name(&graph)?;
-        if !self
-            .inner
-            .state
-            .read()
-            .map_err(|_| EngineError::Poisoned)?
-            .graphs
-            .contains_key(&graph)
-        {
-            return Err(EngineError::UnknownGraph(graph));
-        }
-        if program.statements.len() != 1 {
-            return Err(EngineError::NotAQuery);
-        }
-        let mut statements = program.statements;
-        let Statement::Query(q) = statements.remove(0) else {
-            return Err(EngineError::NotAQuery);
+        // `varve.query.parse` (Task 13): fully synchronous — parsing,
+        // graph-name validation/existence and the query-shape checks never
+        // await, so this is a plain `entered()` guard, dropped well before
+        // any `.await` below. Fields are deliberately omitted: the only
+        // candidate (the GQL text itself) is exactly what "keep fields
+        // cheap" rules out.
+        let (graph, q) = {
+            let _g = tracing::info_span!("varve.query.parse").entered();
+            let program = varve_gql::parse_program(gql)?;
+            let graph = program
+                .use_graph
+                .unwrap_or_else(|| DEFAULT_GRAPH.to_string());
+            validate_user_graph_name(&graph)?;
+            if !self
+                .inner
+                .state
+                .read()
+                .map_err(|_| EngineError::Poisoned)?
+                .graphs
+                .contains_key(&graph)
+            {
+                return Err(EngineError::UnknownGraph(graph));
+            }
+            if program.statements.len() != 1 {
+                return Err(EngineError::NotAQuery);
+            }
+            let mut statements = program.statements;
+            let Statement::Query(q) = statements.remove(0) else {
+                return Err(EngineError::NotAQuery);
+            };
+            (graph, q)
         };
         let now = self.inner.clock.watermark();
         if !q.unions.is_empty() {
-            let first = self
-                .query_body_batches(&graph, &q.first, params, now)
-                .await?;
-            let mut unions = Vec::with_capacity(q.unions.len());
-            for (kind, body) in &q.unions {
-                unions.push((
-                    kind.clone(),
-                    self.query_body_batches(&graph, body, params, now).await?,
-                ));
+            // Union queries: mirror the single-body path below — `plan`
+            // covers scan-spec/scan-input construction for every arm (first
+            // + each union arm), and `execute` covers the actual per-arm
+            // evaluation plus the union merge. That keeps the two spans
+            // meaning the same thing here as they do for a non-union query:
+            // `varve.query.execute` is the execution-dominant span, not
+            // `varve.query.plan`.
+            let (first_plan, union_plans) = async {
+                let first_plan = self.plan_body_inputs(&graph, &q.first, params, now).await?;
+                let mut union_plans = Vec::with_capacity(q.unions.len());
+                for (_, body) in &q.unions {
+                    union_plans.push(self.plan_body_inputs(&graph, body, params, now).await?);
+                }
+                Ok::<_, EngineError>((first_plan, union_plans))
             }
-            return Ok(varve_plan::union_query_results_stream(
-                first,
-                unions,
-                self.inner.functions.as_ref(),
-            )
+            .instrument(tracing::info_span!("varve.query.plan"))
+            .await?;
+            return Ok(async {
+                let (first_specs, first_inputs) = first_plan;
+                let first = varve_plan::execute_body_with_limits(
+                    &q.first,
+                    &first_specs,
+                    first_inputs,
+                    self.inner.functions.as_ref(),
+                    self.inner.query_limits.path_expand,
+                    params,
+                )
+                .await?;
+                let mut unions = Vec::with_capacity(union_plans.len());
+                for ((kind, body), (specs, inputs)) in q.unions.iter().zip(union_plans) {
+                    let batches = varve_plan::execute_body_with_limits(
+                        body,
+                        &specs,
+                        inputs,
+                        self.inner.functions.as_ref(),
+                        self.inner.query_limits.path_expand,
+                        params,
+                    )
+                    .await?;
+                    unions.push((kind.clone(), batches));
+                }
+                varve_plan::union_query_results_stream(first, unions, self.inner.functions.as_ref())
+                    .await
+            }
+            .instrument(tracing::info_span!("varve.query.execute", graph = %graph))
             .await?);
         }
-        let clause_specs = varve_plan::scan_specs_with_params(
-            &q.first,
-            &graph,
-            self.inner.max_path_depth,
-            params,
-        )?;
-        let bounds = bounds_per_clause(&q.first, now);
-        let fast_path = if q.first.clauses.len() == 1
-            && clause_specs.len() == 1
-            && matches!(
-                &q.first.clauses[0],
-                varve_gql::ast::Clause::Match {
-                    optional: false,
-                    paths,
-                    ..
-                } if paths.len() == 1
-            ) {
-            self.plan_fast_path(&graph, &q, &clause_specs[0].specs, params, &bounds[0])
-                .await?
-        } else {
-            None
-        };
-        let fast_paths = fast_path.map(|fast_path| {
-            let mut paths: Vec<Option<FastPath>> = std::iter::repeat_with(|| None)
-                .take(clause_specs.len())
-                .collect();
-            paths[0] = Some(fast_path);
-            paths
-        });
-        let inputs = scan_inputs_for(
-            &self.inner.state,
-            &self.inner.store,
-            &graph,
-            &clause_specs,
-            &bounds,
-            params,
-            self.inner.query_limits,
-            fast_paths.as_deref(),
-            None,
-        )
+        let (clause_specs, inputs) = async {
+            let clause_specs = varve_plan::scan_specs_with_params(
+                &q.first,
+                &graph,
+                self.inner.max_path_depth,
+                params,
+            )?;
+            let bounds = bounds_per_clause(&q.first, now);
+            let fast_path = if q.first.clauses.len() == 1
+                && clause_specs.len() == 1
+                && matches!(
+                    &q.first.clauses[0],
+                    varve_gql::ast::Clause::Match {
+                        optional: false,
+                        paths,
+                        ..
+                    } if paths.len() == 1
+                ) {
+                self.plan_fast_path(&graph, &q, &clause_specs[0].specs, params, &bounds[0])
+                    .await?
+            } else {
+                None
+            };
+            let fast_paths = fast_path.map(|fast_path| {
+                let mut paths: Vec<Option<FastPath>> = std::iter::repeat_with(|| None)
+                    .take(clause_specs.len())
+                    .collect();
+                paths[0] = Some(fast_path);
+                paths
+            });
+            let inputs = scan_inputs_for(
+                &self.inner.state,
+                &self.inner.store,
+                &graph,
+                &clause_specs,
+                &bounds,
+                params,
+                self.inner.query_limits,
+                fast_paths.as_deref(),
+                None,
+            )
+            .await?;
+            Ok::<_, EngineError>((clause_specs, inputs))
+        }
+        .instrument(tracing::info_span!("varve.query.plan"))
         .await?;
         Ok(varve_plan::execute_body_stream_with_limits(
             &q.first,
@@ -1243,16 +1498,29 @@ impl Db {
             self.inner.query_limits.path_expand,
             params,
         )
+        .instrument(tracing::info_span!("varve.query.execute", graph = %graph))
         .await?)
     }
 
-    async fn query_body_batches(
+    /// Task 13 fix: split out of the former `query_body_batches` so the
+    /// union path above can attribute plan vs execute the same way the
+    /// single-body path does. This covers only scan-spec and scan-input
+    /// construction (the planning half); evaluation
+    /// (`execute_body_with_limits`) is left to the caller so it lands under
+    /// `varve.query.execute` instead of being folded into `varve.query.plan`.
+    async fn plan_body_inputs(
         &self,
         graph: &str,
         body: &QueryBody,
         params: &BTreeMap<String, Value>,
         now: Instant,
-    ) -> Result<Vec<RecordBatch>, EngineError> {
+    ) -> Result<
+        (
+            Vec<varve_plan::ClauseSpecs>,
+            Vec<Vec<varve_plan::ScanInput>>,
+        ),
+        EngineError,
+    > {
         let clause_specs =
             varve_plan::scan_specs_with_params(body, graph, self.inner.max_path_depth, params)?;
         let bounds = bounds_per_clause(body, now);
@@ -1268,15 +1536,7 @@ impl Db {
             None,
         )
         .await?;
-        Ok(varve_plan::execute_body_with_limits(
-            body,
-            &clause_specs,
-            inputs,
-            self.inner.functions.as_ref(),
-            self.inner.query_limits.path_expand,
-            params,
-        )
-        .await?)
+        Ok((clause_specs, inputs))
     }
 
     /// Task 12 fast-path selection: decide whether this query's shape is one
@@ -1474,9 +1734,10 @@ impl Db {
     /// ever need to keep increasing).
     pub async fn probe_capabilities(&self) -> Result<ProbeReport, EngineError> {
         let key = format!(
-            "{}/{}",
+            "{}/{}-{}",
             varve_storage::PROBE_PREFIX,
-            self.inner.clock.next().as_micros()
+            self.inner.clock.next().as_micros(),
+            crate::coord::identity::generate_node_id()
         );
         Ok(varve_storage::probe_conditional_put(self.inner.store.as_ref(), &key).await?)
     }
@@ -1507,8 +1768,61 @@ impl Db {
             manifest_watermark: manifest.as_ref().map_or(LogPosition::ZERO, |value| {
                 LogPosition::from_u64(value.watermark)
             }),
+            log_head: progress.log_head,
             follower_error: progress.follower_error,
         })
+    }
+
+    /// I/O-free engine metrics (Task 12, spec §12, decision 10): the writer's
+    /// atomics plus one read-lock pass over the in-memory queryable
+    /// inventory. Never touches the object store.
+    pub fn metrics(&self) -> EngineMetricsSnapshot {
+        use std::sync::atomic::Ordering;
+        let state = self.inner.state.read().unwrap_or_else(|e| e.into_inner());
+        let live_rows = state.live_rows() as u64;
+        let live_bytes = state.live_bytes() as u64;
+        let mut persisted_tries: u64 = 0;
+        let mut compaction_debt_tries: u64 = 0;
+        for graph in state.graphs.values() {
+            for scope_len in [
+                graph.nodes.tries.len(),
+                graph.edges.tries.len(),
+                graph.adj_out.len(),
+                graph.adj_in.len(),
+            ] {
+                persisted_tries += scope_len as u64;
+                compaction_debt_tries += scope_len.saturating_sub(1) as u64;
+            }
+        }
+        drop(state);
+        let cache_tiers = self
+            .inner
+            .cache_tiers
+            .iter()
+            .map(|(tier, stats)| CacheTierStats {
+                tier: tier.clone(),
+                hits: stats.hits.load(Ordering::Relaxed),
+                misses: stats.misses.load(Ordering::Relaxed),
+            })
+            .collect();
+        EngineMetricsSnapshot {
+            txs_committed: self.inner.metrics.txs_committed.load(Ordering::Relaxed),
+            events_committed: self.inner.metrics.events_committed.load(Ordering::Relaxed),
+            commit_failures: self.inner.metrics.commit_failures.load(Ordering::Relaxed),
+            flush_blocks: self.inner.metrics.flush_blocks.load(Ordering::Relaxed),
+            flush_failures: self.inner.metrics.flush_failures.load(Ordering::Relaxed),
+            compaction_runs: self.inner.metrics.compaction_runs.load(Ordering::Relaxed),
+            backpressure_rejections: self
+                .inner
+                .metrics
+                .backpressure_rejections
+                .load(Ordering::Relaxed),
+            live_rows,
+            live_bytes,
+            persisted_tries,
+            compaction_debt_tries,
+            cache_tiers,
+        }
     }
 
     fn require_role(&self, role: NodeRole) -> Result<(), EngineError> {
@@ -1601,7 +1915,39 @@ async fn recover(
     };
     apply_persisted_catalog_entries(&mut state, store).await?;
 
+    // Epoch fences (spec §12): a record at a dead position is a zombie —
+    // written by a writer whose epoch was seized after a failover — and its
+    // tx id is reassigned by the successor epoch's writer. Skip it BEFORE it
+    // reaches next_tx_id, the clock floor, or the state fold. `jump` then
+    // advances the watermark straight past the whole dead epoch in one step
+    // (rather than one skipped record at a time): an unreplayed dead suffix
+    // must never be re-read on the next recovery.
+    let fences = crate::coord::fence::load_fences(store.as_ref()).await?;
+
+    // Fence-aware contiguity guard (mirrors `follower::apply_range_once` and
+    // `verify::verify_database`): `expected` tracks the cursor a LIVE record
+    // must land on. A live record at any other position means the log
+    // silently dropped something recovery cannot account for — e.g. a stale
+    // manifest watermark behind trimmed records — and must fail loudly
+    // rather than replay a corrupted-looking prefix. Dead (fenced) records
+    // instead jump `expected` across the epoch boundary via `FenceMap::jump`,
+    // the exact helper the follower and verify use, so a legitimate
+    // successor-epoch record right after a fence is never flagged as a gap.
+    let mut expected = watermark;
     for (position, record) in log.tail(watermark).await? {
+        if !fences.is_live(position) {
+            if let Some(resume) = fences.jump(position)? {
+                watermark = watermark.max(resume);
+                expected = expected.max(resume);
+            }
+            continue;
+        }
+        if position != expected {
+            return Err(EngineError::LogGap {
+                expected,
+                actual: position,
+            });
+        }
         let decoded = decode_log_record(&record)?;
         let system_time = decoded.system_time;
         let tx_id = decoded.tx_id;
@@ -1609,6 +1955,7 @@ async fn recover(
         next_tx_id = next_tx_id.max(tx_id);
         max_system = Some(max_system.map_or(system_time, |current| current.max(system_time)));
         watermark = watermark.max(position.advance(1)?);
+        expected = position.advance(1)?;
     }
 
     if let Some(floor) = max_system {
@@ -1656,7 +2003,11 @@ mod tests {
 
     #[test]
     fn timeout_boundary_prefers_follower_error_over_satisfied_basis() {
-        let (progress_tx, progress) = watch::channel(ProgressState::running(0, LogPosition::ZERO));
+        let (progress_tx, progress) = watch::channel(ProgressState::running(
+            0,
+            LogPosition::ZERO,
+            LogPosition::ZERO,
+        ));
         progress_tx.send_modify(|state| {
             state.applied.tx_id = 7;
             state.follower_error = Some("terminal".into());
@@ -1671,7 +2022,8 @@ mod tests {
     #[test]
     fn timeout_boundary_accepts_at_basis_at_or_below_current_position() {
         let position = LogPosition::from_u64(7);
-        let (_progress_tx, progress) = watch::channel(ProgressState::running(3, position));
+        let (_progress_tx, progress) =
+            watch::channel(ProgressState::running(3, position, position));
 
         assert!(basis_result_after_timeout(&progress, BasisToken::At(position)).is_ok());
         assert!(
@@ -1681,7 +2033,11 @@ mod tests {
 
     #[test]
     fn timeout_boundary_reports_closed_progress_channel_before_timeout() {
-        let (progress_tx, progress) = watch::channel(ProgressState::running(0, LogPosition::ZERO));
+        let (progress_tx, progress) = watch::channel(ProgressState::running(
+            0,
+            LogPosition::ZERO,
+            LogPosition::ZERO,
+        ));
         drop(progress_tx);
 
         assert!(matches!(
@@ -1692,7 +2048,11 @@ mod tests {
 
     #[test]
     fn timeout_boundary_observes_final_update_before_closed_channel() {
-        let (progress_tx, progress) = watch::channel(ProgressState::running(0, LogPosition::ZERO));
+        let (progress_tx, progress) = watch::channel(ProgressState::running(
+            0,
+            LogPosition::ZERO,
+            LogPosition::ZERO,
+        ));
         progress_tx.send_modify(|state| {
             state.applied.tx_id = 7;
             state.applied.log_position = LogPosition::from_u64(8);
@@ -1704,8 +2064,11 @@ mod tests {
 
     #[test]
     fn timeout_boundary_uses_latest_progress_for_true_timeout() {
-        let (_progress_tx, progress) =
-            watch::channel(ProgressState::running(3, LogPosition::from_u64(4)));
+        let (_progress_tx, progress) = watch::channel(ProgressState::running(
+            3,
+            LogPosition::from_u64(4),
+            LogPosition::from_u64(4),
+        ));
 
         assert!(matches!(
             basis_result_after_timeout(&progress, BasisToken::TxId(5)),
@@ -1724,7 +2087,11 @@ mod tests {
             let next = calls.get() + 1;
             calls.set(next);
             BasisTimeoutObservation {
-                current: ProgressState::running(next, LogPosition::from_u64(next)),
+                current: ProgressState::running(
+                    next,
+                    LogPosition::from_u64(next),
+                    LogPosition::from_u64(next),
+                ),
                 channel: BasisTimeoutChannel::Pending,
             }
         });
@@ -1826,6 +2193,78 @@ mod tests {
             .out_edges(&ada)
             .collect();
         assert_eq!(out.len(), 1);
+    }
+
+    /// Slice 10: on an idle `Db` (writer queue nowhere near full),
+    /// `try_execute_as` behaves exactly like `execute_as` — the full-queue
+    /// `Backpressure` path is exercised deterministically at the
+    /// `WriterHandle` level in `writer::tests`.
+    #[tokio::test]
+    async fn try_execute_as_succeeds_on_an_idle_writer() {
+        let db = Db::memory();
+        let params = BTreeMap::new();
+        let receipt = db
+            .try_execute_as("INSERT (:Person {_id: 1, name: 'Ada'})", &params, "ada")
+            .await
+            .unwrap();
+        assert_eq!(receipt.side_effects.nodes_created, 1);
+        let s = db.inner.state.read().unwrap();
+        assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().nodes.live.event_count(), 1);
+    }
+
+    /// Task 12: `try_execute_as` increments `backpressure_rejections` on a
+    /// `Backpressure` rejection. Rather than racing a real writer loop (see
+    /// `writer::tests::try_submit_on_a_full_queue_is_backpressure`), this
+    /// polls each submission's future exactly once (`now_or_never`): the
+    /// synchronous `try_submit` prefix runs on that single poll, then the
+    /// future either pends at `rx.await` (accepted) or resolves immediately
+    /// with `Err(Backpressure)` (rejected) — the writer task itself never
+    /// gets a chance to run, since nothing here ever awaits.
+    #[tokio::test]
+    async fn try_execute_as_backpressure_increments_the_counter() {
+        use futures::FutureExt;
+
+        let (store, cache_tiers) = cached(memory_store());
+        let db = Db::assemble(
+            GraphsState::new(),
+            Arc::new(MemoryLog::new()),
+            store,
+            cache_tiers,
+            Arc::new(MonotonicClock::new()),
+            WriterConfig {
+                window: Duration::ZERO,
+                queue_len: 1,
+                ..WriterConfig::default()
+            },
+            0,
+            0,
+            LogPosition::ZERO,
+            default_max_path_depth(),
+            QueryTuning::default().limits(),
+            GcConfig::default(),
+            NodeRoles::all(),
+            FollowerConfig {
+                poll_interval: Duration::from_millis(50),
+                batch_records: 1024,
+            },
+            Duration::from_millis(5000),
+            None,
+        );
+        let params = BTreeMap::new();
+
+        // Fills the queue_len=1 channel's one slot; pends at `rx.await`.
+        let _first = db
+            .try_execute_as("INSERT (:P {_id: 1})", &params, "u")
+            .now_or_never();
+
+        // The channel has no room left, so this must reject synchronously.
+        let second = db
+            .try_execute_as("INSERT (:P {_id: 2})", &params, "u")
+            .now_or_never()
+            .expect("a synchronous Backpressure rejection never pends");
+        assert!(matches!(second, Err(EngineError::Backpressure)));
+
+        assert_eq!(db.metrics().backpressure_rejections, 1);
     }
 
     #[tokio::test]
@@ -2159,6 +2598,139 @@ mod tests {
         }
     }
 
+    /// Live-index memory watermark (Task 11): `max_block_rows` is set far out
+    /// of reach (1_000_000) so only the byte watermark can trip the flush.
+    /// `max_live_bytes = "4KiB"` is small enough that a handful of ~1 KiB
+    /// docs cross it well before any row-count trigger would.
+    fn byte_watermark_config(dir: &std::path::Path) -> Config {
+        let log_dir = format!("{:?}", dir.join("log").display().to_string());
+        let store_dir = format!("{:?}", dir.join("store").display().to_string());
+        Config::from_toml_str(&format!(
+            "[log]\nbackend = \"local\"\ngroup_commit_window_ms = 1\n\
+             [log.local]\ndir = {log_dir}\n\
+             [storage]\nbackend = \"local\"\nmax_block_rows = 1000000\n\
+             max_live_bytes = \"4KiB\"\nflush_interval_ms = 0\n\
+             [storage.local]\ndir = {store_dir}\n"
+        ))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn live_bytes_watermark_forces_an_early_flush() {
+        use datafusion::arrow::array::{Array, Int64Array, StringArray};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(byte_watermark_config(dir.path())).await.unwrap();
+        let payload: String = "a".repeat(1024);
+        for i in 0..8 {
+            db.execute(&format!("INSERT (:P {{_id: {i}, blob: '{payload}'}})"))
+                .await
+                .unwrap();
+        }
+        let mut flushed = false;
+        for _ in 0..200 {
+            {
+                let s = db.inner.state.read().unwrap();
+                if !s.graph(DEFAULT_GRAPH).unwrap().nodes.tries.is_empty() {
+                    flushed = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            flushed,
+            "live_bytes_watermark_forces_an_early_flush: no block flush within 5s \
+             even though max_block_rows is far from tripping"
+        );
+
+        // `approx_bytes` is a heuristic (Task 11) that must NEVER affect
+        // correctness: a flush firing early is not enough — the docs it
+        // swept up must still be intact and correct through the normal read
+        // path. This queries AFTER the flush was observed above, so a live
+        // table alone can't satisfy it; the block encode/decode round trip
+        // has to be right.
+        let batches = db
+            .query("MATCH (p:P) RETURN p._id AS id, p.blob AS blob")
+            .await
+            .unwrap();
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(
+            rows, 8,
+            "all 8 docs must still be readable after the early flush"
+        );
+        let mut found_three = false;
+        for batch in &batches {
+            let ids: &Int64Array = batch
+                .column_by_name("id")
+                .unwrap()
+                .as_any()
+                .downcast_ref()
+                .unwrap();
+            let blobs: &StringArray = batch
+                .column_by_name("blob")
+                .unwrap()
+                .as_any()
+                .downcast_ref()
+                .unwrap();
+            for i in 0..batch.num_rows() {
+                if ids.value(i) == 3 {
+                    found_three = true;
+                    assert_eq!(
+                        blobs.value(i),
+                        payload,
+                        "blob for _id=3 must round-trip byte-for-byte through the early flush"
+                    );
+                }
+            }
+        }
+        assert!(found_three, "expected _id=3 among the post-flush rows");
+    }
+
+    /// Task 12 (spec §12, decision 10): `Db::metrics()` reflects committed
+    /// transactions and the live (unflushed) row count purely from atomics
+    /// and one in-memory read-lock pass — no object-store I/O, no flush
+    /// needed for these two fields to update.
+    #[tokio::test]
+    async fn metrics_snapshot_tracks_committed_transactions_and_live_rows() {
+        let db = Db::memory();
+        db.execute("INSERT (:P {_id: 1})").await.unwrap();
+        db.execute("INSERT (:P {_id: 2})").await.unwrap();
+
+        let snapshot = db.metrics();
+        assert_eq!(snapshot.txs_committed, 2);
+        assert_eq!(snapshot.live_rows, 2);
+    }
+
+    /// Task 12: a real block flush (triggered here by a tiny
+    /// `max_live_bytes` watermark, mirroring
+    /// `live_bytes_watermark_forces_an_early_flush` above) increments
+    /// `flush_blocks` exactly once per successful `flush_block` call.
+    #[tokio::test]
+    async fn metrics_snapshot_counts_a_flush_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(byte_watermark_config(dir.path())).await.unwrap();
+        let payload: String = "a".repeat(1024);
+        for i in 0..8 {
+            db.execute(&format!("INSERT (:P {{_id: {i}, blob: '{payload}'}})"))
+                .await
+                .unwrap();
+        }
+
+        let mut flush_blocks = 0;
+        for _ in 0..200 {
+            flush_blocks = db.metrics().flush_blocks;
+            if flush_blocks >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            flush_blocks, 1,
+            "metrics_snapshot_counts_a_flush_block: expected exactly one flush_block within 5s of crossing the byte watermark"
+        );
+    }
+
     /// `recover`'s log-tail loop checks `effect.table` before ever touching
     /// `arrow_ipc` (v1 targets are `nodes` and `edges`), so an unknown table
     /// must hard-fail with `UnknownTable` — even though the log record here
@@ -2188,6 +2760,58 @@ mod tests {
             Err(EngineError::UnknownTable(t)) => assert_eq!(t, "widgets"),
             Err(other) => panic!("expected UnknownTable, got {other:?}"),
             Ok(_) => panic!("expected recover to fail on the unknown table"),
+        }
+    }
+
+    /// Finding 1 (Slice-10 final-whole-branch-review): `recover`'s tail loop
+    /// must reject a GENUINE gap between two LIVE records — one that no
+    /// epoch fence explains — exactly as `follower::apply_range_once` and
+    /// `verify::verify_database` already do. Here the log jumps straight
+    /// from epoch 0 to epoch 2 (skipping epoch 1 entirely) with no fence
+    /// document ever written, so the missing `(1, 0)` is unaccounted for
+    /// and recovery must fail loudly with `LogGap` instead of silently
+    /// replaying past it (a stale-manifest-watermark-behind-trimmed-records
+    /// scenario would look exactly like this to the tail loop).
+    #[tokio::test]
+    async fn recover_rejects_a_genuine_gap_not_explained_by_any_fence() {
+        let log = MemoryLog::new();
+        log.append(vec![
+            LogRecord {
+                tx_id: 1,
+                system_time_us: 1,
+                user: String::new(),
+                effects: vec![],
+            },
+            LogRecord {
+                tx_id: 2,
+                system_time_us: 2,
+                user: String::new(),
+                effects: vec![],
+            },
+        ])
+        .await
+        .unwrap();
+        // Skip epoch 1 entirely — no fence document is ever written for it,
+        // so nothing explains the missing (1, 0).
+        log.start_epoch(2).await.unwrap();
+        log.append(vec![LogRecord {
+            tx_id: 3,
+            system_time_us: 3,
+            user: String::new(),
+            effects: vec![],
+        }])
+        .await
+        .unwrap();
+
+        let clock = MonotonicClock::new();
+        let store = memory_store();
+        match recover(&log, &clock, &store).await {
+            Err(EngineError::LogGap { expected, actual }) => {
+                assert_eq!(expected, LogPosition::new(0, 2).unwrap());
+                assert_eq!(actual, LogPosition::new(2, 0).unwrap());
+            }
+            Err(other) => panic!("expected LogGap, got {other:?}"),
+            Ok(_) => panic!("expected recover to reject the unexplained gap"),
         }
     }
 
@@ -2698,5 +3322,17 @@ mod tests {
             Err(EngineError::UnknownTable(t)) => assert!(t.contains("widgets"), "{t}"),
             other => panic!("expected UnknownTable, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn probe_keys_are_unique_even_at_the_same_clock_tick() {
+        // Two probes never collide on key even if the clock regressed:
+        // the key carries a process-unique nonce.
+        let db = Db::memory();
+        let a = db.probe_capabilities().await.unwrap();
+        let b = db.probe_capabilities().await.unwrap();
+        assert_ne!(a.probe_key, b.probe_key);
+        assert!(a.probe_key.starts_with("v1/probe/"));
+        assert!(a.probe_key.contains('-'), "key must carry the nonce suffix");
     }
 }

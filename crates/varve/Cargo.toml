@@ -20,6 +20,7 @@ bytes = { workspace = true }
 tokio = { workspace = true }
 tempfile = { workspace = true }
 varve-index = { path = "../varve-index" }
+varve-log = { path = "../varve-log" }
 varve-storage = { path = "../varve-storage" }
 # traversal_bench.rs (task 11) reuses deterministic social-graph fixture
 # duplicating LCG generator; dev-only back-edge (varve-testkit

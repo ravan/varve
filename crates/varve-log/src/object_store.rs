@@ -197,6 +197,29 @@ impl Log for ObjectStoreLog {
     async fn trim(&self, _up_to: LogPosition) -> Result<(), LogError> {
         Ok(())
     }
+
+    async fn head(&self) -> Result<LogPosition, LogError> {
+        let mut next = self.next.lock().await;
+        match *next {
+            Some(position) => Ok(position),
+            None => {
+                let position = self.recover_next().await?;
+                *next = Some(position);
+                Ok(position)
+            }
+        }
+    }
+
+    async fn start_epoch(&self, epoch: u16) -> Result<(), LogError> {
+        let mut next = self.next.lock().await;
+        let head = match *next {
+            Some(position) => position,
+            None => self.recover_next().await?,
+        };
+        crate::log::validate_epoch_start(epoch, head)?;
+        *next = Some(LogPosition::new(epoch, 0)?);
+        Ok(())
+    }
 }
 
 /// Registry factory: `[log] backend = "object-store"`. Consumes the
@@ -280,5 +303,49 @@ mod tests {
                 .await,
             Err(LogError::Corrupt { .. })
         ));
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn head_scans_once_and_start_epoch_moves_the_next_append() {
+        let store = memory_store();
+        let log = ObjectStoreLog::new(Arc::clone(&store));
+        log.append(vec![record(1), record(2)]).await.unwrap();
+
+        // A SECOND instance over the same store scans the durable head.
+        let other = ObjectStoreLog::new(Arc::clone(&store));
+        assert_eq!(other.head().await.unwrap(), LogPosition::new(0, 2).unwrap());
+
+        other.start_epoch(1).await.unwrap();
+        let first = other.append(vec![record(3)]).await.unwrap();
+        assert_eq!(first, LogPosition::new(1, 0).unwrap());
+        // key landed under the new epoch directory
+        let keys = store.list("v1/log/0001").await.unwrap();
+        assert_eq!(keys.len(), 1);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn zombie_primer_head_caches_the_stale_cursor() {
+        // The failover test (Task 9) relies on this: a handle whose head() was
+        // taken BEFORE a takeover keeps appending at its stale cached position.
+        let store = memory_store();
+        let log = ObjectStoreLog::new(Arc::clone(&store));
+        log.append(vec![record(1)]).await.unwrap();
+
+        let zombie = ObjectStoreLog::new(Arc::clone(&store));
+        assert_eq!(
+            zombie.head().await.unwrap(),
+            LogPosition::new(0, 1).unwrap()
+        );
+
+        // Someone else moves on to epoch 1...
+        let successor = ObjectStoreLog::new(Arc::clone(&store));
+        successor.start_epoch(1).await.unwrap();
+        successor.append(vec![record(10)]).await.unwrap();
+
+        // ...but the zombie still writes at its cached (0, 1).
+        let pos = zombie.append(vec![record(99)]).await.unwrap();
+        assert_eq!(pos, LogPosition::new(0, 1).unwrap());
     }
 }
