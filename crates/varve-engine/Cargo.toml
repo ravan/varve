@@ -3,15 +3,17 @@ name = "varve-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Bitemporal storage engine, writer loop, compaction/GC, and failover coordination for Varve, the bitemporal graph database."
 
 [dependencies]
-varve-types = { path = "../varve-types" }
-varve-gql = { path = "../varve-gql" }
-varve-index = { path = "../varve-index" }
-varve-plan = { path = "../varve-plan" }
-varve-log = { path = "../varve-log" }
-varve-config = { path = "../varve-config" }
-varve-storage = { path = "../varve-storage" }
+varve-types = { path = "../varve-types", version = "1.0.0" }
+varve-gql = { path = "../varve-gql", version = "1.0.0" }
+varve-index = { path = "../varve-index", version = "1.0.0" }
+varve-plan = { path = "../varve-plan", version = "1.0.0" }
+varve-log = { path = "../varve-log", version = "1.0.0" }
+varve-config = { path = "../varve-config", version = "1.0.0" }
+varve-storage = { path = "../varve-storage", version = "1.0.0" }
 datafusion = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

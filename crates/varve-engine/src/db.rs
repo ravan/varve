@@ -119,8 +119,6 @@ pub enum EngineError {
         age_ms: u64,
         takeover_after_ms: u64,
     },
-    #[error("invalid [coordinator] configuration: {0}")]
-    InvalidCoordinatorConfig(String),
     #[error("cas-failover requires the shared \"object-store\" log; [log] backend is \"{0}\"")]
     CasRequiresSharedLog(String),
     #[error("storage backend cannot support cas-failover: {reason}. Use [coordinator] backend = \"designated-writer\" (spec §12, D5).")]
@@ -160,8 +158,13 @@ struct LogTuning {
     group_commit_max_bytes: ByteSize,
 }
 
+/// Group-commit window (`[log] group_commit_window_ms`); shared with the
+/// generated configuration reference (`varve-testkit/src/config_reference.rs`)
+/// so the docs page cannot drift from this default.
+pub const DEFAULT_GROUP_COMMIT_WINDOW_MS: u64 = 15;
+
 fn default_window_ms() -> u64 {
-    15
+    DEFAULT_GROUP_COMMIT_WINDOW_MS
 }
 
 fn default_group_commit_max_bytes() -> ByteSize {
@@ -184,8 +187,12 @@ struct StorageTuning {
     flush_interval_ms: u64,
 }
 
+/// Row count that triggers an early block flush (`[storage] max_block_rows`);
+/// shared with the generated configuration reference.
+pub const DEFAULT_MAX_BLOCK_ROWS: usize = 100_000;
+
 fn default_max_block_rows() -> usize {
-    100_000
+    DEFAULT_MAX_BLOCK_ROWS
 }
 
 fn default_max_live_bytes() -> ByteSize {
@@ -276,8 +283,12 @@ struct GcTuning {
     garbage_lifetime_hours: i64,
 }
 
+/// Flushed blocks retained behind the GC frontier (`[gc] blocks_to_keep`);
+/// shared with the generated configuration reference.
+pub const DEFAULT_GC_BLOCKS_TO_KEEP: u64 = 10;
+
 fn default_gc_blocks_to_keep() -> u64 {
-    10
+    DEFAULT_GC_BLOCKS_TO_KEEP
 }
 
 fn default_gc_garbage_lifetime_hours() -> i64 {
@@ -1173,9 +1184,13 @@ impl Db {
         ))
     }
 
-    /// Executes a mutation statement (INSERT, MATCH … DELETE): parses here,
-    /// resolves and commits inside the writer loop, and returns once the tx
-    /// is durable AND visible.
+    /// Publishes this writer's advertised address so query nodes can answer a
+    /// misdirected mutation (HTTP 421) with the writer's location. With a
+    /// coordinator configured it delegates to the coordinator's `advertise`;
+    /// otherwise it writes a canonical-JSON `WriterAdvertisement` to
+    /// `v1/writer.json` with a plain PUT. This is advertisement only — NOT a
+    /// lock, lease, or leader election; exactly-one-writer remains a
+    /// deployment guarantee.
     pub async fn publish_writer(&self, address: &str) -> Result<(), EngineError> {
         self.require_role(NodeRole::Writer)?;
         match &self.inner.coordinator {
@@ -1219,6 +1234,9 @@ impl Db {
         Ok(execute_gc(&self.inner.store, &self.inner.gc_config).await?)
     }
 
+    /// Executes a mutation statement (INSERT, MATCH … DELETE): parses here,
+    /// resolves and commits inside the writer loop, and returns once the tx
+    /// is durable AND visible.
     pub async fn execute(&self, gql: &str) -> Result<TxReceipt, EngineError> {
         let params = BTreeMap::new();
         self.execute_with(gql, &params).await

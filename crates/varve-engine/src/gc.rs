@@ -44,6 +44,8 @@ pub(crate) async fn execute_gc(
     let manifests = manifest_history(store.as_ref()).await?;
     let mut listed_keys = store.list("v1/graphs").await?;
     listed_keys.extend(store.list(keys::MANIFEST_PREFIX).await?);
+    listed_keys.extend(store.list(keys::LOG_PREFIX).await?);
+    listed_keys.extend(store.list(PROBE_PREFIX).await?);
     let plan = plan_gc(&manifests, &listed_keys, config);
     let planned_objects = plan.delete_keys.len();
     let mut deleted_objects = 0;
@@ -70,12 +72,17 @@ pub(crate) fn plan_gc(
     let mut sorted_manifests: Vec<_> = manifests.iter().collect();
     sorted_manifests.sort_by_key(|manifest| manifest.block_id);
 
+    let mut min_retained_watermark: Option<u64> = None;
     if let Some(latest) = sorted_manifests.last().copied() {
         let retain_from = latest.block_id.saturating_sub(config.blocks_to_keep);
         for manifest in &sorted_manifests {
             if manifest.block_id >= retain_from {
                 protected.insert(manifest_key(manifest.block_id));
                 protect_manifest_entries(manifest, &mut protected);
+                min_retained_watermark = Some(match min_retained_watermark {
+                    Some(current) => current.min(manifest.watermark),
+                    None => manifest.watermark,
+                });
             }
         }
         protect_unexpired_garbage(
@@ -90,11 +97,52 @@ pub(crate) fn plan_gc(
     listed.sort();
     listed.dedup();
 
-    let delete_keys = listed
+    let (log_keys, other_keys): (Vec<String>, Vec<String>) = listed
+        .into_iter()
+        .partition(|key| has_path_prefix(key, keys::LOG_PREFIX));
+
+    let mut delete_keys: Vec<String> = other_keys
         .into_iter()
         .filter(|key| should_delete_key(key, &protected, &sorted_manifests, config))
         .collect();
+    delete_keys.extend(deletable_log_keys(&log_keys, min_retained_watermark));
+    delete_keys.sort();
     GcPlan { delete_keys }
+}
+
+/// Log objects wholly below the minimum retained manifest watermark are
+/// deletable garbage; the LAST object (by packed first-position) is never
+/// deletable because its span is open-ended.
+///
+/// Every listed key under `LOG_PREFIX` is parsed with `parse_log_key`;
+/// unparseable keys are foreign and never touched. The remaining objects are
+/// sorted by packed first-position. A log object spans
+/// `[first_i, first_{i+1})`; object *i* is deletable iff
+/// `first_{i+1}.as_u64() <= min_retained_watermark`. `min_retained_watermark`
+/// is the minimum `watermark` over the retained manifest set (the same
+/// `block_id >= retain_from` set `plan_gc` already protects); `None` (no
+/// manifests) means no log object is ever deleted. Positions are compared in
+/// their packed form, so epoch bumps sort correctly and a fenced zombie's
+/// stale-position object simply becomes sweepable garbage once superseded.
+///
+/// Safety: a query follower lagging below the min retained watermark loses
+/// its tail and terminates with `LogGap` (restart recovers from the latest
+/// manifest); `blocks_to_keep`/`garbage_lifetime_us` are the operator's guard
+/// against sweeping objects a slow follower still needs.
+fn deletable_log_keys(log_keys: &[String], min_retained_watermark: Option<u64>) -> Vec<String> {
+    let Some(watermark) = min_retained_watermark else {
+        return Vec::new();
+    };
+    let mut objects: Vec<(u64, &String)> = log_keys
+        .iter()
+        .filter_map(|key| keys::parse_log_key(key).map(|p| (p.as_u64(), key)))
+        .collect();
+    objects.sort_by_key(|(pos, _)| *pos);
+    objects
+        .windows(2)
+        .filter(|pair| pair[1].0 <= watermark)
+        .map(|pair| pair[0].1.clone())
+        .collect()
 }
 
 fn protect_unexpired_garbage(
@@ -150,10 +198,10 @@ fn should_delete_key(
     manifests: &[&BlockManifest],
     config: &GcConfig,
 ) -> bool {
-    if protected.contains(key)
-        || has_path_prefix(key, keys::LOG_PREFIX)
-        || has_path_prefix(key, PROBE_PREFIX)
-    {
+    if has_path_prefix(key, PROBE_PREFIX) {
+        return true;
+    }
+    if protected.contains(key) {
         return false;
     }
     if let Some(block_id) = manifest_block_id(key) {
@@ -200,9 +248,7 @@ fn arrow_object_name(object: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use varve_storage::keys::{
-        adj_data_key, adj_meta_key, data_key, log_key, manifest_key, meta_key, ADJ_OUT,
-    };
+    use varve_storage::keys::{data_key, log_key, manifest_key, meta_key};
     use varve_storage::{BlockManifest, TableTries, TrieEntry, PROBE_PREFIX};
     use varve_types::LogPosition;
 
@@ -229,19 +275,10 @@ mod tests {
         }
     }
 
-    fn edge_manifest(block_id: u64, max_system_time_us: i64, tries: Vec<&str>) -> BlockManifest {
-        BlockManifest {
-            block_id,
-            watermark: block_id,
-            max_tx_id: block_id,
-            max_system_time_us,
-            tables: vec![TableTries {
-                graph: "default".to_string(),
-                table: "edges".to_string(),
-                family: ADJ_OUT.to_string(),
-                tries: tries.into_iter().map(entry).collect(),
-            }],
-        }
+    fn manifest_with_watermark(block_id: u64, watermark: u64, tries: Vec<&str>) -> BlockManifest {
+        let mut m = manifest(block_id, 100, tries);
+        m.watermark = watermark;
+        m
     }
 
     fn enabled_config() -> GcConfig {
@@ -365,26 +402,113 @@ mod tests {
     }
 
     #[test]
-    fn gc_plan_keeps_probe_and_log_objects_out_of_scope() {
-        let manifests = vec![edge_manifest(10, 100, vec!["l00-rc-b10"])];
-        let log_position = LogPosition::new(0, 9).unwrap();
-        let listed = vec![
-            adj_data_key("default", "edges", ADJ_OUT, "l00-rc-b10"),
-            adj_meta_key("default", "edges", ADJ_OUT, "l00-rc-b10"),
-            adj_data_key("default", "edges", ADJ_OUT, "l00-rc-b09"),
-            adj_meta_key("default", "edges", ADJ_OUT, "l00-rc-b09"),
-            log_key(log_position),
-            format!("{PROBE_PREFIX}/stale"),
+    fn gc_plan_sweeps_log_objects_wholly_below_the_min_retained_watermark() {
+        // Retained manifest watermark = position 4 (epoch 0). Log objects start at 0, 2, 4, 6.
+        // Object@0 spans [0,2) and object@2 spans [2,4): both wholly < 4 → swept.
+        // Object@4 spans [4,6) and object@6 is last: kept.
+        let w = LogPosition::new(0, 4).unwrap().as_u64();
+        let manifests = vec![manifest_with_watermark(10, w, vec!["l00-rc-b10"])];
+        let keys: Vec<String> = [0u64, 2, 4, 6]
+            .into_iter()
+            .map(|off| log_key(LogPosition::new(0, off).unwrap()))
+            .collect();
+        let plan = plan(&manifests, keys.clone(), enabled_config());
+        assert!(plan.delete_keys.contains(&keys[0]));
+        assert!(plan.delete_keys.contains(&keys[1]));
+        assert!(!plan.delete_keys.contains(&keys[2]));
+        assert!(!plan.delete_keys.contains(&keys[3]));
+    }
+
+    #[test]
+    fn gc_plan_uses_the_minimum_watermark_across_retained_manifests() {
+        // blocks_to_keep = 1 retains blocks 9 and 10; block 9's watermark (2) is the floor,
+        // so only the object whose SUCCESSOR starts at <= 2 is swept.
+        let w9 = LogPosition::new(0, 2).unwrap().as_u64();
+        let w10 = LogPosition::new(0, 6).unwrap().as_u64();
+        let manifests = vec![
+            manifest_with_watermark(9, w9, vec!["l00-rc-b09"]),
+            manifest_with_watermark(10, w10, vec!["l00-rc-b10"]),
         ];
-
-        let plan = plan(&manifests, listed, enabled_config());
-
+        let mut config = enabled_config();
+        config.blocks_to_keep = 1;
+        let keys: Vec<String> = [0u64, 2, 4]
+            .into_iter()
+            .map(|off| log_key(LogPosition::new(0, off).unwrap()))
+            .collect();
+        let plan = plan(&manifests, keys.clone(), config);
         assert_eq!(
-            plan.delete_keys,
-            vec![
-                adj_data_key("default", "edges", ADJ_OUT, "l00-rc-b09"),
-                adj_meta_key("default", "edges", ADJ_OUT, "l00-rc-b09"),
-            ]
+            plan.delete_keys
+                .iter()
+                .filter(|k| k.starts_with("v1/log"))
+                .collect::<Vec<_>>(),
+            vec![&keys[0]]
         );
+    }
+
+    #[test]
+    fn gc_plan_boundary_spanning_and_last_log_objects_are_kept() {
+        // Watermark 3 falls INSIDE object@2's span [2,4): object@2 kept. object@0 swept.
+        let w = LogPosition::new(0, 3).unwrap().as_u64();
+        let manifests = vec![manifest_with_watermark(10, w, vec!["l00-rc-b10"])];
+        let keys: Vec<String> = [0u64, 2]
+            .into_iter()
+            .map(|off| log_key(LogPosition::new(0, off).unwrap()))
+            .collect();
+        let plan = plan(&manifests, keys.clone(), enabled_config());
+        assert!(plan.delete_keys.contains(&keys[0]));
+        assert!(!plan.delete_keys.contains(&keys[1]));
+    }
+
+    #[test]
+    fn gc_plan_sweeps_across_epoch_bumps_in_packed_order() {
+        // Fenced epoch 0 objects at 0 and 3; epoch 1 resumed at offset 3; retained
+        // watermark = (1, 5). Epoch-0 object@0 (successor (0,3) <= w) and object@(0,3)
+        // (successor (1,3) <= w) are swept; (1,3) is followed by (1,5) <= w → swept too;
+        // (1,5) is last → kept.
+        let w = LogPosition::new(1, 5).unwrap().as_u64();
+        let manifests = vec![manifest_with_watermark(10, w, vec!["l00-rc-b10"])];
+        let positions = [
+            LogPosition::new(0, 0).unwrap(),
+            LogPosition::new(0, 3).unwrap(),
+            LogPosition::new(1, 3).unwrap(),
+            LogPosition::new(1, 5).unwrap(),
+        ];
+        let keys: Vec<String> = positions.into_iter().map(log_key).collect();
+        let plan = plan(&manifests, keys.clone(), enabled_config());
+        assert!(plan.delete_keys.contains(&keys[0]));
+        assert!(plan.delete_keys.contains(&keys[1]));
+        assert!(plan.delete_keys.contains(&keys[2]));
+        assert!(!plan.delete_keys.contains(&keys[3]));
+    }
+
+    #[test]
+    fn gc_plan_keeps_foreign_keys_under_the_log_prefix() {
+        let w = LogPosition::new(0, 9).unwrap().as_u64();
+        let manifests = vec![manifest_with_watermark(10, w, vec!["l00-rc-b10"])];
+        let keys = vec![
+            "v1/log/0000/notavlog.txt".to_string(),
+            "v1/logish".to_string(),
+        ];
+        let plan = plan(&manifests, keys, enabled_config());
+        assert!(plan.delete_keys.iter().all(|k| !k.contains("log")));
+    }
+
+    #[test]
+    fn gc_plan_without_manifests_never_touches_log_objects() {
+        let keys = vec![log_key(LogPosition::new(0, 0).unwrap())];
+        let plan = plan(&[], keys, enabled_config());
+        assert!(plan.delete_keys.is_empty());
+    }
+
+    #[test]
+    fn gc_plan_sweeps_probe_objects_and_keeps_fence_and_writer_keys() {
+        let manifests = vec![manifest(10, 100, vec!["l00-rc-b10"])];
+        let keys = vec![
+            format!("{PROBE_PREFIX}/deadbeef"),
+            "v1/epochs/0001.json".to_string(),
+            "v1/writer.json".to_string(),
+        ];
+        let plan = plan(&manifests, keys, enabled_config());
+        assert_eq!(plan.delete_keys, vec![format!("{PROBE_PREFIX}/deadbeef")]);
     }
 }

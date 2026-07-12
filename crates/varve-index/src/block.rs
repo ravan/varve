@@ -351,7 +351,48 @@ fn encode_meta(pages: &[PageMeta]) -> Result<Vec<u8>, IndexError> {
 }
 
 /// Deserializes a meta file written by `encode_block`.
+///
+/// Task-6 fuzzing found that arrow-rs 58.3.0's IPC `StreamReader` PANICS
+/// (rather than returning an `Err`) on several classes of adversarial
+/// flatbuffer/record-batch bytes — see `fuzz/regressions/block_meta/*.bin`.
+/// No public arrow API avoids these panics (confirmed by reading
+/// arrow-ipc's `convert`/`reader` source directly: `StreamReader::try_new`
+/// calls the panicking `fb_to_schema` unconditionally, with no
+/// `Result`-returning alternative). `decode_meta` is a pure function of
+/// `bytes` with no shared mutable state, so this is the textbook legitimate
+/// use of `catch_unwind`: it converts a third-party-library panic into a
+/// clean `IndexError` at a pure-function trust boundary, rather than papering
+/// over a bug of our own (owner-approved, narrow override of the plan's
+/// general no-`catch_unwind` rule for this specific case).
+///
+/// Panic-hook note: the `catch_unwind` and its fuzz-only panic-hook handling
+/// live in [`crate::codec::catch_arrow_panic`]. `libfuzzer-sys` installs a
+/// process-global abort-before-unwind hook that would defeat `catch_unwind`
+/// inside a `cargo fuzz` target, so — and ONLY under `--cfg fuzzing` — that
+/// helper swaps a no-op hook around the call. Production and `cargo test`
+/// builds do NOT touch the process-global hook: swapping it around a decode
+/// that runs concurrently with other decodes raced (two interleaved swaps
+/// could leave a no-op hook installed for good), so those builds use a bare
+/// `catch_unwind` and simply let arrow's panic message reach stderr (harmless).
+///
+/// The `catch_unwind` guard handles arrow's UNWINDING panic classes only.
+/// Fuzzing surfaced a fourth, distinct class it cannot reach: arrow's
+/// `MessageReader::maybe_next` allocates a buffer sized from an unvalidated,
+/// attacker-controlled `bodyLength`, so a malformed huge value ABORTS the
+/// allocator with no unwind. [`crate::codec::validate_ipc_framing`] runs first
+/// (outside the guard) to bound that allocation against the actual input size
+/// before arrow sees the bytes.
 pub fn decode_meta(bytes: &[u8]) -> Result<Vec<PageMeta>, IndexError> {
+    crate::codec::validate_ipc_framing(bytes)?;
+    match crate::codec::catch_arrow_panic(|| decode_meta_uncaught(bytes)) {
+        Ok(result) => result,
+        Err(_) => Err(IndexError::Codec(
+            "arrow IPC decode panicked (corrupt input)".into(),
+        )),
+    }
+}
+
+fn decode_meta_uncaught(bytes: &[u8]) -> Result<Vec<PageMeta>, IndexError> {
     let reader = StreamReader::try_new(std::io::Cursor::new(bytes), None)?;
     if reader.schema() != meta_schema() {
         return Err(IndexError::Codec("meta file schema mismatch".into()));
@@ -751,6 +792,92 @@ mod tests {
 
         let with_erase = encode_block(&table(&[put(1, 5, 3, EOT, 0), erase(1, 6)]), 16).unwrap();
         assert!(with_erase.pages[0].has_erase);
+    }
+
+    /// Regression for Task 6's fuzzing: `fb.fields().unwrap()` panic in
+    /// `arrow_ipc::convert::fb_to_schema` on a Schema flatbuffer that omits
+    /// its `fields` vector. Pre-fix, this input made `decode_meta` unwind
+    /// the process; post-fix, the `catch_unwind` guard converts it to a
+    /// clean `Err`.
+    #[test]
+    fn decode_meta_rejects_fb_to_schema_panic_bytes() {
+        let bytes: &[u8] =
+            include_bytes!("../../../fuzz/regressions/block_meta/fb-to-schema-unwrap.bin");
+        assert!(decode_meta(bytes).is_err());
+    }
+
+    /// Regression for Task 6's fuzzing: `arrow_buffer::Buffer::slice_with_length`
+    /// offset-exceeds-length panic inside `RecordBatchDecoder`, triggered by
+    /// malformed buffer offset/length metadata in a record batch message.
+    #[test]
+    fn decode_meta_rejects_buffer_slice_panic_bytes() {
+        let bytes: &[u8] =
+            include_bytes!("../../../fuzz/regressions/block_meta/buffer-slice-panic.bin");
+        assert!(decode_meta(bytes).is_err());
+    }
+
+    /// Round-trip over a meta stream carrying TWO record-batch messages, so the
+    /// framing walk steps over two consecutive NON-zero `bodyLength` messages
+    /// and still reaches EOS. `encode_meta` only ever emits one record batch,
+    /// so this reuses a real batch written twice to build the multi-body
+    /// stream. Guards against a body-advance bug that a single-batch stream
+    /// (schema + one batch + EOS) would not surface.
+    #[test]
+    fn decode_meta_walks_multi_batch_stream() {
+        // page_rows = 1 over 3 entities → 3 pages → a meta batch with 3 rows.
+        let block = encode_block(
+            &table(&[
+                put(1, 1, 1, EOT, 0),
+                put(2, 2, 2, EOT, 0),
+                put(3, 3, 3, EOT, 0),
+            ]),
+            1,
+        )
+        .unwrap();
+        assert_eq!(block.pages.len(), 3);
+
+        let mut reader = StreamReader::try_new(std::io::Cursor::new(&block.meta), None).unwrap();
+        let batch = reader.next().unwrap().unwrap();
+
+        let schema = meta_schema();
+        let mut buf = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut buf, &schema).unwrap();
+            writer.write(&batch).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let pages = decode_meta(&buf).unwrap();
+        assert_eq!(pages.len(), block.pages.len() * 2);
+        assert_eq!(&pages[..block.pages.len()], &block.pages[..]);
+        assert_eq!(&pages[block.pages.len()..], &block.pages[..]);
+    }
+
+    /// Allocation-bound regression: a meta stream whose record-batch message
+    /// declares a `bodyLength` of ~1.15 EB. Pre-fix, arrow's
+    /// `MessageReader::maybe_next` would `MutableBuffer::from_len_zeroed(..)`
+    /// that many bytes; the allocation fails and `handle_alloc_error` ABORTS the
+    /// process — no unwind, so `catch_unwind` could not intercept it (this test
+    /// would kill the runner). Post-fix, `validate_ipc_framing` bounds the body
+    /// length against the input and returns a clean `Err`.
+    #[test]
+    fn decode_meta_rejects_unbounded_body_length() {
+        let block =
+            encode_block(&table(&[put(1, 1, 1, EOT, 0), put(2, 2, 2, EOT, 0)]), 16).unwrap();
+        let corrupt = crate::codec::corrupt_body_length_to_huge(&block.meta);
+        assert!(matches!(decode_meta(&corrupt), Err(IndexError::Codec(_))));
+    }
+
+    #[test]
+    #[ignore = "regenerates the committed fuzz seed corpus"]
+    fn write_block_meta_fuzz_seed() {
+        let events = [put(1, 5, 3, us(30), 0), put(1, 7, 4, EOT, 1)];
+        let block = encode_block(&table(&events), 16).unwrap();
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/block_meta");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("valid.bin"), &block.meta).unwrap();
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use varve_cli::{AdminCommand, Cli, CliError, Command};
 
 #[test]
@@ -178,4 +178,17 @@ async fn neither_dir_nor_url_is_a_configuration_error() {
         .unwrap_or_else(|error| panic!("parse must succeed: {error}"));
 
     assert_configuration_error(cli.build_client().await);
+}
+
+#[test]
+fn long_help_lists_every_subcommand_and_connection_selector() {
+    let help = Cli::command().render_long_help().to_string();
+    for expected in [
+        "shell", "import", "export", "admin", "--dir", "--url", "--token",
+    ] {
+        assert!(
+            help.contains(expected),
+            "`varve --help` must mention {expected:?}; help was:\n{help}"
+        );
+    }
 }

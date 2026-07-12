@@ -12,10 +12,41 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 varve-gql = { path = "../crates/varve-gql" }
+varve-log = { path = "../crates/varve-log", default-features = false }
+varve-storage = { path = "../crates/varve-storage", default-features = false }
+varve-index = { path = "../crates/varve-index" }
 
 [[bin]]
 name = "parse"
 path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "log_record"
+path = "fuzz_targets/log_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manifest"
+path = "fuzz_targets/manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "block_meta"
+path = "fuzz_targets/block_meta.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "events"
+path = "fuzz_targets/events.rs"
 test = false
 doc = false
 bench = false

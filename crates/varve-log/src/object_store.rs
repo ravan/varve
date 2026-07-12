@@ -5,9 +5,10 @@
 //! PUT that returns Ok is exactly as durable as the backend makes it.
 //!
 //! `trim` is a documented NO-OP: the sovereign `ObjectStore` trait has no
-//! delete (slice-4 decision); superseded log objects are swept by slice-8
-//! GC. Replay cost stays bounded regardless, because recovery reads only
-//! `tail(manifest.watermark)`.
+//! delete on the `Log` trait itself (slice-4 decision); superseded log
+//! objects are instead swept by GC (`Db::gc_once`) once wholly below the
+//! minimum retained manifest watermark. Replay cost stays bounded
+//! regardless, because recovery reads only `tail(manifest.watermark)`.
 
 use crate::log::{Log, LogError};
 use crate::record::LogRecord;
@@ -16,12 +17,6 @@ use std::sync::Arc;
 use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
 use varve_storage::{keys, ObjectStore};
 use varve_types::LogPosition;
-
-/// Frame header: `len: u32 LE` + `crc: u32 LE` (CRC32C of the payload) —
-/// the exact `LocalLog` frame grammar, so both durable backends share one
-/// on-disk format. Decoding here is STRICT (any malformed frame is
-/// `Corrupt`): object PUTs are atomic, so a torn tail cannot exist.
-const FRAME_HEADER: usize = 8;
 
 pub struct ObjectStoreLog {
     store: Arc<dyn ObjectStore>,
@@ -68,47 +63,15 @@ impl ObjectStoreLog {
     }
 }
 
-/// Strict frame walk: every byte must belong to a complete, CRC-valid frame.
+/// Delegates the whole-object grammar to the shared, fuzzed strict decoder
+/// (`record::decode_frames`); a log object is additionally never empty
+/// (that invariant is this backend's, not the shared frame grammar's).
 fn decode_object(key: &str, bytes: &[u8]) -> Result<Vec<LogRecord>, LogError> {
-    let mut records = Vec::new();
-    let mut off = 0usize;
-    while let Some(record) = decode_frame(key, bytes, &mut off)? {
-        records.push(record);
-    }
+    let records = crate::record::decode_frames(key, bytes)?;
     if records.is_empty() {
         return Err(corrupt(key, 0, "empty log object"));
     }
     Ok(records)
-}
-
-fn decode_frame(key: &str, bytes: &[u8], off: &mut usize) -> Result<Option<LogRecord>, LogError> {
-    if *off == bytes.len() {
-        return Ok(None);
-    }
-    if bytes.len() - *off < FRAME_HEADER {
-        return Err(corrupt(key, *off, "truncated frame header"));
-    }
-    let len = u32::from_le_bytes([
-        bytes[*off],
-        bytes[*off + 1],
-        bytes[*off + 2],
-        bytes[*off + 3],
-    ]) as usize;
-    let crc = u32::from_le_bytes([
-        bytes[*off + 4],
-        bytes[*off + 5],
-        bytes[*off + 6],
-        bytes[*off + 7],
-    ]);
-    if bytes.len() - *off - FRAME_HEADER < len {
-        return Err(corrupt(key, *off, "truncated frame payload"));
-    }
-    let payload = &bytes[*off + FRAME_HEADER..*off + FRAME_HEADER + len];
-    if crc32c::crc32c(payload) != crc {
-        return Err(corrupt(key, *off, "CRC mismatch"));
-    }
-    *off += FRAME_HEADER + len;
-    Ok(Some(LogRecord::from_wire(payload)?))
 }
 
 fn corrupt(key: &str, off: usize, reason: &str) -> LogError {
@@ -177,7 +140,7 @@ impl Log for ObjectStoreLog {
                 if position >= to {
                     break;
                 }
-                let Some(record) = decode_frame(key, &bytes, &mut off)? else {
+                let Some(record) = crate::record::decode_one_frame(key, &bytes, &mut off)? else {
                     break;
                 };
                 if position >= from && position < to {
@@ -189,11 +152,12 @@ impl Log for ObjectStoreLog {
         Ok(out)
     }
 
-    /// NO-OP (documented): the sovereign store exposes no delete, so
-    /// superseded objects stay until slice-8 GC. The `Log::trim` contract
-    /// ("earlier records MAY be retained") is satisfied trivially, and
-    /// positions never regress because `next` is tracked independently of
-    /// what a trim could remove.
+    /// NO-OP (documented): the sovereign store exposes no delete on this
+    /// trait, so superseded objects stay until GC (`Db::gc_once`) sweeps
+    /// them once wholly below the minimum retained manifest watermark. The
+    /// `Log::trim` contract ("earlier records MAY be retained") is satisfied
+    /// trivially, and positions never regress because `next` is tracked
+    /// independently of what a trim could remove.
     async fn trim(&self, _up_to: LogPosition) -> Result<(), LogError> {
         Ok(())
     }
@@ -279,7 +243,7 @@ mod tests {
                 store.put(&key, Bytes::from(bytes)).await.unwrap();
                 return;
             }
-            off += FRAME_HEADER + len;
+            off += crate::record::FRAME_HEADER + len;
         }
         panic!("frame {frame_index} not found");
     }

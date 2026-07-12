@@ -14,27 +14,29 @@ use varve_types::LogPosition;
 pub(crate) struct FenceMap(BTreeMap<u16, u64>);
 
 impl FenceMap {
+    /// `true` iff `position` sits at or behind its epoch's fence — the single
+    /// dead-condition shared by [`is_live`](Self::is_live) and
+    /// [`jump`](Self::jump).
+    fn is_dead(&self, position: LogPosition) -> bool {
+        matches!(self.0.get(&position.epoch()), Some(fence) if position.offset() >= *fence)
+    }
+
     /// `false` iff `position` sits at or behind its epoch's fence.
     pub fn is_live(&self, position: LogPosition) -> bool {
-        match self.0.get(&position.epoch()) {
-            Some(fence) => position.offset() < *fence,
-            None => true,
-        }
+        !self.is_dead(position)
     }
 
     /// If `cursor` sits at/behind a fence in its epoch, the position where a
     /// reader continues: `(cursor.epoch() + 1, 0)`. `None` when unfenced.
     pub fn jump(&self, cursor: LogPosition) -> Result<Option<LogPosition>, EngineError> {
-        match self.0.get(&cursor.epoch()) {
-            Some(fence) if cursor.offset() >= *fence => {
-                let next_epoch = cursor
-                    .epoch()
-                    .checked_add(1)
-                    .ok_or(EngineError::EpochExhausted)?;
-                Ok(Some(LogPosition::new(next_epoch, 0)?))
-            }
-            _ => Ok(None),
+        if !self.is_dead(cursor) {
+            return Ok(None);
         }
+        let next_epoch = cursor
+            .epoch()
+            .checked_add(1)
+            .ok_or(EngineError::EpochExhausted)?;
+        Ok(Some(LogPosition::new(next_epoch, 0)?))
     }
 
     #[cfg(test)]
@@ -101,6 +103,19 @@ mod tests {
         assert!(fences.is_live(later));
         assert_eq!(fences.jump(live).unwrap(), None);
         assert_eq!(fences.jump(dead).unwrap(), Some(later));
+    }
+
+    #[test]
+    fn jump_at_the_final_epoch_reports_exhaustion() {
+        // A dead cursor in the last representable epoch cannot advance to a
+        // successor epoch — `jump` reports EpochExhausted rather than
+        // silently wrapping the u16.
+        let fences = FenceMap::from_pairs(&[(u16::MAX, 5)]);
+        let dead = LogPosition::new(u16::MAX, 5).unwrap();
+        assert!(matches!(
+            fences.jump(dead),
+            Err(EngineError::EpochExhausted)
+        ));
     }
 
     #[tokio::test]

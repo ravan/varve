@@ -405,26 +405,48 @@ corruption, no acked loss; Grafana-ready metrics documented.
 
 **Sessions:** 2–3. **Depends:** all.
 
-- [ ] `ERASE` end-to-end verification: erase entity → immediate invisibility at every time
+- [x] `ERASE` end-to-end verification: erase entity → immediate invisibility at every time
       axis → after compaction, raw object scan proves the property bytes are gone (test
-      greps storage objects for sentinel values).
-- [ ] Fuzz targets complete: log-record decoder, manifest decoder, Arrow meta reader against
-      corrupted/truncated inputs (no panics, clean errors); nightly CI fuzz budget.
-- [ ] Benchmark suite: criterion micro (resolution, trie ops, parse) + end-to-end social
+      greps storage objects for sentinel values). *(Slice 11 Tasks 1-3: GC log/probe sweep +
+      local-profile whole-disk-byte proof + object-store-log raw-object-scan proof + DETACH ERASE.)*
+- [x] Fuzz targets complete: log-record decoder, manifest decoder, Arrow meta reader against
+      corrupted/truncated inputs (no panics, clean errors); nightly CI fuzz budget. *(Slice 11
+      Tasks 5-6: 5 targets, 5-way nightly matrix; arrow-rs IPC panics guarded by catch_unwind +
+      framing-allocation bounded, gates on RSS; deeper record-batch-descriptor over-reservation
+      is production-safe/clean-Err + owned post-v1 follow-up.)*
+- [x] Benchmark suite: criterion micro (resolution, trie ops, parse) + end-to-end social
       workload (ingest rate, point read, 2-hop, AS-OF historical, query-node scale-out 1→4);
-      compare against spec §13 targets; publish `docs/benchmarks/v1.md` report.
-- [ ] Docs site (mdBook under `docs/book/`): getting started (laptop 5-min), GQL reference
+      compare against spec §13 targets; publish `docs/benchmarks/v1.md` report. *(Slice 11
+      Tasks 7-10: `just bench-micro`/`bench-scale-out`, `social_bench` example, report at
+      `docs/benchmarks/v1.md` with honest verdicts — MET: write-batched 41.5k events/s, warm point
+      0.38 ms, AS-OF 0.94×; INDICATIVE: scale-out 152/282/530 QPS single-box; NOT MEASURED: 1M-node
+      2-hop, object-store-log tx/s — explicitly not extrapolated.)*
+- [x] Docs site (mdBook under `docs/book/`): getting started (laptop 5-min), GQL reference
       with temporal extensions + deviations list, capability matrix per backend
       (Garage/Ceph/SeaweedFS/MinIO/AWS), ops guide (profiles, config reference generated
-      from code, failover modes, sizing), architecture overview.
-- [ ] Release engineering: `cargo dist` (or equiv) for macOS arm64 + linux x86_64/arm64
+      from code, failover modes, sizing), architecture overview. *(Slice 11 Tasks 11-13:
+      mdbook 0.5.4 site `docs/book/` + CI `docs` job; getting-started verified live; config
+      reference GENERATED from code with a drift test; ops/metrics moved into the book.)*
+- [x] Release engineering: `cargo dist` (or equiv) for macOS arm64 + linux x86_64/arm64
       (musl) binaries; Docker images; `varve` + subcrates published to crates.io;
-      CHANGELOG; `v1.0.0` tag; README quickstart.
-- [ ] Final acceptance pass: walk spec §1 success criteria 1–8, each with a linked
-      passing test/demo/report; fix gaps before tagging.
+      CHANGELOG; `v1.0.0` tag; README quickstart. *(Slice 11 Tasks 15-16: hand-rolled
+      tag-triggered `release.yml` — equiv to cargo-dist, zero-extra-deps precedent — for the 3
+      targets + `ghcr.io/ravan/varve` image; `scripts/package_release.sh` + `just package`
+      (host tarball verified); `LICENSE`, `CHANGELOG.md`, README quickstart; all 11 crates carry
+      1.0.0 publish metadata (leaf dry-run PASSED). The actual `cargo publish` + `v1.0.0` tag are
+      the USER-GATED ship actions Ravan fires — see STATUS.md / `docs/release/v1-acceptance.md`.)*
+- [x] Final acceptance pass: walk spec §1 success criteria 1–8, each with a linked
+      passing test/demo/report; fix gaps before tagging. *(Slice 11 Task 17:
+      `docs/release/v1-acceptance.md` — all 8 criteria MET, criterion 4 with the explicit
+      AWS-not-CI-verified exception; whole-slice gate 903 tests + fuzz + compose-demo + package
+      all green this session.)*
 
-**Exit criteria:** every spec §1 criterion checked off with evidence; `cargo install varve`
-/ `docker run` / `brew`-style tarball all reach a working shell in ≤ 5 minutes.
+**Exit criteria:** every spec §1 criterion checked off with evidence (`docs/release/v1-acceptance.md`)
+— ✅ done. The `cargo install varve` / `docker run` / tarball ≤ 5-minute-to-shell criterion is
+measurable only AFTER the user-gated publish; the artifacts (crate metadata, image, tarballs) are
+built and verified, so it is unblocked and pending only the ship actions. **Slice 11 code-complete
+2026-07-12** (Sessions A+B SDD subagent-driven, Session C controller-inline; Tasks 1-17); final
+whole-branch review + merge remain.
 
 ---
 

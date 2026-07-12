@@ -183,7 +183,7 @@ query follower lagging below the min retained watermark loses its tail and termi
 `LogGap` (restart recovers from the latest manifest); `blocks_to_keep`/`garbage_lifetime` are the
 operator's guard — cross-referenced in the ops guide (Task 12).
 
-- [ ] **Step 1: Write the failing planner tests** (replace
+- [x] **Step 1: Write the failing planner tests** (replace
   `gc_plan_keeps_probe_and_log_objects_out_of_scope` — its policy is now wrong; production code,
   no back-compat). Add to `gc.rs` `mod tests` (the existing `manifest(...)` fixture sets
   `watermark: block_id`; add a variant with an explicit packed watermark):
@@ -301,10 +301,10 @@ fn gc_plan_sweeps_probe_objects_and_keeps_fence_and_writer_keys() {
 }
 ```
 
-- [ ] **Step 2: Run to verify the new tests fail** (and the old out-of-scope test is deleted):
+- [x] **Step 2: Run to verify the new tests fail** (and the old out-of-scope test is deleted):
   `cargo test -p varve-engine gc_plan` → new tests FAIL (log/probe keys not in `delete_keys`).
 
-- [ ] **Step 3: Implement.** In `plan_gc`: compute
+- [x] **Step 3: Implement.** In `plan_gc`: compute
   `let min_retained_watermark: Option<u64> = /* min over retained manifests' .watermark */;`
   inside the existing `if let Some(latest)` block (the retained set is the manifests with
   `block_id >= retain_from`). Split key handling:
@@ -355,14 +355,14 @@ listed_keys.extend(store.list(PROBE_PREFIX).await?);
   capability probe racing a concurrent GC may lose its probe object mid-probe and should be
   retried; probes run at node startup, GC on the writer, so the window is operationally narrow).
 
-- [ ] **Step 4: Run** `cargo test -p varve-engine` → all gc tests PASS; full crate green.
+- [x] **Step 4: Run** `cargo test -p varve-engine` → all gc tests PASS; full crate green.
 
-- [ ] **Step 5: Update the stale `trim` promise comment** in
+- [x] **Step 5: Update the stale `trim` promise comment** in
   `crates/varve-log/src/object_store.rs` module doc from "swept by slice-8 GC" to "swept by GC
   (`Db::gc_once`) once wholly below the minimum retained manifest watermark" — the promise is now
   true; keep it accurate.
 
-- [ ] **Step 6: Gate + commit**
+- [x] **Step 6: Gate + commit**
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p varve-engine -p varve-log
@@ -393,7 +393,7 @@ axis after compaction AND after restart, and prove it for edge properties via `D
   New test helper `fn all_disk_bytes(root: &Path) -> Vec<u8>` (recursive walk of `root`, i.e.
   BOTH `dir/log` and `dir/store`, concatenating every file's bytes; `std::fs` only).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 fn all_disk_bytes(root: &Path) -> Vec<u8> {
@@ -516,7 +516,7 @@ async fn detach_erase_scrubs_edge_property_bytes_too() {
   `MATCH … INSERT` edge syntax follow the existing slice-6/7 test corpus — if the exact INSERT
   form differs, mirror `crates/varve/tests/erase.rs`; the ASSERTIONS are the contract.)
 
-- [ ] **Step 2: Add the config helper to `db_harness.rs`** (same shape as
+- [x] **Step 2: Add the config helper to `db_harness.rs`** (same shape as
   `local_gc_blocks_config`, plus one line in `[log.local]`):
 
 ```rust
@@ -544,7 +544,7 @@ pub fn local_gc_small_segment_config(root: &Path, max_block_rows: usize) -> Conf
 }
 ```
 
-- [ ] **Step 3: Run to verify current behavior** —
+- [x] **Step 3: Run to verify current behavior** —
   `cargo test -p varve --test gdpr_gc -- --test-threads=1`. Expected: the new tests FAIL at the
   post-GC full-scan assertion IF any sentinel byte survives (e.g. in a log segment the trim did
   not drop, or an adjacency family compaction missed). Investigate any failure with
@@ -553,14 +553,14 @@ pub fn local_gc_small_segment_config(root: &Path, max_block_rows: usize) -> Conf
   must run enough L0→L1 rounds. If the tests instead pass immediately, verify non-vacuity: the
   pre-GC `assert!(contains(...))` must have run (it fails the test if the sentinel never hit disk).
 
-- [ ] **Step 4: Fix until green.** Expected fixes are test-side (config/sequencing), NOT
+- [x] **Step 4: Fix until green.** Expected fixes are test-side (config/sequencing), NOT
   engine-side — slice 8 already proved erase-drops-bytes for compaction; the new ground the test
   breaks is (a) the whole-`dir` scan incl. log segments, and (b) edge/adjacency sentinel bytes.
   If an ENGINE gap is found (e.g. adjacency family retains erased-edge payload bytes), fix it in
   `varve-engine`/`varve-index` with its own failing unit test first and record the deviation in
   STATUS.md at closeout.
 
-- [ ] **Step 5: Gate + commit**
+- [x] **Step 5: Gate + commit**
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p varve --test gdpr_gc -p varve-testkit --lib -- --test-threads=1
@@ -590,7 +590,7 @@ sentinel.
   `group_commit_window_ms = 1`, gc enabled with `blocks_to_keep = 0`,
   `garbage_lifetime_hours = 0`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 async fn every_object_byte(dir: &Path) -> Vec<u8> {
@@ -641,7 +641,7 @@ async fn erased_bytes_absent_from_every_raw_object_on_the_object_store_log_profi
 }
 ```
 
-- [ ] **Step 2: Add `object_log_gc_config` to `db_harness.rs`**
+- [x] **Step 2: Add `object_log_gc_config` to `db_harness.rs`**
 
 ```rust
 pub fn object_log_gc_config(root: &Path, max_block_rows: usize) -> Config {
@@ -664,14 +664,14 @@ pub fn object_log_gc_config(root: &Path, max_block_rows: usize) -> Config {
 }
 ```
 
-- [ ] **Step 3: Run** `cargo test -p varve --test gdpr_gc -- --test-threads=1`. Without Task 1
+- [x] **Step 3: Run** `cargo test -p varve --test gdpr_gc -- --test-threads=1`. Without Task 1
   the post-GC assertion fails on surviving `v1/log/**.vlog` bytes; with Task 1 it must pass.
   Note: with `blocks_to_keep = 0` only the latest manifest is retained, so the min retained
   watermark is the latest flush watermark — every fully-superseded log object qualifies. The last
   log object is never deleted; the test's 61 filler txs after the erase guarantee the sentinel
   object has successors at or below the final watermark.
 
-- [ ] **Step 4: Gate + commit**
+- [x] **Step 4: Gate + commit**
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p varve --test gdpr_gc -- --test-threads=1
@@ -700,7 +700,7 @@ follower reads.
   signature, new selection rule. Every existing caller (`Db::open` recovery, `verify_database`,
   follower manifest reads, `/v1/status`) inherits the hardening with no call-site change.
 
-- [ ] **Step 1: Write the failing tests** (in `manifest.rs` `mod tests`, alongside
+- [x] **Step 1: Write the failing tests** (in `manifest.rs` `mod tests`, alongside
   `latest_manifest_picks_the_highest_block_id` — REPLACE that test, its rule is superseded):
 
 ```rust
@@ -737,10 +737,10 @@ async fn latest_manifest_breaks_watermark_ties_by_block_id() {
   `latest_manifest_none_when_empty` and `latest_manifest_surfaces_corruption` — corruption in ANY
   listed manifest now surfaces, which is strictly stricter and correct.)
 
-- [ ] **Step 2: Run** `cargo test -p varve-storage latest_manifest` → new tests FAIL
+- [x] **Step 2: Run** `cargo test -p varve-storage latest_manifest` → new tests FAIL
   (stray block 11 wins under the old rule).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 /// Finds the newest COMMITTED manifest: max by `(watermark, block_id)`.
@@ -758,17 +758,17 @@ pub async fn latest_manifest(
 }
 ```
 
-- [ ] **Step 4: Run** `cargo test -p varve-storage && cargo test -p varve-engine` → PASS. The
+- [x] **Step 4: Run** `cargo test -p varve-storage && cargo test -p varve-engine` → PASS. The
   engine's recovery/follower/verify suites must stay green (equal-watermark tiebreak preserves
   every legitimate ordering they rely on).
 
-- [ ] **Step 5: Update the two limitation comments.** In `writer.rs` (the block around line
+- [x] **Step 5: Update the two limitation comments.** In `writer.rs` (the block around line
   1877 discussing the in-flight manifest PUT) and `flush.rs` (manifest-PUT commit-point doc):
   replace "robust hardening ... is a Slice-11 follow-up" wording with a statement that
   `latest_manifest` now selects by `(watermark, block_id)`, so a stray stale-watermark manifest
   can never be selected; the before+after lease ack-gate remains the liveness guard.
 
-- [ ] **Step 6: Gate + commit**
+- [x] **Step 6: Gate + commit**
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p varve-storage -p varve-engine
@@ -801,7 +801,7 @@ path to it, and fuzz it: arbitrary bytes must never panic — only `Ok(records)`
   decoder returns today, with `context` in the message. Re-export as `varve_log::decode_frames`
   from `lib.rs`. Task 6's CI step and the fuzz target consume it.
 
-- [ ] **Step 1: Write the failing unit tests** (in `record.rs` `mod tests`; frame-building
+- [x] **Step 1: Write the failing unit tests** (in `record.rs` `mod tests`; frame-building
   helper mirrors the object-store log's encode side):
 
 ```rust
@@ -861,9 +861,9 @@ fn decode_frames_rejects_an_absurd_length_prefix_without_allocating() {
   If `LogError`'s corrupt variant needs a specific payload, mirror `object_store.rs::decode_frame`'s
   construction — that function is about to delegate here.)
 
-- [ ] **Step 2: Run** `cargo test -p varve-log decode_frames` → FAIL (function does not exist).
+- [x] **Step 2: Run** `cargo test -p varve-log decode_frames` → FAIL (function does not exist).
 
-- [ ] **Step 3: Implement `decode_frames`** by MOVING the loop logic of
+- [x] **Step 3: Implement `decode_frames`** by MOVING the loop logic of
   `object_store.rs::{decode_object, decode_frame}` into `record.rs` (length-bounds check BEFORE
   slicing — the absurd-length test — then CRC, then `LogRecord::from_wire`), and reduce
   `decode_object(key, bytes)` to `decode_frames(key, bytes)`. Keep `decode_frame` deleted or as a
@@ -871,11 +871,11 @@ fn decode_frames_rejects_an_absurd_length_prefix_without_allocating() {
   changed (its torn-TAIL tolerance is a different, lenient contract; note this in `decode_frames`
   rustdoc: "strict — for atomic whole objects; the local segment scanner tolerates a torn tail").
 
-- [ ] **Step 4: Run** `cargo test -p varve-log` (default features include `object-store`) →
+- [x] **Step 4: Run** `cargo test -p varve-log` (default features include `object-store`) →
   ALL PASS including the existing object-store corruption tests, which now exercise the shared
   decoder.
 
-- [ ] **Step 5: Add the fuzz target and seed.** `fuzz/Cargo.toml` additions:
+- [x] **Step 5: Add the fuzz target and seed.** `fuzz/Cargo.toml` additions:
 
 ```toml
 [dependencies]
@@ -929,7 +929,7 @@ fn write_log_record_fuzz_seed() {
 
   Run: `cargo test -p varve-log write_log_record_fuzz_seed -- --ignored` then `git add` the seed.
 
-- [ ] **Step 6: Smoke-fuzz locally**
+- [x] **Step 6: Smoke-fuzz locally**
 
 ```bash
 cargo +nightly fuzz run log_record -- -max_total_time=60 -rss_limit_mb=4096
@@ -938,7 +938,7 @@ cargo +nightly fuzz run log_record -- -max_total_time=60 -rss_limit_mb=4096
   Expected: no crashes. ANY crash = a real bug: minimize (`cargo fuzz tmin`), add the crash bytes
   as a `decode_frames_regression_*` unit test in `record.rs`, fix, re-run.
 
-- [ ] **Step 7: Gate + commit**
+- [x] **Step 7: Gate + commit**
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p varve-log
@@ -972,7 +972,7 @@ all five targets.
   `varve_storage::TrieCatalog::from_manifests`, `varve_index::{decode_meta, decode_events}`.
 - Produces: no API changes (hardening stays behind the existing signatures).
 
-- [ ] **Step 1: Add the three fuzz targets.** `fuzz/Cargo.toml`:
+- [x] **Step 1: Add the three fuzz targets.** `fuzz/Cargo.toml`:
 
 ```toml
 varve-storage = { path = "../crates/varve-storage", default-features = false }
@@ -1045,16 +1045,16 @@ fuzz_target!(|data: &[u8]| {
   re-exported per `catalog.rs`; if `TrieCatalog::from_manifests` takes `&[BlockManifest]`, the
   `from_ref` call matches.)
 
-- [ ] **Step 2: Verify all targets build:** `cargo +nightly fuzz build` → compiles all five.
+- [x] **Step 2: Verify all targets build:** `cargo +nightly fuzz build` → compiles all five.
 
-- [ ] **Step 3: Generate seeds** with `#[ignore]`d writer tests, same pattern as Task 5:
+- [x] **Step 3: Generate seeds** with `#[ignore]`d writer tests, same pattern as Task 5:
   in `manifest.rs` tests, write `sample().to_wire()` to `fuzz/corpus/manifest/valid.bin`; in
   `varve-index` tests, write one `encode_meta`/`encode_block`-produced meta buffer and one
   `encode_events(&[...])` buffer (reuse the existing round-trip test fixtures) to
   `fuzz/corpus/block_meta/valid.bin` and `fuzz/corpus/events/valid.bin`. Run each with
   `-- --ignored`, commit the seeds.
 
-- [ ] **Step 4: Smoke-fuzz each target 120 s:**
+- [x] **Step 4: Smoke-fuzz each target 120 s:**
 
 ```bash
 for t in manifest block_meta events; do
@@ -1072,7 +1072,7 @@ done
   `fuzz/regressions/` and a `#[should_panic]`-free skip note — but exhaust validation options
   first.
 
-- [ ] **Step 5: Extend CI + justfile.** `fuzz-nightly` job becomes a matrix over all five
+- [x] **Step 5: Extend CI + justfile.** `fuzz-nightly` job becomes a matrix over all five
   targets (parse keeps its 600 s budget; decoders get 300 s each):
 
 ```yaml
@@ -1114,7 +1114,7 @@ fuzz target="parse" secs="60":
     cargo +nightly fuzz run {{target}} -- -max_total_time={{secs}} -rss_limit_mb=4096
 ```
 
-- [ ] **Step 6: Gate + commit**
+- [x] **Step 6: Gate + commit**
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p varve-storage -p varve-index
@@ -1161,7 +1161,7 @@ name = "resolution"
 harness = false
 ```
 
-- [ ] **Step 1: Write `crates/varve-index/benches/resolution.rs`**
+- [x] **Step 1: Write `crates/varve-index/benches/resolution.rs`**
 
 ```rust
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
@@ -1190,7 +1190,7 @@ criterion_group!(benches, bench_resolve);
 criterion_main!(benches);
 ```
 
-- [ ] **Step 2: Write `crates/varve-types/benches/trie.rs`**
+- [x] **Step 2: Write `crates/varve-types/benches/trie.rs`**
 
 ```rust
 use criterion::{criterion_group, criterion_main, Criterion};
@@ -1225,7 +1225,7 @@ criterion_main!(benches);
   `Iid::derive("default", "nodes", &Value::Int(id).id_bytes().unwrap())`; adapt the byte-arg
   spelling accordingly.)
 
-- [ ] **Step 3: Write `crates/varve-gql/benches/parse.rs`**
+- [x] **Step 3: Write `crates/varve-gql/benches/parse.rs`**
 
 ```rust
 use criterion::{criterion_group, criterion_main, Criterion};
@@ -1258,11 +1258,11 @@ criterion_main!(benches);
   `clippy.toml` allows unwrap in tests, and benches are non-library targets; if clippy still
   flags it, add `#![allow(clippy::unwrap_used)]` at the top of the bench file.)
 
-- [ ] **Step 4: Run** `cargo bench -p varve-types -p varve-gql -p varve-index -- --quick` →
+- [x] **Step 4: Run** `cargo bench -p varve-types -p varve-gql -p varve-index -- --quick` →
   all benches execute and report. Then `cargo clippy --workspace --all-targets -- -D warnings`
   (benches are now compiled by the standard gate).
 
-- [ ] **Step 5: justfile recipe + commit**
+- [x] **Step 5: justfile recipe + commit**
 
 ```make
 bench-micro:
@@ -1304,7 +1304,7 @@ over the deterministic 10k-node/60k-edge social fixture on the durable local pro
 | AS-OF historical 2-hop (p50) | X.XX ms (N.NNx of current) |
 ```
 
-- [ ] **Step 1: Write the example.** Structure (mirroring `traversal_bench.rs`):
+- [x] **Step 1: Write the example.** Structure (mirroring `traversal_bench.rs`):
   1. Temp dir; open with the traversal-bench config (durable local log + store, flush via
      `max_block_rows`).
   2. Ingest `social_graph(10_000, 60_000, 42)` via `node_statements(...)` +
@@ -1324,11 +1324,11 @@ over the deterministic 10k-node/60k-edge social fixture on the durable local pro
   7. Print the markdown table; exit nonzero if any query errors (no perf asserts — targets are
      tracked, not gated).
 
-- [ ] **Step 2: Run** `cargo run --release --example social_bench -p varve` → table prints,
+- [x] **Step 2: Run** `cargo run --release --example social_bench -p varve` → table prints,
   numbers plausible vs. STATUS.md slice-4/6 records (39.8k events/s ingest, 7.6 ms warm point,
   16.2 ms warm 2-hop on this machine).
 
-- [ ] **Step 3: Gate + commit**
+- [x] **Step 3: Gate + commit**
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p varve
@@ -1355,7 +1355,7 @@ that measures aggregate read QPS against 1, 2, and 4 query nodes of ONE cluster 
   `start()` becomes `Self::start_with_query_nodes(2).await` (existing tests unchanged).
   `query_urls()` keeps returning all query-node URLs in creation order.
 
-- [ ] **Step 1: Generalize the harness.** In `process_cluster.rs`, replace the hardcoded
+- [x] **Step 1: Generalize the harness.** In `process_cluster.rs`, replace the hardcoded
   `for index in 1..=2` loop with `for index in 1..=query_nodes`, behind:
 
 ```rust
@@ -1371,7 +1371,7 @@ pub async fn start_with_query_nodes(query_nodes: usize) -> Result<ProcessCluster
   Run the existing suites to prove no regression:
   `cargo test -p varve-server --test process_consistency --test process_scale_out -- --test-threads=1` → 4 passed.
 
-- [ ] **Step 2: Write the env-gated bench test** (`tests/scale_out_bench.rs`; skips by default
+- [x] **Step 2: Write the env-gated bench test** (`tests/scale_out_bench.rs`; skips by default
   so `just check` stays fast):
 
 ```rust
@@ -1457,7 +1457,7 @@ async fn read_qps_scales_from_one_to_four_query_nodes() {
   so `assert_eq!(count, expected)` still must hold — followers have converged, enforced by the
   basis-pinned pre-check).
 
-- [ ] **Step 3: Run it**
+- [x] **Step 3: Run it**
 
 ```bash
 VARVE_SCALE_BENCH=1 cargo test -p varve-server --release --test scale_out_bench -- --nocapture --test-threads=1
@@ -1466,7 +1466,7 @@ VARVE_SCALE_BENCH=1 cargo test -p varve-server --release --test scale_out_bench 
   Expected: table with QPS growing with n (record actual numbers for Task 10; no assert on the
   slope). Also `cargo test -p varve-server --test scale_out_bench` (no env) → skips in <1 s.
 
-- [ ] **Step 4: justfile + commit**
+- [x] **Step 4: justfile + commit**
 
 ```make
 bench-scale-out:
@@ -1495,7 +1495,7 @@ numbers side-by-side with the spec targets, honest gaps called out.
   `traversal_bench`, and (optional S3 numbers) `just s3-matrix` / MinIO via docker.
 - Produces: the report Task 12's book links and Task 17's acceptance pass cites.
 
-- [ ] **Step 1: Run the suite and capture outputs** (release mode, quiet machine):
+- [x] **Step 1: Run the suite and capture outputs** (release mode, quiet machine):
 
 ```bash
 just bench-micro
@@ -1507,7 +1507,7 @@ cargo run --release --example social_bench -p varve
 just bench-scale-out
 ```
 
-- [ ] **Step 2: Write the report** with this exact structure (fill measured values):
+- [x] **Step 2: Write the report** with this exact structure (fill measured values):
 
 ```markdown
 # Varve v1 benchmark report
@@ -1541,7 +1541,7 @@ Date: 2026-07-XX. Commit: <sha>. Reproduce: commands listed per section.
   numbers — re-measure). Where a spec target cannot be honestly claimed (e.g. 1M-node graph not
   ingested), the report says so explicitly rather than extrapolating silently.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/benchmarks/v1.md
@@ -1569,7 +1569,7 @@ build the book.
   version in the commit message and PIN it in CI with `--version <resolved>`).
 - Produces: `mdbook build docs/book` green; chapter files Tasks 12–13 fill in.
 
-- [ ] **Step 1: Install mdbook + scaffold.** `book.toml`:
+- [x] **Step 1: Install mdbook + scaffold.** `book.toml`:
 
 ```toml
 [book]
@@ -1607,7 +1607,7 @@ create-missing = false
 
   `create-missing = false` forces every listed file to exist — create the stubs now.
 
-- [ ] **Step 2: Write `introduction.md`** (one page: what Varve is, sovereignty stance, the
+- [x] **Step 2: Write `introduction.md`** (one page: what Varve is, sovereignty stance, the
   varve metaphor, links to spec/roadmap in-repo) **and `getting-started.md`** with BOTH paths,
   each verified by actually running it:
   - **From source (works today):** `git clone … && cargo run --release -p varve-cli -- shell
@@ -1621,12 +1621,12 @@ create-missing = false
     `varved --config varve.toml`, `varve shell --url http://127.0.0.1:8080 --token …` — run it
     once to verify the TOML is exact.
 
-- [ ] **Step 3: Write `architecture.md`:** condensed spec §3/§5/§9/§12 — roles diagram
+- [x] **Step 3: Write `architecture.md`:** condensed spec §3/§5/§9/§12 — roles diagram
   (writer/query/compactor over one log + object store), the event model and derived `_system_to`,
   blocks/tries/manifest-as-commit-point, group commit, epoch fencing, determinism. Target ~2
   pages; link the full design spec for depth. No stale numbers.
 
-- [ ] **Step 4: CI job + justfile.** In `ci.yml`:
+- [x] **Step 4: CI job + justfile.** In `ci.yml`:
 
 ```yaml
   docs:
@@ -1653,7 +1653,7 @@ docs-serve:
   Validate: `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"` and
   `just docs` → build succeeds with stubs.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add docs/book .github/workflows/ci.yml justfile .gitignore
@@ -1683,7 +1683,7 @@ slice-9/10 contracts for ops.
   Task 4 (failover hardening wording).
 - Produces: complete book minus configuration page.
 
-- [ ] **Step 1: `gql/reference.md`** — the practical core per spec §8 as shipped: statement list
+- [x] **Step 1: `gql/reference.md`** — the practical core per spec §8 as shipped: statement list
   (INSERT / MATCH / OPTIONAL MATCH / WHERE / FILTER / LET / FOR / ORDER BY / SKIP / LIMIT /
   OFFSET / UNION [ALL] / RETURN [DISTINCT] / aggregation / SET / REMOVE / DELETE [DETACH] /
   ERASE [DETACH] / CREATE·DROP GRAPH / USE / parameters / CASE / EXISTS / CAST), each with one
@@ -1691,13 +1691,13 @@ slice-9/10 contracts for ops.
   parse (spot-check any uncertain one against `parse_program` in a scratch test, then delete the
   scratch).
 
-- [ ] **Step 2: `gql/temporal.md`** — `FOR VALID_TIME/SYSTEM_TIME AS OF | FROM/TO | BETWEEN |
+- [x] **Step 2: `gql/temporal.md`** — `FOR VALID_TIME/SYSTEM_TIME AS OF | FROM/TO | BETWEEN |
   ALL` (whichever subset shipped — the slice-2/7 tests are the truth), `INSERT … VALID FROM/TO`,
   defaults (valid AS OF now, system AS OF latest), `valid_from()/valid_to()/system_from()`
   functions, ERASE vs DELETE semantics (delete = bitemporal tombstone, erase = history gone at
   every axis + physical bytes after compaction+GC — link the Task 2/3 proofs by test name).
 
-- [ ] **Step 3: `gql/deviations.md`** — honest conformance page: v1 deviations recorded in
+- [x] **Step 3: `gql/deviations.md`** — honest conformance page: v1 deviations recorded in
   STATUS decisions (edge label REQUIRED; one linear path per MATCH; quantified-edge-with-var
   unsupported; catalog+data statements cannot mix in one program; reserved-word list; multi-label
   MATCH limits; `max_path_depth` cap) + TCK standing: adapted openCypher TCK, 445/511 adapted
@@ -1705,7 +1705,7 @@ slice-9/10 contracts for ops.
   the ANTLR differential oracle. Copy the CURRENT numbers from the tck gate output, not from
   this plan.
 
-- [ ] **Step 4: `backends.md`** — matrix table:
+- [x] **Step 4: `backends.md`** — matrix table:
 
 | Backend | Version tested (CI pin) | Probe verdict | `cas-failover` | CI cadence |
 |---|---|---|---|---|
@@ -1719,7 +1719,7 @@ slice-9/10 contracts for ops.
   Plus per-backend config snippets (`[storage.s3]` endpoint/path-style examples) and the
   sovereignty paragraph (plain PUT/GET/LIST always sufficient; CAS strictly optional).
 
-- [ ] **Step 5: ops pages.**
+- [x] **Step 5: ops pages.**
   - `ops/README.md`: one-paragraph orientation + links.
   - `ops/profiles.md`: laptop (memory/local), durable single node (local log+store), sovereign
     scale-out (object-store log + s3 store, 1 writer + N query nodes, Compose demo pointer),
@@ -1732,7 +1732,7 @@ slice-9/10 contracts for ops.
   - `ops/metrics.md`: MOVE the existing `docs/ops/metrics.md` content here verbatim (it is
     already Grafana-ready); fix any relative links; leave the pointer stub behind.
 
-- [ ] **Step 6: `reference/http-api.md` + `reference/cli.md`** — the frozen slice-9 wire
+- [x] **Step 6: `reference/http-api.md` + `reference/cli.md`** — the frozen slice-9 wire
   contract: route/auth matrix (`/healthz` public; bearer for `/metrics`, `/v1/status`,
   `/v1/query`, `/v1/tx`, `/v1/admin/*`), 421 writer redirect, basis forms (`tx_id` /
   `at:<packed>` / `basis_timeout_ms`), JSON vs `application/vnd.apache.arrow.stream` content
@@ -1741,7 +1741,7 @@ slice-9/10 contracts for ops.
   `shell`, `import --label [--graph]`, `export --query [--basis]`, `admin
   status|compact|gc|verify [--json]`, JSONL format incl. `{"$bytes": base64}`.
 
-- [ ] **Step 7: Build + commit**
+- [x] **Step 7: Build + commit**
 
 ```bash
 just docs   # zero warnings, zero missing files
@@ -1777,7 +1777,7 @@ cannot silently rot.
   `just docs-gen` = `cargo run -p varve-testkit --bin config_reference >
   docs/book/src/ops/configuration.md`.
 
-- [ ] **Step 1: Write the failing drift test**
+- [x] **Step 1: Write the failing drift test**
 
 ```rust
 use std::path::Path;
@@ -1796,7 +1796,7 @@ fn committed_configuration_page_matches_the_generator() {
 }
 ```
 
-- [ ] **Step 2: Implement `render()`.** Data model + full section list (this enumeration IS the
+- [x] **Step 2: Implement `render()`.** Data model + full section list (this enumeration IS the
   content contract; every row carries section, key, type, default, one-line description):
 
 ```rust
@@ -1839,7 +1839,7 @@ pub fn render() -> String { /* header + per-section markdown tables */ }
   the exported const in the generator (`default: varve_log::DEFAULT_SEGMENT_MAX_BYTES.to_string()`)
   rather than a literal.
 
-- [ ] **Step 3: Generate + run**
+- [x] **Step 3: Generate + run**
 
 ```bash
 cargo run -p varve-testkit --bin config_reference > docs/book/src/ops/configuration.md
@@ -1849,7 +1849,7 @@ just docs
 
   All three green. Add the `docs-gen` justfile recipe.
 
-- [ ] **Step 4: Gate + commit**
+- [x] **Step 4: Gate + commit**
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p varve-testkit
@@ -1868,7 +1868,7 @@ dead API, misleading docs, or untested reject paths that STATUS.md already flagg
 
 **Interfaces:** no new public API; item (g) DELETES one public enum variant.
 
-- [ ] **(a) CLI rejects invalid `--label`/`--graph` identifiers — durable tests.**
+- [x] **(a) CLI rejects invalid `--label`/`--graph` identifiers — durable tests.**
   Files: `crates/varve-cli/tests/transfer.rs`. Tests first: drive the import path with label
   `"bad-ident!"` and (separately) graph `"1nope"`; assert the error message names the invalid
   identifier and NO client call is made (mirror the existing invalid-property-KEY test in the same
@@ -1877,52 +1877,52 @@ dead API, misleading docs, or untested reject paths that STATUS.md already flagg
   reject path already works and the tests simply pin it (commit as `test:`).
   Commit: `test: pin import label/graph identifier rejection`.
 
-- [ ] **(b) `cli_help.rs` asserts literal `--help` output.**
+- [x] **(b) `cli_help.rs` asserts literal `--help` output.**
   Files: `crates/varve-cli/tests/cli_help.rs`. Render help via the clap `Command` from
   `varve-cli/src/cli.rs` (`Command::render_long_help()`), assert it contains the literal
   substrings `"import"`, `"export"`, `"admin"`, `"shell"`, `"--dir"`, `"--url"`, `"--token"`.
   Commit: `test: assert varve --help lists every subcommand and selector`.
 
-- [ ] **(c) `TxResponse::from_receipt` synthetic-instant decision — keep + pin.**
+- [x] **(c) `TxResponse::from_receipt` synthetic-instant decision — keep + pin.**
   Files: `crates/varve-server/src/api.rs` (line ~71 + tests). DECISION (record in STATUS): keep
   the `<micros>us` fallback for out-of-chrono-range instants (unreachable from real receipts;
   public API stays total). Add a unit test constructing an extreme synthetic receipt and asserting
   the exact fallback string, plus a rustdoc line on `from_receipt` documenting it.
   Commit: `test: pin synthetic-instant formatting on TxResponse::from_receipt`.
 
-- [ ] **(d) Move the strayed mutation doc comment.**
+- [x] **(d) Move the strayed mutation doc comment.**
   Files: `crates/varve-engine/src/db.rs`. The doc comment on `publish_writer` (~line 1178)
   describes mutation execution — move it to `Db::execute`; write `publish_writer` its own
   accurate doc (canonical-JSON plain PUT of the advertisement, NOT coordination).
   Commit: `docs: put the mutation doc comment back on Db::execute`.
 
-- [ ] **(e) Probe-path diagnostic asserts.**
+- [x] **(e) Probe-path diagnostic asserts.**
   Files: `crates/varve-testkit/tests/cas_failover_backends.rs` (~line 73 onward). Replace bare
   `.unwrap()`/`.unwrap_err()` on the refusal-path assertions with `expect`/`assert!` messages
   that include the probe verdict/report, so a live-backend failure names WHAT the probe saw.
   Commit: `test: diagnostic asserts on the cas-failover probe path`.
 
-- [ ] **(f) `FenceMap`: extract `is_dead` + test `EpochExhausted`.**
+- [x] **(f) `FenceMap`: extract `is_dead` + test `EpochExhausted`.**
   Files: `crates/varve-engine/src/coord/fence.rs`. Test first: a `jump` at epoch `u16::MAX`
   returns the `EpochExhausted` error (currently untested). Then extract the duplicated
   dead-condition shared by `is_live`/`jump` into a private `fn is_dead(...) -> bool` (pure
   refactor; existing tests stay green).
   Commit: `refactor: shared FenceMap dead-condition with EpochExhausted coverage`.
 
-- [ ] **(g) Delete `EngineError::InvalidCoordinatorConfig`.**
+- [x] **(g) Delete `EngineError::InvalidCoordinatorConfig`.**
   Files: `crates/varve-engine/src/db.rs` (line ~123) + any exhaustive matches. The variant is
   declared, never constructed; bad `[coordinator]` config already surfaces via
   `RegistryError::Build` carrying `validate()`'s message. Delete it (no back-compat); fix
   matches; `cargo test -p varve-engine` green.
   Commit: `refactor: drop the never-constructed InvalidCoordinatorConfig variant`.
 
-- [ ] **(h) Note the inert `fault-injection` unification.**
+- [x] **(h) Note the inert `fault-injection` unification.**
   Files: `crates/varve-server/Cargo.toml`. One comment above the `varve-testkit` dev-dep: it
   transitively enables `varve-log`/`varve-engine` `fault-injection` in the TEST build only;
   inert unless `VARVE_CRASH_TRIGGER` is set; isolate the fixture if that ever changes.
   Commit: `docs: note the inert fault-injection feature unification in server tests`.
 
-- [ ] **Final step: whole-sweep gate**
+- [x] **Final step: whole-sweep gate**
 
 ```bash
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace -- --test-threads=1
@@ -1949,11 +1949,11 @@ itself is Task 17 (user-gated).
 - Produces: `cargo package`-clean leaf crates; Task 16 tarballs include LICENSE/README/CHANGELOG;
   Task 17 publishes in the dependency order recorded here.
 
-- [ ] **Step 1: LICENSE + workspace version.** Apache-2.0 text at repo root;
+- [x] **Step 1: LICENSE + workspace version.** Apache-2.0 text at repo root;
   `[workspace.package] version = "1.0.0"`. Run `cargo build --workspace` (lockfile version
   bumps).
 
-- [ ] **Step 2: Per-crate metadata.** For each shipping crate add `description` (one line, own
+- [x] **Step 2: Per-crate metadata.** For each shipping crate add `description` (one line, own
   words per crate — e.g. varve: "Bitemporal property-graph database speaking GQL — embedded
   facade"; varve-server: "HTTP server (varved) for VarveDB"; varve-cli: "CLI (varve shell,
   import/export, admin) for VarveDB"; etc. for types/config/gql/log/storage/index/plan/engine),
@@ -1962,7 +1962,7 @@ itself is Task 17 (user-gated).
   path is stripped on publish). `varve-testkit`: `publish = false` (test rig; also keeps its
   docker/fixture surface off crates.io). `fuzz/` is already `publish = false` + workspace-excluded.
 
-- [ ] **Step 3: Verify packaging.**
+- [x] **Step 3: Verify packaging.**
 
 ```bash
 cargo package -p varve-types --list   # sane file set, no stray artifacts
@@ -1975,19 +1975,19 @@ cargo publish --dry-run -p varve-types
   → varve-engine → varve → varve-server → varve-cli`
   (derive the true order from `cargo tree` if it disagrees — code wins).
 
-- [ ] **Step 4: CHANGELOG.md** — one `## 1.0.0 (2026-07-XX)` section, feature summary grouped by
+- [x] **Step 4: CHANGELOG.md** — one `## 1.0.0 (2026-07-XX)` section, feature summary grouped by
   subsystem (bitemporal engine, GQL surface + TCK standing, durability + crash matrix, object
   storage + backends, compaction/GC + GDPR erase, server/CLI, coordination/failover,
   observability), known limitations (from `gql/deviations.md` + AWS-not-CI-verified), and the
   release checklist (publish order, tag, artifacts).
 
-- [ ] **Step 5: README quickstart** — rewrite the top half: badges-free, 30-second pitch,
+- [x] **Step 5: README quickstart** — rewrite the top half: badges-free, 30-second pitch,
   install matrix (cargo install / docker / tarball — marked available from v1.0.0; from-source
   path that works today), the 6-statement GQL session from getting-started, links to the book,
   benchmark report, design spec. Add License section (Apache-2.0). Keep the workspace/gates
   section.
 
-- [ ] **Step 6: USER DECISIONS — STOP and ask Ravan** (do not guess; record answers in
+- [x] **Step 6: USER DECISIONS — STOP and ask Ravan** (do not guess; record answers in
   STATUS.md):
   1. Repo rename `timedb` → `varve` and the `repository` URL (`https://github.com/ravan/varve`
      currently points at a name the repo does not have). Rename now, or ship with the URL fixed
@@ -1996,7 +1996,7 @@ cargo publish --dry-run -p varve-types
   3. Container registry: ghcr.io under which owner/name? (Task 16 defaults to
      `ghcr.io/<github-owner>/varve`.)
 
-- [ ] **Step 7: Gate + commit**
+- [x] **Step 7: Gate + commit**
 
 ```bash
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace -- --test-threads=1
@@ -2027,7 +2027,7 @@ release cadence grows.
   `aarch64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`; image
   `ghcr.io/<owner>/<repo>:<tag>` and `:latest`.
 
-- [ ] **Step 1: `scripts/package_release.sh`** (used by CI AND locally):
+- [x] **Step 1: `scripts/package_release.sh`** (used by CI AND locally):
 
 ```bash
 #!/usr/bin/env sh
@@ -2066,7 +2066,7 @@ tar -tzf dist/varve-1.0.0-aarch64-apple-darwin.tar.gz   # lists varve, varved, L
   justfile: `package target version: sh scripts/package_release.sh {{target}} {{version}}` (and
   add `dist/` to `.gitignore`).
 
-- [ ] **Step 2: `.github/workflows/release.yml`**
+- [x] **Step 2: `.github/workflows/release.yml`**
 
 ```yaml
 name: Release
@@ -2140,7 +2140,7 @@ jobs:
   cross's containerized toolchain) — if the aarch64 leg fails on first tag, that leg is fixed
   forward on the draft release, not re-planned.
 
-- [ ] **Step 3: Validate + commit**
+- [x] **Step 3: Validate + commit**
 
 ```bash
 python3 -c "import yaml; yaml.safe_load(open('.github/workflows/release.yml'))"
@@ -2163,7 +2163,7 @@ the agent.
 
 **Interfaces:** consumes everything above.
 
-- [ ] **Step 1: Whole-slice verification gate** (each command, record actual output):
+- [x] **Step 1: Whole-slice verification gate** (each command, record actual output):
 
 ```bash
 cargo fmt --all --check
@@ -2182,7 +2182,7 @@ git diff --check
 git log --format='%an %ae %(trailers)' <branch-base>..HEAD | grep -ci co-authored || true  # MUST be 0
 ```
 
-- [ ] **Step 2: Write `docs/release/v1-acceptance.md`** — one row per spec §1 criterion, each
+- [x] **Step 2: Write `docs/release/v1-acceptance.md`** — one row per spec §1 criterion, each
   with named evidence (test file :: test name, CI job, demo command, or report section):
 
 | # | Criterion | Evidence |
@@ -2199,7 +2199,7 @@ git log --format='%an %ae %(trailers)' <branch-base>..HEAD | grep -ci co-authore
   Any criterion that cannot be evidenced → fix the gap now (that is this task's purpose) or
   record it as an explicit, user-acknowledged exception in the report.
 
-- [ ] **Step 3: Closeout.** STATUS.md: slice 11 complete (tasks, decisions — Task 1 GC policy,
+- [x] **Step 3: Closeout.** STATUS.md: slice 11 complete (tasks, decisions — Task 1 GC policy,
   Task 4 selection rule, Task 14c formatting decision, Task 15 user answers, deviations),
   final verification transcript summary, demo commands (`social_bench`, `bench-scale-out`,
   `docs-serve`), and a "v1 READY — awaiting tag/publish" entry point. Roadmap: tick all slice-11
@@ -2224,19 +2224,19 @@ docker run ghcr.io/<owner>/<repo>:v1.0.0 --help
 
 ## Slice exit checklist
 
-- [ ] Roadmap slice-11 boxes ticked: ERASE end-to-end verification; fuzz targets complete +
+- [x] Roadmap slice-11 boxes ticked: ERASE end-to-end verification; fuzz targets complete +
       nightly budget; benchmark suite + `docs/benchmarks/v1.md`; docs site under `docs/book/`;
       release engineering; final acceptance pass.
-- [ ] `cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets -- -D warnings`
       clean; `cargo test --workspace -- --test-threads=1` green.
-- [ ] Both GDPR proofs green (`cargo test -p varve --test gdpr_gc -- --test-threads=1`).
-- [ ] All five fuzz targets build and survive a 60 s local run; `fuzz-nightly` matrix committed.
-- [ ] `just docs` builds with zero stubs (`grep -r "TODO(slice-11" docs/book/src` → empty);
+- [x] Both GDPR proofs green (`cargo test -p varve --test gdpr_gc -- --test-threads=1`).
+- [x] All five fuzz targets build and survive a 60 s local run; `fuzz-nightly` matrix committed.
+- [x] `just docs` builds with zero stubs (`grep -r "TODO(slice-11" docs/book/src` → empty);
       config-reference drift test green.
-- [ ] `docs/benchmarks/v1.md` published with re-measured numbers vs spec §13 targets.
-- [ ] `docs/release/v1-acceptance.md` — all 8 criteria evidenced or explicitly excepted.
-- [ ] Release workflow + package script committed; local host-triple tarball verified.
-- [ ] No co-author trailers anywhere on the branch.
-- [ ] STATUS.md updated (position, decisions, deviations, demo commands, next entry point =
+- [x] `docs/benchmarks/v1.md` published with re-measured numbers vs spec §13 targets.
+- [x] `docs/release/v1-acceptance.md` — all 8 criteria evidenced or explicitly excepted.
+- [x] Release workflow + package script committed; local host-triple tarball verified.
+- [x] No co-author trailers anywhere on the branch.
+- [x] STATUS.md updated (position, decisions, deviations, demo commands, next entry point =
       user-gated tag/publish); roadmap slice log row filled.
-- [ ] User decisions recorded (repo rename, crates.io, registry); tag/publish left to Ravan.
+- [x] User decisions recorded (repo rename, crates.io, registry); tag/publish left to Ravan.
