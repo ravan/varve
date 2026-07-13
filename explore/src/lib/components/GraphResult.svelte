@@ -1,20 +1,21 @@
 <script lang="ts">
-  import { browser } from '$app/environment';
   import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert';
   import { Badge } from '$lib/components/ui/badge';
   import { Button } from '$lib/components/ui/button';
   import * as Tooltip from '$lib/components/ui/tooltip';
   import type { GraphExtraction, GraphInspection } from '$lib/logic/graph';
+  import {
+    mountGraphViewport,
+    type GraphViewportController,
+    type GraphViewportSelection,
+  } from '$lib/logic/graph-viewport';
   import { isCanonicalBytesObject, type NormalizedCell, type NormalizedRow } from '$lib/logic/results';
   import type { WorkspaceStore } from '$lib/stores/workspace.svelte';
   import Maximize from '@lucide/svelte/icons/maximize';
   import Minus from '@lucide/svelte/icons/minus';
   import Plus from '@lucide/svelte/icons/plus';
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
-  import type { Core, EdgeSingular, ElementDefinition, NodeSingular } from 'cytoscape';
   import { onMount } from 'svelte';
-
-  const GRAPH_ELEMENT_CAP = 1_000;
 
   let {
     extraction,
@@ -31,155 +32,49 @@
   } = $props();
 
   let graphHost = $state<HTMLDivElement | null>(null);
-  let graph: Core | null = null;
-
-  let normalizedElements = $derived(capElements(extraction));
+  let viewport: GraphViewportController | null = null;
 
   onMount(() => {
     const host = graphHost;
-    const elements = normalizedElements;
-    const shouldAnimate = motion;
     const currentSourceId = sourceId;
-    if (!browser || host === null || !extraction.available) return;
+    if (host === null || !extraction.available) return;
 
     let disposed = false;
-    void import('cytoscape').then(({ default: cytoscape }) => {
-      if (disposed) return;
-      const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      const instance = cytoscape({
-        container: host,
-        elements,
-        layout: layoutOptions(shouldAnimate && !reduceMotion),
-        minZoom: 0.1,
-        maxZoom: 4,
-        style: [
-          {
-            selector: 'node',
-            style: {
-              'background-color': '#d97706',
-              'border-color': '#fbbf24',
-              'border-width': 2,
-              color: '#f8fafc',
-              label: 'data(label)',
-              'font-size': 10,
-              'font-weight': 600,
-              shape: 'round-rectangle',
-              padding: '10px',
-              'text-max-width': '110px',
-              'text-overflow-wrap': 'anywhere',
-              'text-valign': 'center',
-              'text-halign': 'center',
-              width: 120,
-              height: 44,
-            },
-          },
-          {
-            selector: 'edge',
-            style: {
-              width: 2,
-              'line-color': '#0891b2',
-              'target-arrow-color': '#0891b2',
-              'target-arrow-shape': 'triangle',
-              'curve-style': 'bezier',
-              label: 'data(label)',
-              color: '#64748b',
-              'font-size': 9,
-              'text-background-color': '#f8fafc',
-              'text-background-opacity': 0.86,
-              'text-background-padding': '3px',
-            },
-          },
-          {
-            selector: ':selected',
-            style: {
-              'border-color': '#0ea5e9',
-              'border-width': 4,
-              'line-color': '#0ea5e9',
-              'target-arrow-color': '#0ea5e9',
-            },
-          },
-        ],
-      });
-      graph = instance;
-      instance.on('select', 'node', (event) => inspectNode(event.target as NodeSingular));
-      instance.on('select', 'edge', (event) => inspectEdge(event.target as EdgeSingular));
+    void mountGraphViewport({
+      container: host,
+      extraction,
+      motion,
+      onSelection: inspectSelection,
+    }).then((controller) => {
+      if (disposed) controller.destroy();
+      else viewport = controller;
     });
 
     return () => {
       disposed = true;
-      graph?.destroy();
-      graph = null;
+      viewport?.destroy();
+      viewport = null;
       workspace.clearInspection(currentSourceId);
     };
   });
 
-  function capElements(value: GraphExtraction): ElementDefinition[] {
-    const nodes = value.nodes.slice(0, GRAPH_ELEMENT_CAP);
-    const nodeIds = new Set(nodes.map(({ id }) => id));
-    const room = Math.max(0, GRAPH_ELEMENT_CAP - nodes.length);
-    const edges = value.edges
-      .filter(({ source, target }) => nodeIds.has(source) && nodeIds.has(target))
-      .slice(0, room);
-    return [
-      ...nodes.map((node) => ({
-        group: 'nodes' as const,
-        data: {
-          id: node.id,
-          label: node.labels.length > 0 ? node.labels.join(' · ') : node.id,
-          labels: [...node.labels],
-        },
-      })),
-      ...edges.map((edge) => ({
-        group: 'edges' as const,
-        data: {
-          id: edge.id,
-          source: edge.source,
-          target: edge.target,
-          label: edge.type ?? '',
-          relationshipType: edge.type,
-        },
-      })),
-    ];
-  }
-
-  function layoutOptions(animate: boolean) {
-    return {
-      name: 'cose' as const,
-      animate,
-      animationDuration: animate ? 450 : 0,
-      fit: true,
-      padding: 32,
-      randomize: true,
-    };
-  }
-
-  function inspectNode(node: NodeSingular): void {
-    const id = node.id();
-    workspace.inspectGraphElement({
-      sourceId,
-      kind: 'node',
-      id,
-      labels: asStrings(node.data('labels')),
-      inferred: true,
-      ...relatedRows(id),
-    });
-  }
-
-  function inspectEdge(edge: EdgeSingular): void {
-    const id = edge.id();
-    const relationshipType = edge.data('relationshipType');
+  function inspectSelection(selection: GraphViewportSelection): void {
     const inspection: GraphInspection = {
       sourceId,
-      kind: 'relationship',
-      id,
-      labels: [],
-      ...(typeof relationshipType === 'string' && relationshipType !== ''
-        ? { relationshipType }
+      kind: selection.kind,
+      id: selection.id,
+      labels: selection.kind === 'node' ? selection.labels : [],
+      ...(selection.kind === 'relationship'
+        ? {
+            ...(selection.relationshipType === undefined
+              ? {}
+              : { relationshipType: selection.relationshipType }),
+            source: selection.source,
+            target: selection.target,
+          }
         : {}),
-      source: edge.source().id(),
-      target: edge.target().id(),
       inferred: true,
-      ...relatedRows(id),
+      ...relatedRows(selection.id),
     };
     workspace.inspectGraphElement(inspection);
   }
@@ -207,23 +102,16 @@
     return Object.values(value).some((item) => valueContainsIdentity(item, identity));
   }
 
-  function asStrings(value: unknown): string[] {
-    return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
-  }
-
   function zoom(factor: number): void {
-    if (graph === null) return;
-    graph.zoom({ level: graph.zoom() * factor, renderedPosition: { x: graph.width() / 2, y: graph.height() / 2 } });
+    viewport?.zoomBy(factor);
   }
 
   function fitGraph(): void {
-    graph?.fit(undefined, 32);
+    viewport?.fit();
   }
 
-  function resetLayout(): void {
-    if (graph === null) return;
-    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    graph.layout(layoutOptions(motion && !reduceMotion)).run();
+  function relayout(): void {
+    viewport?.relayout();
   }
 </script>
 
@@ -243,7 +131,12 @@
       <div class="flex flex-wrap items-center gap-2">
         <Badge variant="secondary">{extraction.nodes.length} nodes</Badge>
         <Badge variant="secondary">{extraction.edges.length} relationships</Badge>
-        {#if extraction.truncated}<Badge variant="outline">Capped at {GRAPH_ELEMENT_CAP}</Badge>{/if}
+        {#if extraction.truncated}
+          <Badge variant="outline">
+            Showing {extraction.nodes.length} of {extraction.totalNodes} nodes · {extraction.edges.length} of
+            {extraction.totalEdges} relationships
+          </Badge>
+        {/if}
       </div>
       <div class="flex items-center gap-1">
         <Tooltip.Root>
@@ -279,12 +172,12 @@
         <Tooltip.Root>
           <Tooltip.Trigger>
             {#snippet child({ props })}
-              <Button {...props} variant="outline" size="icon-sm" aria-label="Reset layout" onclick={resetLayout}>
+              <Button {...props} variant="outline" size="icon-sm" aria-label="Relayout" onclick={relayout}>
                 <RotateCcw aria-hidden="true" />
               </Button>
             {/snippet}
           </Tooltip.Trigger>
-          <Tooltip.Content>Reset layout</Tooltip.Content>
+          <Tooltip.Content>Relayout</Tooltip.Content>
         </Tooltip.Root>
       </div>
     </div>

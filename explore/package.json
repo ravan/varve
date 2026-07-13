@@ -28,6 +28,7 @@
     "@lezer/highlight": "^1.2.3",
     "bits-ui": "^2.18.1",
     "cytoscape": "^3.34.0",
+    "cytoscape-fcose": "^2.2.0",
     "lucide-svelte": "^1.0.1",
     "mode-watcher": "^1.1.0",
     "svelte-sonner": "^1.1.1"

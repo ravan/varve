@@ -13,9 +13,12 @@ Varve Explorer is MIT-licensed original work. The following are every direct run
 | `@lezer/highlight`        | [Lezer](https://lezer.codemirror.net/)                              | MIT        |
 | `bits-ui`                 | [Bits UI](https://github.com/huntabyte/bits-ui)                     | MIT        |
 | `cytoscape`               | [Cytoscape.js](https://js.cytoscape.org/)                           | MIT        |
+| `cytoscape-fcose`         | [fCoSE](https://github.com/iVis-at-Bilkent/cytoscape.js-fcose)      | MIT        |
 | `lucide-svelte`           | [Lucide](https://lucide.dev/)                                       | ISC        |
 | `mode-watcher`            | [mode-watcher](https://github.com/svecosystem/mode-watcher)         | MIT        |
 | `svelte-sonner`           | [svelte-sonner](https://github.com/wobsoriano/svelte-sonner)        | MIT        |
+
+`cytoscape-fcose` installs the MIT-licensed `cose-base` and `layout-base` layout dependencies.
 
 ## Authorized build-tool exception
 

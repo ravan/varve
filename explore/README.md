@@ -80,7 +80,14 @@ When a write sent to a query node returns Varve's `421 misdirected_request` with
 
 Varve v1 has no schema-introspection HTTP endpoint. Explorer's Observed Schema is query-derived: it reports labels and relationship types seen in successfully executed or favorited GQL, not authoritative database metadata. Extraction failure does not block execution.
 
-Varve's JSON query API returns rows rather than rich graph entities. Explorer enables Graph only when submitted GQL and returned opaque identifiers prove an unambiguous topology. If identity or topology is ambiguous, Graph is disabled with a reason and Table and Raw remain available. Graph rendering is capped at 1,000 elements; truncation does not alter Table or Raw results.
+Varve's JSON query API returns rows rather than rich graph entities. Explorer enables Graph only when submitted GQL and returned opaque identifiers prove an unambiguous topology. If identity or topology is ambiguous, Graph is disabled with a reason and Table and Raw remain available. Graph rendering displays at most 2,000 nodes and 4,000 relationships; relationships whose endpoints fall outside the node limit are omitted, and truncation does not alter Table or Raw results.
+
+Return scalar node properties alongside a path to provide deterministic graph captions. Explorer prefers `name`, then `title`, then `label`, then the first other returned scalar property:
+
+```gql
+MATCH path = (a:Person)-[:KNOWS]->(b:Person)
+RETURN path, a.name AS from_name, b.name AS to_name
+```
 
 ## Quality and license checks
 
@@ -120,7 +127,7 @@ Using fresh refs after each snapshot:
 
 1. Confirm healthy connected status.
 2. Run the sample write, then the sample read; inspect Table and Raw.
-3. Run a topology-returning query; when Graph is available, exercise selection, zoom, fit, and the inspector. Confirm an ambiguous result falls back to Table/Raw with an explanation.
+3. Run the caption-enabled topology query above; when Graph is available, confirm the `KNOWS` shaft and arrow, non-overlapping captioned circles, semantic zoom, selection and inspector focus, dragging, zoom, fit, and relayout. Check both themes and reduced motion, and confirm an ambiguous result falls back to Table/Raw with an explanation.
 4. Exercise history, favorites, Observed Schema, settings, reload persistence, and responsive navigation.
 5. Submit invalid GQL, test an invalid token, and cancel a request; confirm each state is recoverable.
 6. Disconnect, close the browser, open a new session, and confirm the bearer token is not restored.

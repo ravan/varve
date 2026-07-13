@@ -1,4 +1,10 @@
-import type { NamedPathShape, QueryPatternShape, QueryShape, RelationshipDirection } from './gql';
+import type {
+  NamedPathShape,
+  PropertyReturnShape,
+  QueryPatternShape,
+  QueryShape,
+  RelationshipDirection,
+} from './gql';
 import { isCanonicalBytesObject, type NormalizedCell } from './results';
 
 export interface GraphInspectionValue {
@@ -22,6 +28,7 @@ export interface GraphInspection {
 export interface GraphNode {
   readonly id: string;
   readonly labels: readonly string[];
+  readonly caption?: string;
 }
 
 export interface GraphEdge {
@@ -37,7 +44,14 @@ export interface GraphExtraction {
   readonly reason?: string;
   readonly nodes: readonly GraphNode[];
   readonly edges: readonly GraphEdge[];
+  readonly totalNodes: number;
+  readonly totalEdges: number;
   readonly truncated: boolean;
+}
+
+export interface GraphLimits {
+  readonly maxNodes: number;
+  readonly maxEdges: number;
 }
 
 type GraphRowValue = unknown | NormalizedCell;
@@ -51,6 +65,7 @@ interface OpaqueIdentity {
 interface PendingNode {
   readonly identity: OpaqueIdentity;
   readonly labels: string[];
+  readonly captionValues: Map<string, string>;
 }
 
 interface PendingEdge {
@@ -74,16 +89,23 @@ const unavailable = (reason: string): GraphExtraction => ({
   reason,
   nodes: [],
   edges: [],
+  totalNodes: 0,
+  totalEdges: 0,
   truncated: false,
 });
 
 export function extractGraph(
   shape: QueryShape,
   rows: readonly GraphRow[],
-  cap: number,
+  limits: GraphLimits,
 ): GraphExtraction {
-  if (!Number.isSafeInteger(cap) || cap < 0) {
-    throw new RangeError('Graph element cap must be a non-negative integer');
+  if (
+    !Number.isSafeInteger(limits.maxNodes) ||
+    limits.maxNodes < 0 ||
+    !Number.isSafeInteger(limits.maxEdges) ||
+    limits.maxEdges < 0
+  ) {
+    throw new RangeError('Graph limits must be non-negative integers');
   }
   if (shape.ambiguous) {
     return unavailable('Graph topology is unavailable because the query shape is ambiguous.');
@@ -91,6 +113,7 @@ export function extractGraph(
 
   try {
     const returnAliases = indexReturnAliases(shape);
+    const captionProjections = indexCaptionProjections(shape);
     const pending: PendingGraph = {
       nodes: new Map(),
       edges: new Map(),
@@ -114,7 +137,7 @@ export function extractGraph(
             'Named path topology must be an alternating node/relationship sequence.',
           );
         }
-        addPath(pending, pattern, value);
+        addPath(pending, pattern, value, row, captionProjections);
       }
       mappedTopology = true;
     }
@@ -123,7 +146,7 @@ export function extractGraph(
       if (pathPatternIndexes.has(patternIndex) || !canMapDirectly(pattern, returnAliases)) return;
 
       for (const row of rows) {
-        addDirectPattern(pending, pattern, row, returnAliases);
+        addDirectPattern(pending, pattern, row, returnAliases, captionProjections);
       }
       mappedTopology = true;
     });
@@ -132,7 +155,7 @@ export function extractGraph(
       return unavailable('Graph topology cannot be proven from the returned query values.');
     }
 
-    return applyCap(pending, cap);
+    return applyLimits(pending, limits);
   } catch (error) {
     if (error instanceof UnsupportedTopology) return unavailable(error.message);
     throw error;
@@ -150,11 +173,23 @@ function indexReturnAliases(shape: QueryShape): Map<string, string[]> {
       );
     }
     aliases.add(returned.alias);
+    if (returned.kind !== 'entity') continue;
     const existing = result.get(returned.source) ?? [];
     existing.push(returned.alias);
     result.set(returned.source, existing);
   }
 
+  return result;
+}
+
+function indexCaptionProjections(shape: QueryShape): Map<string, PropertyReturnShape[]> {
+  const result = new Map<string, PropertyReturnShape[]>();
+  for (const returned of shape.returns) {
+    if (returned.kind !== 'property') continue;
+    const projections = result.get(returned.entity) ?? [];
+    projections.push(returned);
+    result.set(returned.entity, projections);
+  }
   return result;
 }
 
@@ -222,10 +257,17 @@ function addPath(
   pending: PendingGraph,
   pattern: QueryPatternShape,
   value: readonly unknown[],
+  row: GraphRow,
+  captionProjections: Map<string, PropertyReturnShape[]>,
 ): void {
   const nodeIdentities = pattern.nodes.map((node, index) => {
     const identity = requireIdentity(value[index * 2]);
-    addNode(pending, identity, node.labels);
+    addNode(
+      pending,
+      identity,
+      node.labels,
+      readCaptionValues(row, node.variable, captionProjections),
+    );
     return identity;
   });
 
@@ -245,13 +287,19 @@ function addDirectPattern(
   pattern: QueryPatternShape,
   row: GraphRow,
   returnAliases: Map<string, string[]>,
+  captionProjections: Map<string, PropertyReturnShape[]>,
 ): void {
   const nodeIdentities = pattern.nodes.map((node) => {
     const variable = node.variable as string;
     const identity = requireIdentity(
       readColumn(row, requireSingleReturnAlias(returnAliases, variable, `node ${variable}`)),
     );
-    addNode(pending, identity, node.labels);
+    addNode(
+      pending,
+      identity,
+      node.labels,
+      readCaptionValues(row, node.variable, captionProjections),
+    );
     return identity;
   });
 
@@ -312,15 +360,50 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function addNode(pending: PendingGraph, identity: OpaqueIdentity, labels: readonly string[]): void {
+function readCaptionValues(
+  row: GraphRow,
+  variable: string | undefined,
+  captionProjections: Map<string, PropertyReturnShape[]>,
+): readonly [string, string][] {
+  if (variable === undefined) return [];
+  const values: [string, string][] = [];
+  for (const projection of captionProjections.get(variable) ?? []) {
+    if (!Object.prototype.hasOwnProperty.call(row, projection.alias)) continue;
+    const cell = row[projection.alias];
+    const value = isNormalizedCell(cell) ? (cell.kind === 'value' ? cell.value : undefined) : cell;
+    const caption = scalarCaption(value);
+    if (caption !== undefined) values.push([projection.property, caption]);
+  }
+  return values;
+}
+
+function scalarCaption(value: unknown): string | undefined {
+  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+    ? String(value)
+    : undefined;
+}
+
+function addNode(
+  pending: PendingGraph,
+  identity: OpaqueIdentity,
+  labels: readonly string[],
+  captionValues: readonly (readonly [string, string])[],
+): void {
   registerIdentity(pending, identity, 'node');
   const existing = pending.nodes.get(identity.key);
   if (!existing) {
-    pending.nodes.set(identity.key, { identity, labels: [...new Set(labels)] });
+    pending.nodes.set(identity.key, {
+      identity,
+      labels: [...new Set(labels)],
+      captionValues: new Map(captionValues),
+    });
     return;
   }
   for (const label of labels) {
     if (!existing.labels.includes(label)) existing.labels.push(label);
+  }
+  for (const [property, value] of captionValues) {
+    if (!existing.captionValues.has(property)) existing.captionValues.set(property, value);
   }
 }
 
@@ -382,19 +465,23 @@ function singleType(types: readonly string[]): string | undefined {
   return types.length === 1 ? types[0] : undefined;
 }
 
-function applyCap(pending: PendingGraph, cap: number): GraphExtraction {
+function applyLimits(pending: PendingGraph, limits: GraphLimits): GraphExtraction {
   const nodes: GraphNode[] = [];
   const includedNodes = new Set<string>();
 
   for (const node of pending.nodes.values()) {
-    if (nodes.length === cap) break;
+    if (nodes.length === limits.maxNodes) break;
     includedNodes.add(node.identity.key);
-    nodes.push({ id: node.identity.id, labels: [...node.labels] });
+    nodes.push({
+      id: node.identity.id,
+      labels: [...node.labels],
+      caption: chooseCaption(node),
+    });
   }
 
   const edges: GraphEdge[] = [];
   for (const edge of pending.edges.values()) {
-    if (nodes.length + edges.length === cap) break;
+    if (edges.length === limits.maxEdges) break;
     if (!includedNodes.has(edge.source.key) || !includedNodes.has(edge.target.key)) continue;
     edges.push({
       id: edge.identity.id,
@@ -409,6 +496,18 @@ function applyCap(pending: PendingGraph, cap: number): GraphExtraction {
     available: true,
     nodes,
     edges,
-    truncated: nodes.length + edges.length < pending.nodes.size + pending.edges.size,
+    totalNodes: pending.nodes.size,
+    totalEdges: pending.edges.size,
+    truncated: nodes.length < pending.nodes.size || edges.length < pending.edges.size,
   };
+}
+
+function chooseCaption(node: PendingNode): string {
+  for (const property of ['name', 'title', 'label']) {
+    const value = node.captionValues.get(property);
+    if (value !== undefined) return value;
+  }
+  const firstOther = node.captionValues.values().next().value;
+  if (firstOther !== undefined) return firstOther;
+  return node.labels[0] ?? node.identity.id;
 }
