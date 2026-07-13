@@ -210,17 +210,24 @@
         reason: 'Graph topology is unavailable because this result has no normalized rows.',
         nodes: [],
         edges: [],
+        totalNodes: 0,
+        totalEdges: 0,
         truncated: false,
       };
     }
     try {
-      return extractGraph(extractQueryShape(gql), result.rows, 1_000);
+      return extractGraph(extractQueryShape(gql), result.rows, {
+        maxNodes: 2_000,
+        maxEdges: 4_000,
+      });
     } catch {
       return {
         available: false,
         reason: 'Graph topology cannot be proven from the returned query values.',
         nodes: [],
         edges: [],
+        totalNodes: 0,
+        totalEdges: 0,
         truncated: false,
       };
     }

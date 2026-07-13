@@ -25,10 +25,20 @@ export interface NamedPathShape {
   directions: RelationshipDirection[];
 }
 
-export interface ReturnShape {
+export interface EntityReturnShape {
+  readonly kind: 'entity';
   source: string;
   alias: string;
 }
+
+export interface PropertyReturnShape {
+  readonly kind: 'property';
+  entity: string;
+  property: string;
+  alias: string;
+}
+
+export type ReturnShape = EntityReturnShape | PropertyReturnShape;
 
 export interface QueryShape {
   ambiguous: boolean;
@@ -439,7 +449,7 @@ function parseReturns(tokens: Token[]): ReturnShape[] | null {
     if (!isIdentifier(projection[0])) return null;
 
     if (projection.length === 1) {
-      returns.push({ source: projection[0].text, alias: projection[0].text });
+      returns.push({ kind: 'entity', source: projection[0].text, alias: projection[0].text });
       continue;
     }
 
@@ -449,7 +459,28 @@ function parseReturns(tokens: Token[]): ReturnShape[] | null {
       projection[1].text.toUpperCase() === 'AS' &&
       isIdentifier(projection[2])
     ) {
-      returns.push({ source: projection[0].text, alias: projection[2].text });
+      returns.push({ kind: 'entity', source: projection[0].text, alias: projection[2].text });
+      continue;
+    }
+
+    const isProperty =
+      projection[1]?.text === '.' &&
+      isIdentifier(projection[2]) &&
+      (projection.length === 3 ||
+        (projection.length === 5 &&
+          projection[3].kind === 'word' &&
+          projection[3].text.toUpperCase() === 'AS' &&
+          isIdentifier(projection[4])));
+    if (isProperty) {
+      returns.push({
+        kind: 'property',
+        entity: projection[0].text,
+        property: projection[2].text,
+        alias:
+          projection.length === 5
+            ? projection[4].text
+            : `${projection[0].text}.${projection[2].text}`,
+      });
       continue;
     }
 

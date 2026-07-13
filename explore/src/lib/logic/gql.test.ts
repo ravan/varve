@@ -52,7 +52,7 @@ describe('extractQueryShape', () => {
           directions: ['outgoing'],
         },
       ],
-      returns: [{ source: 'p', alias: 'path' }],
+      returns: [{ kind: 'entity', source: 'p', alias: 'path' }],
     });
   });
 
@@ -67,9 +67,9 @@ describe('extractQueryShape', () => {
         },
       ],
       returns: [
-        { source: 'a', alias: 'a' },
-        { source: 'r', alias: 'r' },
-        { source: 'b', alias: 'b' },
+        { kind: 'entity', source: 'a', alias: 'a' },
+        { kind: 'entity', source: 'r', alias: 'r' },
+        { kind: 'entity', source: 'b', alias: 'b' },
       ],
     });
   });
@@ -95,7 +95,7 @@ describe('extractQueryShape', () => {
           ],
         },
       ],
-      returns: [{ source: 'a', alias: 'person' }],
+      returns: [{ kind: 'entity', source: 'a', alias: 'person' }],
     });
   });
 
@@ -104,7 +104,7 @@ describe('extractQueryShape', () => {
       extractQueryShape("/* MATCH (fake:Wrong) */ MATCH (a:Person {name: '(:Wrong)'}) RETURN a"),
     ).toMatchObject({
       patterns: [{ nodes: [{ variable: 'a', labels: ['Person'] }] }],
-      returns: [{ source: 'a', alias: 'a' }],
+      returns: [{ kind: 'entity', source: 'a', alias: 'a' }],
     });
   });
 
@@ -135,6 +135,44 @@ describe('extractQueryShape', () => {
       patterns: [],
       paths: [],
       returns: [],
+    });
+  });
+
+  it('discriminates entity and aliased property projections', () => {
+    expect(
+      extractQueryShape(
+        'MATCH path = (a:Person)-[:KNOWS]->(b:Person) RETURN path, a.name AS from_name, b.title AS to_title',
+      ).returns,
+    ).toEqual([
+      { kind: 'entity', source: 'path', alias: 'path' },
+      { kind: 'property', entity: 'a', property: 'name', alias: 'from_name' },
+      { kind: 'property', entity: 'b', property: 'title', alias: 'to_title' },
+    ]);
+  });
+
+  it('retains multiple property projections in return order', () => {
+    expect(
+      extractQueryShape('MATCH (a:Person) RETURN a.title, a.name AS display_name, a.age').returns,
+    ).toEqual([
+      { kind: 'property', entity: 'a', property: 'title', alias: 'a.title' },
+      { kind: 'property', entity: 'a', property: 'name', alias: 'display_name' },
+      { kind: 'property', entity: 'a', property: 'age', alias: 'a.age' },
+    ]);
+  });
+
+  it('rejects unsupported return expressions conservatively', () => {
+    expect(extractQueryShape('MATCH (a:Person) RETURN a, coalesce(a.name, "unknown")')).toEqual({
+      ambiguous: true,
+      patterns: [],
+      paths: [],
+      returns: [],
+    });
+  });
+
+  it('parses a property-only return without inventing an entity projection', () => {
+    expect(extractQueryShape('MATCH (a:Person) RETURN a.name AS name')).toMatchObject({
+      ambiguous: false,
+      returns: [{ kind: 'property', entity: 'a', property: 'name', alias: 'name' }],
     });
   });
 });
