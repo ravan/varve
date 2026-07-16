@@ -424,8 +424,10 @@ mod tests {
         let (ack, rx) = oneshot::channel();
         sender
             .try_submit(Submission {
-                statements: program.statements,
-                params: BTreeMap::new(),
+                payload: crate::writer::Payload::Program {
+                    statements: program.statements,
+                    params: BTreeMap::new(),
+                },
                 graph,
                 user: String::new(),
                 ack,

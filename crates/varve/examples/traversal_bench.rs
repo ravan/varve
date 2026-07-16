@@ -9,19 +9,113 @@
 
 use std::path::Path;
 use std::time::{Duration, Instant};
-use varve::{Config, Db};
-use varve_testkit::fixture::{social_graph, EDGE_PROGRAM_BATCH};
+use varve::{Config, Db, Doc, EdgePut, NodePut, Value};
+use varve_testkit::fixture::{social_graph, SocialGraph, EDGE_PROGRAM_BATCH};
 
-const PEOPLE: usize = 10_000;
-const FRIENDSHIPS: usize = 60_000;
+const DEFAULT_PEOPLE: usize = 10_000;
+const DEFAULT_FRIENDSHIPS: usize = 60_000;
+const DEFAULT_NODE_BATCH: usize = 1_000;
+const DEFAULT_EDGE_BATCH: usize = EDGE_PROGRAM_BATCH;
 const SEED: u64 = 42;
-const NODE_BATCH: usize = 1_000;
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 // Small enough that a handful of block flushes happen over the course of
 // ingest (70k events / 20,000 ≈ 3-4 flushes), so the persisted path is
 // genuinely exercised (mirrors block_bench.rs's MAX_BLOCK_ROWS rationale).
 const MAX_BLOCK_ROWS: usize = 20_000;
 const WARM_ITERS: usize = 100;
 const ANCHOR: i64 = 0;
+
+/// How phase 1 loads the fixture: `gql` (default — comparable to every
+/// recorded baseline run) drives per-program GQL through `db.execute`;
+/// `bulk` drives the xtdb-style data-op path through `db.ingest` (no parse,
+/// no plan, no per-edge endpoint MATCH).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IngestMode {
+    Gql,
+    Bulk,
+}
+
+impl IngestMode {
+    fn unit(self) -> &'static str {
+        match self {
+            IngestMode::Gql => "programs",
+            IngestMode::Bulk => "entities",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            IngestMode::Gql => "gql",
+            IngestMode::Bulk => "bulk",
+        }
+    }
+}
+
+fn ingest_mode() -> Result<IngestMode, Box<dyn std::error::Error>> {
+    match std::env::var("VARVE_TRAVERSAL_INGEST") {
+        Ok(value) if value == "gql" => Ok(IngestMode::Gql),
+        Ok(value) if value == "bulk" => Ok(IngestMode::Bulk),
+        Ok(value) => {
+            Err(format!("VARVE_TRAVERSAL_INGEST must be 'gql' or 'bulk', got '{value}'").into())
+        }
+        Err(std::env::VarError::NotPresent) => Ok(IngestMode::Gql),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn benchmark_shape() -> Result<(usize, usize, usize, usize), Box<dyn std::error::Error>> {
+    fn read(name: &str, default: usize) -> Result<usize, Box<dyn std::error::Error>> {
+        let value = match std::env::var(name) {
+            Ok(value) => value.parse::<usize>()?,
+            Err(std::env::VarError::NotPresent) => default,
+            Err(error) => return Err(error.into()),
+        };
+        if value == 0 {
+            return Err(format!("{name} must be greater than zero").into());
+        }
+        Ok(value)
+    }
+
+    Ok((
+        read("VARVE_TRAVERSAL_PEOPLE", DEFAULT_PEOPLE)?,
+        read("VARVE_TRAVERSAL_FRIENDSHIPS", DEFAULT_FRIENDSHIPS)?,
+        read("VARVE_TRAVERSAL_NODE_BATCH", DEFAULT_NODE_BATCH)?,
+        read("VARVE_TRAVERSAL_EDGE_BATCH", DEFAULT_EDGE_BATCH)?,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn report_progress(
+    phase: &str,
+    phase_completed: usize,
+    phase_total: usize,
+    completed: usize,
+    total: usize,
+    stage_eta_known: bool,
+    last_completed: &mut usize,
+    last_report: &mut Instant,
+) {
+    let now = Instant::now();
+    let interval = now.duration_since(*last_report);
+    if phase_completed < phase_total && interval < PROGRESS_INTERVAL {
+        return;
+    }
+
+    let completed_delta = phase_completed - *last_completed;
+    let rate = completed_delta as f64 / interval.as_secs_f64();
+    if stage_eta_known {
+        let eta_seconds = (phase_total - phase_completed) as f64 / rate;
+        println!(
+            "progress completed={completed} total={total} phase={phase} phase_completed={phase_completed} phase_total={phase_total} rate={rate:.3} eta_seconds={eta_seconds:.1}"
+        );
+    } else {
+        println!(
+            "progress completed={completed} total={total} phase={phase} phase_completed={phase_completed} phase_total={phase_total} rate={rate:.3} eta_seconds=unknown"
+        );
+    }
+    *last_completed = phase_completed;
+    *last_report = now;
+}
 
 fn config(dir: &Path) -> Result<Config, Box<dyn std::error::Error>> {
     let log_dir = format!("{:?}", dir.join("log").display().to_string());
@@ -90,30 +184,156 @@ where
     Ok(times)
 }
 
+fn person_put(id: i64) -> NodePut {
+    let mut doc = Doc::new();
+    doc.insert("_id".to_string(), Value::Int(id));
+    doc.insert("name".to_string(), Value::Str(format!("p{id}")));
+    NodePut {
+        labels: vec!["Person".to_string()],
+        doc,
+    }
+}
+
+fn knows_put(src: i64, dst: i64) -> EdgePut {
+    EdgePut {
+        label: "KNOWS".to_string(),
+        src: Value::Int(src),
+        dst: Value::Int(dst),
+        doc: Doc::new(),
+    }
+}
+
+/// GQL loader (the historical path): one `db.execute` per program, counted
+/// in programs. Returns the total program count.
+async fn ingest_gql(
+    db: &Db,
+    g: &SocialGraph,
+    node_batch: usize,
+    edge_batch: usize,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let node_stmts = g.node_statements(node_batch);
+    let edge_programs = g.edge_programs(edge_batch);
+    let total_programs = node_stmts.len() + edge_programs.len();
+    let mut last_progress = Instant::now();
+    let mut last_phase_completed = 0;
+    let mut completed = 0;
+    for (index, stmt) in node_stmts.iter().enumerate() {
+        db.execute(stmt).await?;
+        completed += 1;
+        report_progress(
+            "node",
+            index + 1,
+            node_stmts.len(),
+            completed,
+            total_programs,
+            false,
+            &mut last_phase_completed,
+            &mut last_progress,
+        );
+    }
+
+    last_progress = Instant::now();
+    last_phase_completed = 0;
+    for (index, program) in edge_programs.iter().enumerate() {
+        db.execute(program).await?;
+        completed += 1;
+        report_progress(
+            "edge",
+            index + 1,
+            edge_programs.len(),
+            completed,
+            total_programs,
+            true,
+            &mut last_phase_completed,
+            &mut last_progress,
+        );
+    }
+    Ok(total_programs)
+}
+
+/// Bulk loader: `db.ingest` data ops, one transaction per chunk. Progress is
+/// counted in ENTITIES (nodes/edges), not chunks — chunks vary in size (the
+/// last one is smaller), and the admission-gate lesson requires homogeneous
+/// completed-work units for trustworthy ETAs. Returns total entity count.
+async fn ingest_bulk(
+    db: &Db,
+    g: &SocialGraph,
+    node_batch: usize,
+    edge_batch: usize,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let total_entities = g.people + g.edges.len();
+    let mut last_progress = Instant::now();
+    let mut last_phase_completed = 0;
+    let mut completed = 0;
+
+    let mut start = 0usize;
+    while start < g.people {
+        let end = (start + node_batch).min(g.people);
+        let chunk: Vec<NodePut> = (start..end).map(|id| person_put(id as i64)).collect();
+        completed += chunk.len();
+        db.ingest(chunk, Vec::new()).await?;
+        report_progress(
+            "node",
+            end,
+            g.people,
+            completed,
+            total_entities,
+            false,
+            &mut last_phase_completed,
+            &mut last_progress,
+        );
+        start = end;
+    }
+
+    last_progress = Instant::now();
+    last_phase_completed = 0;
+    let mut phase_completed = 0;
+    for chunk in g.edges.chunks(edge_batch) {
+        let puts: Vec<EdgePut> = chunk.iter().map(|&(s, d)| knows_put(s, d)).collect();
+        completed += chunk.len();
+        phase_completed += chunk.len();
+        db.ingest(Vec::new(), puts).await?;
+        report_progress(
+            "edge",
+            phase_completed,
+            g.edges.len(),
+            completed,
+            total_entities,
+            true,
+            &mut last_phase_completed,
+            &mut last_progress,
+        );
+    }
+    Ok(total_entities)
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let g = social_graph(PEOPLE, FRIENDSHIPS, SEED);
-    let node_stmts = g.node_statements(NODE_BATCH);
-    let edge_programs = g.edge_programs(EDGE_PROGRAM_BATCH);
-    let total_programs = node_stmts.len() + edge_programs.len();
+    let (people, friendships, node_batch, edge_batch) = benchmark_shape()?;
+    let mode = ingest_mode()?;
+    println!(
+        "fixture people={people} friendships={friendships} seed={SEED} node_batch={node_batch} edge_batch={edge_batch} ingest={}",
+        mode.name()
+    );
+    let g = social_graph(people, friendships, SEED);
 
     // Phase 1: ingest the full fixture (timed), then drop — acked txs are
     // durable (log) or flushed (blocks).
     let ingest_started = Instant::now();
+    let total_units;
     {
         let db = Db::open(config(dir.path())?).await?;
-        for stmt in &node_stmts {
-            db.execute(stmt).await?;
-        }
-        for program in &edge_programs {
-            db.execute(program).await?;
-        }
+        total_units = match mode {
+            IngestMode::Gql => ingest_gql(&db, &g, node_batch, edge_batch).await?,
+            IngestMode::Bulk => ingest_bulk(&db, &g, node_batch, edge_batch).await?,
+        };
     }
     let ingest = ingest_started.elapsed();
-    let programs_per_sec = total_programs as f64 / ingest.as_secs_f64();
+    let unit = mode.unit();
+    let units_per_sec = total_units as f64 / ingest.as_secs_f64();
     println!(
-        "ingest {total_programs} programs ({} nodes, {} edges) in {ingest:.2?} ({programs_per_sec:.0} programs/s)",
+        "ingest {total_units} {unit} ({} nodes, {} edges) in {ingest:.2?} ({units_per_sec:.0} {unit}/s)",
         g.people,
         g.edges.len()
     );
@@ -143,7 +363,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let q13_warm_p50 = p50(q13_warm);
 
     println!(
-        "ingest {:.2}s · {programs_per_sec:.0} programs/s · \
+        "ingest {:.2}s · {units_per_sec:.0} {unit}/s · \
          2-hop ({two_hop_rows} rows) cold {two_hop_cold:.2?} warm avg {two_hop_warm_avg:.2?} p50 {two_hop_warm_p50:.2?} · \
          {{1,3}} ({q13_rows} rows) cold {q13_cold:.2?} warm avg {q13_warm_avg:.2?} p50 {q13_warm_p50:.2?}",
         ingest.as_secs_f64(),

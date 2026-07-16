@@ -42,9 +42,44 @@ use varve_log::{Log, LogRecord, TableEffects};
 use varve_storage::{keys, manifest_history, TrieCatalog, TrieEntry};
 use varve_types::{Doc, Iid, Instant, LogPosition, TemporalBounds, TemporalDimension, Value};
 
+/// One node in a bulk-ingest batch (`Db::ingest`) — an xtdb-style put:
+/// upsert keyed by the doc's `_id` (auto-generated when absent, same scheme
+/// as GQL INSERT). The iid derivation is identical to GQL INSERT's, so
+/// bulk-ingested and GQL-ingested data interoperate.
+#[derive(Clone, Debug)]
+pub struct NodePut {
+    pub labels: Vec<String>,
+    pub doc: Doc,
+}
+
+/// One edge in a bulk-ingest batch: endpoints are referenced by their node
+/// `_id` values and existence is deliberately NOT verified (xtdb put-docs
+/// semantics — the whole point of the bulk path is skipping the per-edge
+/// endpoint MATCH). A dangling edge is durable but never matches a
+/// traversal, exactly like an edge whose endpoints were later deleted.
+#[derive(Clone, Debug)]
+pub struct EdgePut {
+    pub label: String,
+    pub src: Value,
+    pub dst: Value,
+    pub doc: Doc,
+}
+
+/// What a submission asks the writer to resolve: a parsed GQL program, or a
+/// bulk-ingest batch of prebuilt data ops (no parse, no plan, no reads).
+pub(crate) enum Payload {
+    Program {
+        statements: Vec<Statement>,
+        params: BTreeMap<String, Value>,
+    },
+    Ingest {
+        nodes: Vec<NodePut>,
+        edges: Vec<EdgePut>,
+    },
+}
+
 pub(crate) struct Submission {
-    pub statements: Vec<Statement>,
-    pub params: BTreeMap<String, Value>,
+    pub payload: Payload,
     pub graph: String,
     pub user: String,
     pub ack: oneshot::Sender<Result<TxReceipt, EngineError>>,
@@ -390,7 +425,7 @@ async fn run_batch(
             // A reading statement must observe every earlier tx, and events
             // apply only after durability — so flush any staged batch first.
             if !staged.is_empty()
-                && (program_reads(&sub.statements) || staged_touches_catalog(&staged))
+                && (payload_reads(&sub.payload) || staged_touches_catalog(&staged))
             {
                 if let FlushOutcome::Fatal(reason) = flush(state, std::mem::take(&mut staged)).await
                 {
@@ -399,7 +434,7 @@ async fn run_batch(
                 }
                 staged_bytes = 0;
             }
-            match resolve_program(state, sub.statements, &sub.params, &sub.graph, &sub.user).await {
+            match resolve_submission(state, sub.payload, &sub.graph, &sub.user).await {
                 Ok((record, events, receipt, graph)) => {
                     staged_bytes += record.wire_len();
                     staged.push(Staged {
@@ -568,6 +603,15 @@ fn program_reads(statements: &[Statement]) -> bool {
     statements.iter().any(statement_reads)
 }
 
+/// Bulk ingest never reads — it's prebuilt data ops (xtdb put semantics), so
+/// it stages behind anything already in the batch without forcing a flush.
+fn payload_reads(payload: &Payload) -> bool {
+    match payload {
+        Payload::Program { statements, .. } => program_reads(statements),
+        Payload::Ingest { .. } => false,
+    }
+}
+
 fn staged_touches_catalog(staged: &[Staged]) -> bool {
     staged
         .iter()
@@ -594,6 +638,23 @@ fn append_effects_to_overlay(overlay: &mut Overlay, effects: &Effects) -> Result
 /// to be observable there. `tx_id` isn't known until partway through the
 /// body, so the field starts `Empty` and is filled in via
 /// `Span::current().record` once assigned.
+/// Dispatches a submission's payload to the right resolver: parsed GQL
+/// programs to [`resolve_program`], bulk-ingest batches to
+/// [`resolve_ingest`].
+async fn resolve_submission(
+    state: &mut WriterState,
+    payload: Payload,
+    graph: &str,
+    user: &str,
+) -> Result<(LogRecord, Effects, TxReceipt, String), EngineError> {
+    match payload {
+        Payload::Program { statements, params } => {
+            resolve_program(state, statements, &params, graph, user).await
+        }
+        Payload::Ingest { nodes, edges } => resolve_ingest(state, nodes, edges, graph, user),
+    }
+}
+
 async fn resolve_program(
     state: &mut WriterState,
     statements: Vec<Statement>,
@@ -605,6 +666,142 @@ async fn resolve_program(
     resolve_program_impl(state, statements, params, graph, user)
         .instrument(span)
         .await
+}
+
+/// Resolves a bulk-ingest batch (spec: xtdb-style `put-docs`) into one
+/// per-table effect batch and log record — no parse, no plan, no reads.
+/// Iids derive from `_id` exactly as GQL INSERT derives them
+/// ([`resolve_insert_node`]); edge endpoints are referenced by node `_id`
+/// and NOT verified to exist (a dangling edge never matches a traversal).
+fn resolve_ingest(
+    state: &mut WriterState,
+    nodes: Vec<NodePut>,
+    edges: Vec<EdgePut>,
+    graph: &str,
+    user: &str,
+) -> Result<(LogRecord, Effects, TxReceipt, String), EngineError> {
+    if nodes.is_empty() && edges.is_empty() {
+        return Err(EngineError::NotAMutation);
+    }
+    let exists = state
+        .state
+        .read()
+        .map_err(|_| EngineError::Poisoned)?
+        .graphs
+        .contains_key(graph);
+    if !exists {
+        return Err(EngineError::UnknownGraph(graph.to_string()));
+    }
+
+    state.next_tx_id += 1;
+    let tx_id = state.next_tx_id;
+    let system = state.clock.next();
+    let span = tracing::info_span!("varve.resolve", tx_id);
+    let _entered = span.enter();
+    let valid_from = system;
+    let valid_to = Instant::END_OF_TIME;
+
+    let mut effects = Effects::default();
+    let mut generated_ordinal: usize = 0;
+    for NodePut { labels, mut doc } in nodes {
+        let id = put_id(&mut doc, tx_id, &mut generated_ordinal);
+        let iid = Iid::derive(graph, NODES_TABLE, &id.id_bytes()?);
+        effects.record_node_create(&labels, &doc);
+        effects.nodes.push(Event {
+            iid,
+            system_from: system,
+            valid_from,
+            valid_to,
+            src: None,
+            dst: None,
+            op: Op::Put { labels, doc },
+        });
+    }
+    for EdgePut {
+        label,
+        src,
+        dst,
+        mut doc,
+    } in edges
+    {
+        let id = put_id(&mut doc, tx_id, &mut generated_ordinal);
+        let iid = Iid::derive(graph, EDGES_TABLE, &id.id_bytes()?);
+        let src = Iid::derive(graph, NODES_TABLE, &src.id_bytes()?);
+        let dst = Iid::derive(graph, NODES_TABLE, &dst.id_bytes()?);
+        effects.record_edge_create(&doc);
+        effects.edges.push(Event {
+            iid,
+            system_from: system,
+            valid_from,
+            valid_to,
+            src: Some(src),
+            dst: Some(dst),
+            op: Op::Put {
+                labels: vec![label],
+                doc,
+            },
+        });
+    }
+    seal_effects(tx_id, system, user, graph, effects)
+}
+
+/// The doc's `_id`, or a generated one (same `varve:gen:{tx}:{ordinal}`
+/// scheme as GQL INSERT) inserted into the doc. Advances the ordinal either
+/// way, mirroring `resolve_insert`/`resolve_insert_node`.
+fn put_id(doc: &mut Doc, tx_id: u64, generated_ordinal: &mut usize) -> Value {
+    let id = match doc.get("_id") {
+        Some(v) => v.clone(),
+        None => {
+            let v = Value::Str(format!("varve:gen:{tx_id}:{generated_ordinal}"));
+            doc.insert("_id".into(), v.clone());
+            v
+        }
+    };
+    *generated_ordinal += 1;
+    id
+}
+
+/// Shared tail of every resolver: encodes the per-table effects into the
+/// wire log record and builds the receipt.
+fn seal_effects(
+    tx_id: u64,
+    system: Instant,
+    user: &str,
+    effect_graph: &str,
+    effects: Effects,
+) -> Result<(LogRecord, Effects, TxReceipt, String), EngineError> {
+    let wire_graph = if effect_graph == DEFAULT_GRAPH {
+        String::new()
+    } else {
+        effect_graph.to_string()
+    };
+    let mut table_effects = Vec::new();
+    if !effects.nodes.is_empty() {
+        table_effects.push(TableEffects {
+            table: NODES_TABLE.to_string(),
+            arrow_ipc: encode_events(&effects.nodes)?,
+            graph: wire_graph.clone(),
+        });
+    }
+    if !effects.edges.is_empty() {
+        table_effects.push(TableEffects {
+            table: EDGES_TABLE.to_string(),
+            arrow_ipc: encode_events(&effects.edges)?,
+            graph: wire_graph,
+        });
+    }
+    let record = LogRecord {
+        tx_id,
+        system_time_us: system.as_micros(),
+        user: user.to_string(),
+        effects: table_effects,
+    };
+    let receipt = TxReceipt {
+        tx_id,
+        system_time: system,
+        side_effects: effects.side_effects,
+    };
+    Ok((record, effects, receipt, effect_graph.to_string()))
 }
 
 async fn resolve_program_impl(
@@ -683,38 +880,7 @@ async fn resolve_program_impl(
         effects.merge(statement_effects);
     }
 
-    let wire_graph = if effect_graph == DEFAULT_GRAPH {
-        String::new()
-    } else {
-        effect_graph.to_string()
-    };
-    let mut table_effects = Vec::new();
-    if !effects.nodes.is_empty() {
-        table_effects.push(TableEffects {
-            table: NODES_TABLE.to_string(),
-            arrow_ipc: encode_events(&effects.nodes)?,
-            graph: wire_graph.clone(),
-        });
-    }
-    if !effects.edges.is_empty() {
-        table_effects.push(TableEffects {
-            table: EDGES_TABLE.to_string(),
-            arrow_ipc: encode_events(&effects.edges)?,
-            graph: wire_graph,
-        });
-    }
-    let record = LogRecord {
-        tx_id,
-        system_time_us: system.as_micros(),
-        user: user.to_string(),
-        effects: table_effects,
-    };
-    let receipt = TxReceipt {
-        tx_id,
-        system_time: system,
-        side_effects: effects.side_effects,
-    };
-    Ok((record, effects, receipt, effect_graph.to_string()))
+    seal_effects(tx_id, system, user, effect_graph, effects)
 }
 
 fn graph_catalog_iid(name: &str) -> Result<Iid, EngineError> {
@@ -1382,15 +1548,7 @@ async fn resolve_insert(
                     .iter()
                     .map(|(k, v)| const_value(v, params).map(|value| (k.clone(), value)))
                     .collect::<Result<_, _>>()?;
-                let id = match doc.get("_id") {
-                    Some(v) => v.clone(),
-                    None => {
-                        let v = Value::Str(format!("varve:gen:{tx_id}:{generated_ordinal}"));
-                        doc.insert("_id".into(), v.clone());
-                        v
-                    }
-                };
-                *generated_ordinal += 1;
+                let id = put_id(&mut doc, tx_id, generated_ordinal);
                 let iid = Iid::derive(graph, EDGES_TABLE, &id.id_bytes()?);
                 effects.record_edge_create(&doc);
                 effects.edges.push(Event {
@@ -1460,15 +1618,7 @@ fn resolve_insert_node(
         .iter()
         .map(|(k, v)| const_value(v, params).map(|value| (k.clone(), value)))
         .collect::<Result<_, _>>()?;
-    let id = match doc.get("_id") {
-        Some(v) => v.clone(),
-        None => {
-            let v = Value::Str(format!("varve:gen:{tx_id}:{generated_ordinal}"));
-            doc.insert("_id".into(), v.clone());
-            v
-        }
-    };
-    *generated_ordinal += 1;
+    let id = put_id(&mut doc, tx_id, generated_ordinal);
     let iid = Iid::derive(graph, NODES_TABLE, &id.id_bytes()?);
     let labels = stored_labels(&node.labels)?;
     effects.record_node_create(&labels, &doc);
@@ -2295,8 +2445,10 @@ mod tests {
         let (ack, rx) = oneshot::channel();
         sender
             .try_submit(Submission {
-                statements: program.statements,
-                params: BTreeMap::new(),
+                payload: Payload::Program {
+                    statements: program.statements,
+                    params: BTreeMap::new(),
+                },
                 graph,
                 user: String::new(),
                 ack,
@@ -2764,8 +2916,10 @@ mod tests {
         let program = varve_gql::parse_program("INSERT (:P {_id: 3})").unwrap();
         let (third_ack, third_rx) = oneshot::channel();
         let third = sender.try_submit(Submission {
-            statements: program.statements,
-            params: BTreeMap::new(),
+            payload: Payload::Program {
+                statements: program.statements,
+                params: BTreeMap::new(),
+            },
             graph: DEFAULT_GRAPH.to_string(),
             user: String::new(),
             ack: third_ack,
