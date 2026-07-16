@@ -1,21 +1,19 @@
 # GQL reference
 
-Varve implements the **practical core** of GQL (ISO/IEC 39075:2024) described in the
+Varve implements the practical core of GQL (ISO/IEC 39075:2024) described in the
 [design specification](../../../design/2026-07-04-varve-design.md) §8: an openCypher-flavored
 subset covering pattern matching, mutation, temporal travel, and the usual read-query pipeline
 (`FILTER`/`LET`/`FOR`/`ORDER BY`/`UNION`/aggregation). See [Deviations](deviations.md) for what
-is deliberately out of scope, and [Bitemporal queries](temporal.md) for `FOR VALID_TIME` /
-`FOR SYSTEM_TIME`.
+is out of scope, and [Bitemporal queries](temporal.md) for `FOR VALID_TIME` / `FOR SYSTEM_TIME`.
 
-Every example below is copied **verbatim** from one of two verified sources — never invented —
-and is confirmed to parse on this exact commit:
+Every example below is copied verbatim from one of two verified sources and parses on this exact
+commit:
 
-- `crates/varve-gql/src/parser.rs`'s own test suite (`cargo test -p varve-gql --lib`: **65
-  passed, 0 failed**), for examples marked "parser test".
-- `crates/varve/examples/gql_tour.rs`, freshly executed end to end (`cargo run --release
-  --example gql_tour -p varve`) against a real in-memory `Db` while writing this page, for
-  examples marked "gql_tour". Its full source and captured output are both worth reading start
-  to end for a single coherent walkthrough.
+- `crates/varve-gql/src/parser.rs`'s own test suite (`cargo test -p varve-gql --lib`: 65
+  passed, 0 failed), for examples marked "parser test".
+- `crates/varve/examples/gql_tour.rs`, run end to end (`cargo run --release --example gql_tour
+  -p varve`) against a real in-memory `Db`, for examples marked "gql_tour". Its full source and
+  captured output read start to end as a single coherent walkthrough.
 
 ## INSERT
 
@@ -27,7 +25,7 @@ INSERT (:Person {_id: 1, name: 'Ada', age: 36, city: 'London', legacy: 'yes'}),
        (:Person {_id: 2, name: 'Bob', age: 41, city: 'Paris'}),
        (:Person {_id: 3, name: 'Cy', age: 36, city: 'London'})
 ```
-*(gql_tour — seeds the tour's three people)*
+*(gql_tour: seeds the tour's three people)*
 
 `MATCH … INSERT` binds existing nodes and inserts an edge between them:
 
@@ -36,12 +34,12 @@ MATCH (a:Person {_id: 1}), (b:Person {_id: 2}) INSERT (a)-[:KNOWS]->(b)
 ```
 *(gql_tour)*
 
-`INSERT` also accepts `VALID FROM`/`VALID TO` to backdate or bound a fact's valid-time range —
-see [Bitemporal queries](temporal.md).
+`INSERT` also accepts `VALID FROM`/`VALID TO` to backdate or bound a fact's valid-time range.
+See [Bitemporal queries](temporal.md).
 
 ## MATCH
 
-Binds one or more comma-separated **linear** paths (see [Deviations](deviations.md) for what
+Binds one or more comma-separated linear paths (see [Deviations](deviations.md) for what
 "linear" excludes) and an optional `WHERE`:
 
 ```gql
@@ -59,7 +57,7 @@ OPTIONAL MATCH (p)-[:MENTORS]->(mentor:Person)
 RETURN p.name AS person, mentor.name AS mentor
 ORDER BY person ASC
 ```
-*(gql_tour — Ada/Bob/Cy all have no mentor yet, so `mentor` is `NULL` for every row, and every
+*(gql_tour: Ada/Bob/Cy all have no mentor yet, so `mentor` is `NULL` for every row, and every
 row still appears)*
 
 ## WHERE
@@ -84,7 +82,7 @@ LET name = b.name
 FOR friend IN [b]
 RETURN name AS n, friend
 ```
-*(parser test — exercises FILTER, LET, and pipeline FOR together)*
+*(parser test: exercises FILTER, LET, and pipeline FOR together)*
 
 `RETURN` itself supports `DISTINCT`, `ORDER BY <expr> [ASC|DESC]` (comma-separated, mixed
 directions), and `SKIP`/`LIMIT`:
@@ -139,7 +137,7 @@ MATCH (p:Person)
 RETURN p.city AS city, count(*) AS people
 ORDER BY city ASC
 ```
-*(gql_tour — output: `London | 2`, `Paris | 1`)*
+*(gql_tour: output `London | 2`, `Paris | 1`)*
 
 ## SET
 
@@ -162,7 +160,7 @@ MATCH (p:Person {_id: 1}) REMOVE p.legacy
 
 ## DELETE [DETACH]
 
-Soft-deletes matched nodes/edges — a normal bitemporal tombstone, current-state-only (no `FOR`
+Soft-deletes matched nodes/edges: a normal bitemporal tombstone, current-state-only (no `FOR`
 clause is accepted on a `DELETE`; see [Bitemporal queries](temporal.md)):
 
 ```gql
@@ -180,26 +178,26 @@ MATCH (p:Person) WHERE p.name = 'Ada' DETACH DELETE p
 ## ERASE [DETACH]
 
 Varve's GDPR hard-delete extension (not part of standard GQL): erases a node's history at
-*every* system-time and valid-time instant, not just from now on. See
+every system-time and valid-time instant, not just from now on. See
 [Bitemporal queries](temporal.md) for the full DELETE-vs-ERASE contrast and the tests that prove
 bytes are physically gone after compaction + GC.
 
 ```gql
 MATCH (n:Person) ERASE n
 ```
-*(parser test — fails with `StillConnected` if `n` still has incident edges; use `DETACH ERASE`)*
+*(parser test: fails with `StillConnected` if `n` still has incident edges; use `DETACH ERASE`)*
 
 ```gql
 MATCH (p:Person {_id: 1}) DETACH ERASE p
 ```
-*(gql_tour — after this, even a `FOR SYSTEM_TIME AS OF` query timestamped before the erase
+*(gql_tour: after this, even a `FOR SYSTEM_TIME AS OF` query timestamped before the erase
 returns zero rows for this entity, confirmed by the tour's own printed
 `history after erase visible rows: 0`)*
 
 ## CREATE GRAPH / DROP GRAPH
 
 Catalog statements; a program may not mix catalog statements with data statements (`INSERT`,
-`MATCH`, mutations) in the same transaction — see [Deviations](deviations.md).
+`MATCH`, mutations) in the same transaction (see [Deviations](deviations.md)).
 
 ```gql
 CREATE GRAPH people
@@ -219,7 +217,7 @@ program:
 ```gql
 CREATE GRAPH g; USE g; MATCH (n) RETURN n; DROP GRAPH g;
 ```
-*(parser test, `parse_program` — this parses as shown, but catalog and data statements cannot
+*(parser test, `parse_program`: this parses as shown, but catalog and data statements cannot
 share one transaction at execute time (see [Deviations](deviations.md)), so in practice this
 must be run as three separate transactions: `CREATE GRAPH g;`, then `USE g; MATCH (n) RETURN
 n;`, then `DROP GRAPH g;`)*
@@ -227,7 +225,7 @@ n;`, then `DROP GRAPH g;`)*
 ## Parameters
 
 `$name` placeholders bind to a caller-supplied parameter map (see `WHERE`, above, for a live
-example) — this is how the HTTP API's `params` field and the CLI's JSONL import both pass
+example). This is how the HTTP API's `params` field and the CLI's JSONL import both pass
 values without string-building GQL.
 
 ## CASE
@@ -235,7 +233,7 @@ values without string-building GQL.
 ```gql
 CASE x.kind WHEN 'a' THEN 1 ELSE 2 END
 ```
-*(parser test, as one expression inside a `RETURN` list — see `CAST`, below, for the full line)*
+*(parser test, as one expression inside a `RETURN` list; see `CAST` below for the full line)*
 
 ## EXISTS
 

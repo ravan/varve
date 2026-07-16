@@ -492,7 +492,7 @@ pub fn render() -> String {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "<!-- GENERATED — do not hand-edit. Produced by `cargo run -p varve-testkit --bin \
+        "<!-- GENERATED FILE. Do not hand-edit. Produced by `cargo run -p varve-testkit --bin \
          config_reference` (`just docs-gen`); `crates/varve-testkit/tests/config_reference_doc.rs` \
          pins this file to that output. -->"
     );
@@ -501,7 +501,7 @@ pub fn render() -> String {
         out,
         "Every `[section]` key a `varve.toml` file accepts (spec §4/§11), one table per section, \
          generated from the same `#[serde(default = ...)]` code paths the engine, log, storage, \
-         and server crates use to parse it — see [Deployment profiles & sizing](profiles.md) for \
+         and server crates use to parse it. See [Deployment profiles & sizing](profiles.md) for \
          worked topologies and [Metrics & observability](metrics.md) for the `[coordinator]` and \
          `[metrics.otlp]` runbooks. Any key here can also be set via a `VARVE__SECTION__KEY` \
          environment variable at process startup (e.g. `VARVE__LOG__LOCAL__DIR=/data/log` sets \

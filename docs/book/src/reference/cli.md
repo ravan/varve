@@ -2,8 +2,7 @@
 
 The `varve` binary (`crates/varve-cli`) talks to either an embedded local database or a remote
 `varved` server, using the same subcommands either way. Every usage line on this page is copied
-from `varve --help`/`varve <subcommand> --help`, run live against this exact commit while
-writing this page.
+from `varve --help`/`varve <subcommand> --help`.
 
 ## Connection selection
 
@@ -27,12 +26,12 @@ Options:
   -h, --help           Print help
 ```
 
-`--dir` and `--url` (and `--token`) are **global** flags: they must come *before* the subcommand
+`--dir` and `--url` (and `--token`) are global flags: they must come before the subcommand
 (`varve --dir ./mydb shell`, not `varve shell --dir ./mydb`). Exactly one connection mode is
 required:
 
-- `--dir <DIR>` — open a local database directory embedded in the CLI process.
-- `--url <URL>` + `--token <TOKEN>` (or `VARVE_TOKEN` env var) — talk to a remote `varved` over
+- `--dir <DIR>`: open a local database directory embedded in the CLI process.
+- `--url <URL>` + `--token <TOKEN>` (or `VARVE_TOKEN` env var): talk to a remote `varved` over
   HTTP/HTTPS.
 
 Both together, or neither, is a startup error with one of these exact messages
@@ -58,7 +57,7 @@ An interactive REPL: statements are buffered until a `;` ends them (so a stateme
 multiple lines), and `:status`, `:help`, `:quit`/`:exit` are built-in commands. See
 [Getting started](../getting-started.md) for full transcript examples of both `--dir` and
 `--url` mode. Every completed write echoes a `tx <id> @ <system_time>` receipt line followed by
-one line per *nonzero* side-effect count (nodes/relationships created or deleted, properties set
+one line per nonzero side-effect count (nodes/relationships created or deleted, properties set
 or removed, labels added or removed); a query prints an Arrow-pretty table, or `(0 rows)` if
 every returned batch is empty.
 
@@ -79,14 +78,15 @@ Options:
   -h, --help           Print help
 ```
 
-Each line of the JSONL file becomes one parameterized `INSERT (:<LABEL> {...})` transaction —
-object keys become `$pN`-style bound parameters (sorted, deterministic), never string-interpolated
-into the GQL — and the resulting statement is validated with `varve_gql::parse_program` *before*
-any request is sent. Import stops at the first failing line, reporting its 1-based line number
-and how many lines were already committed. JSON object keys and the `--label`/`--graph` values
-are all validated as GQL identifiers (ASCII shape only — first byte a letter or `_`, the rest
-alphanumeric or `_`); the parser is still the sole authority on whether the resulting GQL is
-actually valid (e.g. reserved-word collisions), not this shape check.
+Each line of the JSONL file becomes one parameterized `INSERT (:<LABEL> {...})` transaction.
+Object keys become `$pN`-style bound parameters (sorted, deterministic), never
+string-interpolated into the GQL, and the resulting statement is validated with
+`varve_gql::parse_program` before any request is sent. Import stops at the first failing line,
+reporting its 1-based line number and how many lines were already committed. JSON object keys
+and the `--label`/`--graph` values are all validated as GQL identifiers (ASCII shape only: first
+byte a letter or `_`, the rest alphanumeric or `_`); the parser is still the sole authority on
+whether the resulting GQL is actually valid (e.g. reserved-word collisions), not this shape
+check.
 
 ## `export`
 
@@ -134,14 +134,14 @@ Each subcommand (`status`/`compact`/`gc`/`verify`) makes exactly one correspondi
 (`CommandClient::status`/`compact`/`gc`/`verify`). With `--json`, the raw response struct is
 printed via `serde_json::to_string`; without it, a fixed-field-order human-readable rendering is
 printed (e.g. `format_status`/`format_compaction`/`format_gc`/`format_verify` in
-`crates/varve-cli/src/output.rs`) — a missing `manifest_block_id` renders as the literal text
-`none`, never a blank or `null`.
+`crates/varve-cli/src/output.rs`), where a missing `manifest_block_id` renders as the literal
+text `none`, never a blank or `null`.
 
 ## JSONL format notes
 
 Every JSONL line (both `import` input and `export` output) is a flat JSON object. Scalar values
-map directly (`null`, `true`/`false`, numbers — integers must fit `i64`/`u64` and floats must be
-finite, i.e. no `NaN`/`Infinity` — and strings); binary values are the single-key `{"$bytes":
+map directly (`null`, `true`/`false`, numbers, and strings; integers must fit `i64`/`u64` and
+floats must be finite, i.e. no `NaN`/`Infinity`); binary values are the single-key `{"$bytes":
 "<base64>"}` form described above; arrays and any other nested-object shape are rejected as
 invalid parameters (the same validation the HTTP API's `params_from_json` enforces, since the
 CLI reuses it directly).
