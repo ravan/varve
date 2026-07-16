@@ -63,6 +63,24 @@ fn ingest_mode() -> Result<IngestMode, Box<dyn std::error::Error>> {
     }
 }
 
+/// Opt-in post-ingest compaction (bulk load → compact → serve): a freshly
+/// bulk-loaded store is all L0 tries, and every L0 trie spans the full
+/// hashed-iid space, so anchored point/set lookups still overlap nearly every
+/// page. Compaction rewrites them into globally-sorted tries whose pages
+/// partition the space — the shape the anchored fast path's pruning needs.
+/// Default off so results stay comparable to the recorded baseline runs.
+fn compact_enabled() -> Result<bool, Box<dyn std::error::Error>> {
+    match std::env::var("VARVE_TRAVERSAL_COMPACT") {
+        Ok(value) if value == "1" => Ok(true),
+        Ok(value) if value == "0" => Ok(false),
+        Ok(value) => {
+            Err(format!("VARVE_TRAVERSAL_COMPACT must be '0' or '1', got '{value}'").into())
+        }
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn benchmark_shape() -> Result<(usize, usize, usize, usize), Box<dyn std::error::Error>> {
     fn read(name: &str, default: usize) -> Result<usize, Box<dyn std::error::Error>> {
         let value = match std::env::var(name) {
@@ -345,6 +363,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "reopen (manifest + log tail): {:.2?}",
         reopen_started.elapsed()
     );
+
+    // Phase 2b (opt-in): drain compaction to idle before serving queries.
+    if compact_enabled()? {
+        let compact_started = Instant::now();
+        let mut jobs = 0usize;
+        loop {
+            let report = db.compact_full_once().await?;
+            if report.jobs == 0 {
+                break;
+            }
+            jobs += report.jobs;
+        }
+        println!(
+            "compact jobs={jobs} in {:.2?} (drained to idle)",
+            compact_started.elapsed()
+        );
+    }
 
     // Phase 3: 2-hop friend-of-friend — cold once, then warm.
     let cold_started = Instant::now();

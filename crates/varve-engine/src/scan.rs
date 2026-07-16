@@ -9,9 +9,66 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::DataFusionError;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, RwLock};
-use varve_index::{decode_events, snapshot_entities, Event, LabelFilter, Op};
+use varve_index::{decode_events, snapshot_entities, Event, LabelFilter, Op, PageMeta};
 use varve_storage::{keys, ObjectStore};
 use varve_types::{Iid, TemporalBounds, Value};
+
+/// Which entities a merged scan touches: everything, one derived-iid point
+/// (`{_id: …}` / `WHERE v._id = …`), or an explicit set — the anchored fast
+/// path's reachable nodes, pruning a non-anchor node element's scan the same
+/// way the point prunes the anchor's.
+#[derive(Clone)]
+pub(crate) enum IidSel {
+    All,
+    Point(Iid),
+    Set(Arc<std::collections::BTreeSet<Iid>>),
+}
+
+impl IidSel {
+    fn admits(&self, iid: &Iid) -> bool {
+        match self {
+            IidSel::All => true,
+            IidSel::Point(point) => iid == point,
+            IidSel::Set(set) => set.contains(iid),
+        }
+    }
+
+    /// Page prune: the point variant keeps `PageMeta::selected`'s trie-path +
+    /// stats rules; the set variant keeps a page whose `[min_iid, max_iid]`
+    /// contains ANY selected iid (ordered-set range probe — no per-event
+    /// decode), on top of the temporal rules shared by every variant.
+    fn selects_page(&self, page: &PageMeta, bounds: &TemporalBounds) -> bool {
+        match self {
+            IidSel::All => page.selected(bounds, None),
+            IidSel::Point(point) => page.selected(bounds, Some(point)),
+            IidSel::Set(set) => {
+                page.selected(bounds, None)
+                    && set.range(page.min_iid..=page.max_iid).next().is_some()
+            }
+        }
+    }
+
+    /// The selected live/overlay entities: a set probes per member (the set
+    /// is anchor-reachable — small — while the table may hold millions).
+    fn table_events<'a>(
+        &self,
+        events_for: impl Fn(&Iid) -> Option<&'a [Event]>,
+        entities: impl Iterator<Item = (&'a Iid, &'a [Event])>,
+    ) -> Vec<(Iid, Vec<Event>)> {
+        match self {
+            IidSel::All => entities
+                .map(|(iid, events)| (*iid, events.to_vec()))
+                .collect(),
+            IidSel::Point(iid) => events_for(iid)
+                .map(|events| vec![(*iid, events.to_vec())])
+                .unwrap_or_default(),
+            IidSel::Set(set) => set
+                .iter()
+                .filter_map(|iid| events_for(iid).map(|events| (*iid, events.to_vec())))
+                .collect(),
+        }
+    }
+}
 
 // Public scan primitive keeps graph/table/filter/time/overlay dimensions explicit.
 #[allow(clippy::too_many_arguments)]
@@ -22,45 +79,25 @@ pub(crate) async fn merged_snapshot(
     kind: TableKind,
     label: LabelFilter<'_>,
     bounds: &TemporalBounds,
-    iid_point: Option<Iid>,
+    sel: &IidSel,
     overlay: Option<&Overlay>,
 ) -> Result<Option<RecordBatch>, EngineError> {
     // 1. Atomic snapshot under ONE read lock (decision 8). Live events are
     //    cloned — bounded by max_block_rows; a point lookup clones one
-    //    entity. The trie inventory is Arc-cheap.
+    //    entity, a set only its members. The trie inventory is Arc-cheap.
     let (live_events, tries) = {
         let s = state.read().map_err(|_| EngineError::Poisoned)?;
         let table = s
             .graph(graph)
             .ok_or_else(|| EngineError::UnknownGraph(graph.to_string()))?;
         let core = table.core(kind);
-        let live_events: Vec<(Iid, Vec<Event>)> = match &iid_point {
-            Some(iid) => core
-                .live
-                .events_for(iid)
-                .map(|events| vec![(*iid, events.to_vec())])
-                .unwrap_or_default(),
-            None => core
-                .live
-                .entities()
-                .map(|(iid, events)| (*iid, events.to_vec()))
-                .collect(),
-        };
+        let live_events = sel.table_events(|iid| core.live.events_for(iid), core.live.entities());
         (live_events, core.tries.clone())
     };
     let overlay_events: Vec<(Iid, Vec<Event>)> = overlay
         .map(|overlay| {
             let table = overlay.table(kind);
-            match &iid_point {
-                Some(iid) => table
-                    .events_for(iid)
-                    .map(|events| vec![(*iid, events.to_vec())])
-                    .unwrap_or_default(),
-                None => table
-                    .entities()
-                    .map(|(iid, events)| (*iid, events.to_vec()))
-                    .collect(),
-            }
+            sel.table_events(|iid| table.events_for(iid), table.entities())
         })
         .unwrap_or_default();
 
@@ -74,16 +111,12 @@ pub(crate) async fn merged_snapshot(
     for trie in &tries {
         let data_key = keys::data_key(graph, kind.name(), &trie.entry.trie_key);
         let mut block_events: Vec<Event> = Vec::new();
-        for page in trie
-            .pages
-            .iter()
-            .filter(|p| p.selected(bounds, iid_point.as_ref()))
-        {
+        for page in trie.pages.iter().filter(|p| sel.selects_page(p, bounds)) {
             let bytes = store
                 .get_range(&data_key, page.offset..page.offset + page.len)
                 .await?;
             for event in decode_events(&bytes)? {
-                if iid_point.as_ref().is_none_or(|iid| event.iid == *iid) {
+                if sel.admits(&event.iid) {
                     block_events.push(event);
                 }
             }
@@ -376,10 +409,15 @@ pub(crate) struct HopSpec<'a> {
 /// edge iid, for building an `EdgeAdjacency`) and, when a batch label was
 /// requested, the reachable-edge snapshot batch (identical schema to
 /// `merged_snapshot(TableKind::Edges, label, …)`, since both resolve the same
-/// per-edge event lists through `snapshot_entities`).
+/// per-edge event lists through `snapshot_entities`). `nodes` is the anchor
+/// plus every collected edge endpoint — a superset of every node a
+/// non-anchor node element can bind to (any qualifying path's node i > 0 is
+/// an endpoint of that path's edge i-1, which the BFS collects), so it
+/// prunes those elements' node scans via [`IidSel::Set`].
 pub(crate) struct ReachableEdges {
     pub entries: Vec<AdjacencyEntry>,
     pub batch: Option<RecordBatch>,
+    pub nodes: std::collections::BTreeSet<Iid>,
 }
 
 /// Anchor-reachable edge pruning (task 12): a bounded BFS from `anchor`
@@ -482,7 +520,16 @@ pub(crate) async fn reachable_edges(
         )?,
         None => None,
     };
-    Ok(ReachableEdges { entries, batch })
+    let mut nodes = std::collections::BTreeSet::from([anchor]);
+    for entry in &entries {
+        nodes.insert(entry.node);
+        nodes.insert(entry.neighbor);
+    }
+    Ok(ReachableEdges {
+        entries,
+        batch,
+        nodes,
+    })
 }
 
 #[cfg(test)]
@@ -648,7 +695,7 @@ mod tests {
             TableKind::Nodes,
             LabelFilter::Single("P"),
             &at(10),
-            None,
+            &IidSel::All,
             None,
         )
         .await
@@ -721,7 +768,7 @@ mod tests {
             TableKind::Nodes,
             LabelFilter::Single("P"),
             &at(10),
-            Some(target),
+            &IidSel::Point(target),
             None,
         )
         .await
@@ -729,6 +776,80 @@ mod tests {
 
         assert_eq!(names(&batch), vec!["Bob"]);
         assert_eq!(range_reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn set_lookup_reads_only_pages_overlapping_the_set() {
+        fn raw_put(first: u8, sf: i64, name: &str) -> Event {
+            let mut doc = Doc::new();
+            doc.insert("name".into(), Value::Str(name.into()));
+            Event {
+                iid: raw_iid(first),
+                system_from: us(sf),
+                valid_from: us(sf),
+                valid_to: EOT,
+                src: None,
+                dst: None,
+                op: Op::Put {
+                    labels: vec!["P".into()],
+                    doc,
+                },
+            }
+        }
+
+        let rows = vec![
+            raw_put(0x00, 1, "Ada"),
+            raw_put(0x40, 2, "Bob"),
+            raw_put(0x80, 3, "Cyd"),
+        ];
+        let block = encode_sorted_events_by(&rows, 1, SortOrder::ByIid, 1).unwrap();
+        assert_eq!(block.pages.len(), 3);
+
+        let inner = memory_store();
+        let trie_key = "l01-rc-b00".to_string();
+        inner
+            .put(
+                &keys::data_key(DEFAULT_GRAPH, NODES_TABLE, &trie_key),
+                block.data.into(),
+            )
+            .await
+            .unwrap();
+        let range_reads = Arc::new(AtomicUsize::new(0));
+        let store: Arc<dyn ObjectStore> = Arc::new(CountingStore {
+            inner,
+            range_reads: range_reads.clone(),
+        });
+
+        let mut table = TableState::new();
+        table.nodes.tries.push(PersistedTrie {
+            entry: TrieEntry {
+                trie_key,
+                row_count: rows.len() as u64,
+                data_len: block.pages.iter().map(|page| page.len).sum(),
+            },
+            pages: Arc::new(block.pages),
+        });
+        let mut graphs = GraphsState::new();
+        graphs.graphs.insert(DEFAULT_GRAPH.to_string(), table);
+        let state = Arc::new(RwLock::new(graphs));
+
+        // Ada's and Cyd's pages overlap the set; Bob's page must be skipped.
+        let set = Arc::new(std::collections::BTreeSet::from([rows[0].iid, rows[2].iid]));
+        let batch = merged_snapshot(
+            &state,
+            &store,
+            DEFAULT_GRAPH,
+            TableKind::Nodes,
+            LabelFilter::Single("P"),
+            &at(10),
+            &IidSel::Set(set),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(names(&batch), vec!["Ada", "Cyd"]);
+        assert_eq!(range_reads.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -742,7 +863,7 @@ mod tests {
             TableKind::Nodes,
             LabelFilter::Single("P"),
             &at(10),
-            None,
+            &IidSel::All,
             None,
         )
         .await
@@ -756,7 +877,7 @@ mod tests {
             TableKind::Nodes,
             LabelFilter::Single("P"),
             &at(3),
-            None,
+            &IidSel::All,
             None,
         )
         .await
@@ -783,7 +904,7 @@ mod tests {
             TableKind::Nodes,
             LabelFilter::Single("P"),
             &at(10),
-            None,
+            &IidSel::All,
             None,
         )
         .await
@@ -796,7 +917,7 @@ mod tests {
             TableKind::Nodes,
             LabelFilter::Single("P"),
             &at(3),
-            None,
+            &IidSel::All,
             None,
         )
         .await
@@ -824,7 +945,7 @@ mod tests {
             TableKind::Nodes,
             LabelFilter::Single("P"),
             &at(3),
-            None,
+            &IidSel::All,
             None,
         )
         .await
@@ -843,7 +964,7 @@ mod tests {
             TableKind::Nodes,
             LabelFilter::Single("P"),
             &at(10),
-            Some(iid(2)),
+            &IidSel::Point(iid(2)),
             None,
         )
         .await
@@ -872,7 +993,7 @@ mod tests {
                 TableKind::Nodes,
                 LabelFilter::Single("P"),
                 &bounds,
-                None,
+                &IidSel::All,
                 None,
             )
             .await
@@ -884,7 +1005,7 @@ mod tests {
                 TableKind::Nodes,
                 LabelFilter::Single("P"),
                 &bounds,
-                None,
+                &IidSel::All,
                 None,
             )
             .await

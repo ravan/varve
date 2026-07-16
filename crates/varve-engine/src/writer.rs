@@ -87,7 +87,12 @@ pub(crate) struct Submission {
 
 enum Command {
     Submit(Submission),
-    Compact(oneshot::Sender<Result<CompactionReport, EngineError>>),
+    Compact {
+        ack: oneshot::Sender<Result<CompactionReport, EngineError>>,
+        /// Full-sweep policy (`CompactionConfig::full`): drain undersized L0
+        /// groups too. Standard steady-state compaction passes `false`.
+        full: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -104,9 +109,19 @@ impl WriterHandle {
     }
 
     pub async fn compact_once(&self) -> Result<CompactionReport, EngineError> {
+        self.compact(false).await
+    }
+
+    /// One full-sweep job (`CompactionConfig::full`): also drains L0 groups
+    /// below the standard `log_limit` gate — the post-bulk-load shape.
+    pub async fn compact_full_once(&self) -> Result<CompactionReport, EngineError> {
+        self.compact(true).await
+    }
+
+    async fn compact(&self, full: bool) -> Result<CompactionReport, EngineError> {
         let (ack, rx) = oneshot::channel();
         self.sender
-            .send(Command::Compact(ack))
+            .send(Command::Compact { ack, full })
             .await
             .map_err(|_| EngineError::WriterUnavailable)?;
         rx.await.map_err(|_| EngineError::WriterUnavailable)?
@@ -340,7 +355,7 @@ pub(crate) fn spawn_writer(mut state: WriterState, cfg: WriterConfig) -> WriterH
                     }
                     flush_deadline = next_deadline(&state, &cfg, flush_deadline);
                 }
-                Received::Command(Some(Command::Compact(ack))) => {
+                Received::Command(Some(Command::Compact { ack, full })) => {
                     // The mid-batch Compact arm in `run_batch` defers to this
                     // very call site whenever `staged` is empty — it returns
                     // the command as `pending` instead of running
@@ -349,7 +364,7 @@ pub(crate) fn spawn_writer(mut state: WriterState, cfg: WriterConfig) -> WriterH
                     // case (Task 8 review finding 1: every ack must be
                     // lease-gated, and `compact_once` performs real durable
                     // writes).
-                    if let Some(reason) = gated_compact(&mut state, ack).await {
+                    if let Some(reason) = gated_compact(&mut state, ack, full).await {
                         publish_fatal(&state, &reason);
                         drain(&mut rx, reason).await;
                         break;
@@ -455,7 +470,7 @@ async fn run_batch(
         }
         match tokio::time::timeout_at(deadline, rx.recv()).await {
             Ok(Some(Command::Submit(sub))) => pending = Some(sub),
-            Ok(Some(Command::Compact(ack))) => {
+            Ok(Some(Command::Compact { ack, full })) => {
                 if !staged.is_empty() {
                     if let FlushOutcome::Fatal(reason) =
                         flush(state, std::mem::take(&mut staged)).await
@@ -464,7 +479,7 @@ async fn run_batch(
                         return (None, FlushOutcome::Fatal(reason));
                     }
                 }
-                return (Some(Command::Compact(ack)), FlushOutcome::Continue);
+                return (Some(Command::Compact { ack, full }), FlushOutcome::Continue);
             }
             Ok(None) | Err(_) => break, // channel closed or window elapsed
         }
@@ -478,19 +493,29 @@ async fn run_batch(
 /// `varve.compact` (Task 13): no fields — the span wraps the whole compaction
 /// pass, created inside the function itself so it stays observable no matter
 /// how `compact_once` is called (currently only ever via `gated_compact`).
-async fn compact_once(state: &mut WriterState) -> Result<CompactionReport, EngineError> {
-    compact_once_impl(state)
+async fn compact_once(
+    state: &mut WriterState,
+    full: bool,
+) -> Result<CompactionReport, EngineError> {
+    compact_once_impl(state, full)
         .instrument(tracing::info_span!("varve.compact"))
         .await
 }
 
-async fn compact_once_impl(state: &mut WriterState) -> Result<CompactionReport, EngineError> {
+async fn compact_once_impl(
+    state: &mut WriterState,
+    full: bool,
+) -> Result<CompactionReport, EngineError> {
     let history = manifest_history(state.store.as_ref()).await?;
     let Some(latest) = history.iter().max_by_key(|manifest| manifest.block_id) else {
         return Ok(CompactionReport::default());
     };
     let catalog = TrieCatalog::from_manifests(&history)?;
-    let mut jobs = select_compaction_jobs(&catalog, &CompactionConfig::default())?;
+    let config = CompactionConfig {
+        full,
+        ..CompactionConfig::default()
+    };
+    let mut jobs = select_compaction_jobs(&catalog, &config)?;
     let Some(job) = jobs.drain(..).next() else {
         return Ok(CompactionReport::default());
     };
@@ -2036,12 +2061,13 @@ fn fence_all(staged: Vec<Staged>, reason: String) -> FlushOutcome {
 async fn gated_compact(
     state: &mut WriterState,
     ack: oneshot::Sender<Result<CompactionReport, EngineError>>,
+    full: bool,
 ) -> Option<String> {
     if let Some(reason) = lease_block(&state.lease) {
         let _ = ack.send(Err(EngineError::WriterFenced(reason.clone())));
         return Some(reason);
     }
-    match compact_once(state).await {
+    match compact_once(state, full).await {
         Ok(report) => {
             if let Some(reason) = lease_block(&state.lease) {
                 let _ = ack.send(Err(EngineError::WriterFenced(reason.clone())));
@@ -2188,7 +2214,7 @@ async fn drain(rx: &mut mpsc::Receiver<Command>, reason: String) {
             Command::Submit(sub) => {
                 let _ = sub.ack.send(Err(EngineError::WriterFenced(reason.clone())));
             }
-            Command::Compact(ack) => {
+            Command::Compact { ack, .. } => {
                 let _ = ack.send(Err(EngineError::WriterFenced(reason.clone())));
             }
         }

@@ -88,8 +88,11 @@ fi
 # Bulk ingest (xtdb-style data ops via Db::ingest): the fast loader. Runs at
 # full 1M/6M scale unconditionally — it completes in well under a minute on
 # reference hardware (26s / ~267k entities/s on an 8-core dev machine), so it
-# needs no admission gate.
-run_case traversal-1m-bulk 'VARVE_TRAVERSAL_INGEST=bulk VARVE_TRAVERSAL_PEOPLE=1000000 VARVE_TRAVERSAL_FRIENDSHIPS=6000000 VARVE_TRAVERSAL_NODE_BATCH=10000 VARVE_TRAVERSAL_EDGE_BATCH=10000 target/release/examples/traversal_bench'
+# needs no admission gate. VARVE_TRAVERSAL_COMPACT=1 drains compaction to
+# idle before the query phases (bulk load → compact → serve): the warm 2-hop
+# exit criterion is measured against the compacted steady state, not the
+# all-L0 shape a bulk load leaves behind.
+run_case traversal-1m-bulk 'VARVE_TRAVERSAL_INGEST=bulk VARVE_TRAVERSAL_COMPACT=1 VARVE_TRAVERSAL_PEOPLE=1000000 VARVE_TRAVERSAL_FRIENDSHIPS=6000000 VARVE_TRAVERSAL_NODE_BATCH=10000 VARVE_TRAVERSAL_EDGE_BATCH=10000 target/release/examples/traversal_bench'
 
 if [ "${VARVE_RUN_TRAVERSAL_1M:-0}" = 1 ]; then
     run_case traversal-1m 'VARVE_TRAVERSAL_PEOPLE=1000000 VARVE_TRAVERSAL_FRIENDSHIPS=6000000 target/release/examples/traversal_bench'

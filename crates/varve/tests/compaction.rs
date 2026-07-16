@@ -155,6 +155,46 @@ async fn concurrent_compaction_and_flush_use_distinct_generations_in_both_queue_
 }
 
 #[tokio::test]
+async fn compact_full_drains_undersized_l0_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(blocks_config(dir.path(), 1)).await.unwrap();
+
+    // 8 one-row blocks: far below the 64-trie standard-compaction gate.
+    for id in 1..=8 {
+        db.execute(&format!("INSERT (:P {{_id: {id}, v: {id}}})"))
+            .await
+            .unwrap();
+        wait_for_manifest_count(dir.path(), id).await;
+    }
+    assert_eq!(db.compact_once().await.unwrap().jobs, 0);
+
+    // The full sweep (bulk load → compact → serve) still drains them.
+    let mut jobs = 0;
+    loop {
+        let report = db.compact_full_once().await.unwrap();
+        if report.jobs == 0 {
+            break;
+        }
+        jobs += report.jobs;
+    }
+    assert!(jobs >= 1, "full compaction must sweep the undersized tail");
+
+    let trie_keys = latest_node_trie_keys(dir.path()).await;
+    assert!(
+        !trie_keys.iter().any(|key| key.starts_with("l00-")),
+        "no L0 trie may survive a full sweep: {trie_keys:?}"
+    );
+    assert_eq!(rows(&db.query("MATCH (p:P) RETURN p.v").await.unwrap()), 8);
+
+    drop(db);
+    let restarted = Db::open(blocks_config(dir.path(), 1)).await.unwrap();
+    assert_eq!(
+        rows(&restarted.query("MATCH (p:P) RETURN p.v").await.unwrap()),
+        8
+    );
+}
+
+#[tokio::test]
 async fn compact_failure_before_manifest_keeps_inputs_live() {
     let dir = tempfile::tempdir().unwrap();
     let fail_next_manifest_put = Arc::new(AtomicBool::new(false));

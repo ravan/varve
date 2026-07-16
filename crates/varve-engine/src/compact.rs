@@ -17,6 +17,12 @@ use varve_types::{Bucketer, Iid, Instant, TRIE_BRANCH_FACTOR};
 pub(crate) struct CompactionConfig {
     pub log_limit: usize,
     pub file_size_target: u64,
+    /// Full sweep (bulk load → compact → serve): L0 groups are compacted
+    /// even below `log_limit`, and each job takes the WHOLE group rather
+    /// than `log_limit` inputs — no full-iid-space L0 remnant survives, so
+    /// point/set lookups prune to the hash-partitioned levels. Steady-state
+    /// (`false`) keeps the standard amortized policy.
+    pub full: bool,
 }
 
 impl Default for CompactionConfig {
@@ -24,6 +30,7 @@ impl Default for CompactionConfig {
         CompactionConfig {
             log_limit: varve_storage::keys::LOG_LIMIT,
             file_size_target: 104_857_600,
+            full: false,
         }
     }
 }
@@ -243,11 +250,16 @@ fn select_l0_jobs(live: &[LiveTrie], config: &CompactionConfig, jobs: &mut Vec<C
     }
 
     for (scope, mut tries) in groups {
-        if tries.len() < config.log_limit {
+        if !config.full && tries.len() < config.log_limit {
             continue;
         }
         tries.sort_by_key(|trie| trie.key.block);
-        let inputs = tries.into_iter().take(config.log_limit).collect::<Vec<_>>();
+        let take = if config.full {
+            tries.len()
+        } else {
+            config.log_limit
+        };
+        let inputs = tries.into_iter().take(take).collect::<Vec<_>>();
         let block = inputs
             .iter()
             .map(|trie| trie.key.block)
@@ -667,6 +679,52 @@ mod tests {
                 block: (varve_storage::keys::LOG_LIMIT - 1) as u64,
             }
         );
+    }
+
+    #[test]
+    fn full_mode_selects_undersized_l0_group_with_all_inputs() {
+        let keys: Vec<String> = (0..3)
+            .map(|block| format!("l00-rc-b{}", lex_hex(block)))
+            .collect();
+        // Standard policy waits for log_limit L0 tries…
+        let standard =
+            select_compaction_jobs(&catalog(keys.clone()), &CompactionConfig::default()).unwrap();
+        assert!(standard.is_empty());
+        // …full mode (bulk load → compact → serve) sweeps the whole group.
+        let config = CompactionConfig {
+            full: true,
+            ..CompactionConfig::default()
+        };
+        let jobs = select_compaction_jobs(&catalog(keys), &config).unwrap();
+        assert_eq!(jobs.len(), 1);
+        let job = &jobs[0];
+        assert_eq!(job.kind, CompactionKind::L0ToL1Split);
+        assert_eq!(job.input_trie_keys.len(), 3);
+        assert_eq!(
+            job.output_plan,
+            CompactionOutputPlan::L0RecencySplit {
+                level: 1,
+                part: Vec::new(),
+                block: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn full_mode_takes_every_l0_input_in_one_job_beyond_log_limit() {
+        // One merged output, not a 64-input job plus a 6-trie tail: the tail
+        // would stay a full-iid-space L0 remnant, which is exactly what a
+        // final sweep exists to eliminate.
+        let keys: Vec<String> = (0..70)
+            .map(|block| format!("l00-rc-b{}", lex_hex(block)))
+            .collect();
+        let config = CompactionConfig {
+            full: true,
+            ..CompactionConfig::default()
+        };
+        let jobs = select_compaction_jobs(&catalog(keys), &config).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].input_trie_keys.len(), 70);
     }
 
     #[test]
