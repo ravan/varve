@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { browser } from '$app/environment';
   import ConnectionDialog from '$lib/components/ConnectionDialog.svelte';
   import ConnectionStatus from '$lib/components/ConnectionStatus.svelte';
   import ElementInspector from '$lib/components/ElementInspector.svelte';
@@ -6,6 +7,7 @@
   import HistoryPanel from '$lib/components/HistoryPanel.svelte';
   import ObservedSchemaPanel from '$lib/components/ObservedSchemaPanel.svelte';
   import SettingsPanel from '$lib/components/SettingsPanel.svelte';
+  import TimeTravelView from '$lib/components/TimeTravelView.svelte';
   import { Button } from '$lib/components/ui/button';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
   import { Separator } from '$lib/components/ui/separator';
@@ -14,10 +16,13 @@
   import type { ConnectionStore } from '$lib/stores/connection.svelte';
   import type { WorkspaceStore } from '$lib/stores/workspace.svelte';
   import type { Favorite, HistoryEntry } from '$lib/logic/workspace';
+  import Clock from '@lucide/svelte/icons/clock';
   import Database from '@lucide/svelte/icons/database';
   import History from '@lucide/svelte/icons/history';
   import Menu from '@lucide/svelte/icons/menu';
   import PanelRight from '@lucide/svelte/icons/panel-right';
+  import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
+  import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import Plus from '@lucide/svelte/icons/plus';
   import Settings from '@lucide/svelte/icons/settings';
   import Star from '@lucide/svelte/icons/star';
@@ -37,14 +42,38 @@
     children: Snippet;
   } = $props();
 
+  const INSPECTOR_COLLAPSED_KEY = 'varve-explorer.inspector-collapsed.v1';
+
   let navigationOpen = $state(false);
   let inspectorOpen = $state(false);
+  let inspectorCollapsed = $state(restoreInspectorCollapsed());
+
+  function restoreInspectorCollapsed(): boolean {
+    if (!browser) return false;
+    try {
+      return window.localStorage.getItem(INSPECTOR_COLLAPSED_KEY) === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  function toggleInspector(): void {
+    inspectorCollapsed = !inspectorCollapsed;
+    try {
+      window.localStorage.setItem(INSPECTOR_COLLAPSED_KEY, inspectorCollapsed ? '1' : '0');
+    } catch {
+      // Storage can be unavailable; the choice then lasts for this page only.
+    }
+  }
   let connectionOpen = $state(false);
   let reconnectButton = $state<HTMLButtonElement | null>(null);
-  let activePanel = $state<'Observed schema' | 'History' | 'Favorites' | 'Settings' | null>(null);
+  let activePanel = $state<
+    'Time travel' | 'Observed schema' | 'History' | 'Favorites' | 'Settings' | null
+  >(null);
 
   const navigation = [
     { name: 'New query', icon: Plus },
+    { name: 'Time travel', icon: Clock },
     { name: 'Observed schema', icon: Database },
     { name: 'History', icon: History },
     { name: 'Favorites', icon: Star },
@@ -92,7 +121,7 @@
 </script>
 
 <Tooltip.Provider>
-  <div class="app-shell">
+  <div class="app-shell" data-inspector={inspectorCollapsed ? 'collapsed' : 'open'}>
     <aside class="desktop-rail border-r bg-sidebar text-sidebar-foreground">
       <div class="flex h-14 items-center gap-2 px-4">
         <span class="grid size-8 place-items-center rounded-lg bg-primary font-semibold text-primary-foreground"
@@ -204,8 +233,10 @@
         </Sheet.Root>
       </header>
 
-      <main class="min-w-0 overflow-x-hidden p-4 sm:p-6">
-        {#if activePanel === 'Observed schema'}
+      <main class="app-main min-w-0 overflow-x-hidden p-4 sm:p-6">
+        {#if activePanel === 'Time travel'}
+          <TimeTravelView {workspace} />
+        {:else if activePanel === 'Observed schema'}
           <ObservedSchemaPanel schema={workspace.observedSchema} onQuery={startSchemaQuery} />
         {:else if activePanel === 'History'}
           <HistoryPanel {workspace} onRun={runSaved} />
@@ -219,8 +250,37 @@
       </main>
     </div>
 
-    <aside class="desktop-inspector border-l bg-card p-4">
-      <ElementInspector inspection={workspace.inspection} />
+    <aside class="desktop-inspector border-l bg-card" aria-label="Inspector panel">
+      <div class={inspectorCollapsed ? 'flex justify-center p-2' : 'flex justify-end px-2 pt-2'}>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <Button
+                {...props}
+                variant="ghost"
+                size="icon-sm"
+                aria-label={inspectorCollapsed ? 'Expand inspector' : 'Collapse inspector'}
+                aria-expanded={!inspectorCollapsed}
+                onclick={toggleInspector}
+              >
+                {#if inspectorCollapsed}
+                  <PanelRightOpen aria-hidden="true" />
+                {:else}
+                  <PanelRightClose aria-hidden="true" />
+                {/if}
+              </Button>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content side="left">
+            {inspectorCollapsed ? 'Expand inspector' : 'Collapse inspector'}
+          </Tooltip.Content>
+        </Tooltip.Root>
+      </div>
+      {#if !inspectorCollapsed}
+        <div class="p-4 pt-1">
+          <ElementInspector inspection={workspace.inspection} />
+        </div>
+      {/if}
     </aside>
   </div>
 </Tooltip.Provider>

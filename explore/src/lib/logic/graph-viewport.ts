@@ -1,5 +1,6 @@
 import type { EdgeSingular, NodeSingular } from 'cytoscape';
 
+import type { GraphClustering } from './clustering';
 import type { GraphExtraction } from './graph';
 import {
   createGraphElements,
@@ -31,6 +32,7 @@ export interface MountGraphViewportOptions {
   readonly extraction: GraphExtraction;
   readonly motion: boolean;
   readonly onSelection: (selection: GraphViewportSelection) => void;
+  readonly clustering?: GraphClustering;
 }
 
 export interface GraphViewportController {
@@ -58,7 +60,7 @@ export async function mountGraphViewport(
   const motionMedia = window.matchMedia('(prefers-reduced-motion: reduce)');
   const cy = cytoscape({
     container: options.container,
-    elements: createGraphElements(options.extraction),
+    elements: createGraphElements(options.extraction, options.clustering),
     style: createGraphStyles(currentTheme(themeMedia)),
     layout: { name: 'preset' },
     minZoom: 0.2,
@@ -71,7 +73,9 @@ export async function mountGraphViewport(
     if (destroyed) return;
     const zoom = cy.zoom();
     cy.batch(() => {
-      cy.nodes().toggleClass('node-caption-hidden', zoom < 0.72);
+      cy.nodes()
+        .not('.cluster-parent')
+        .toggleClass('node-caption-hidden', zoom < 0.72);
       cy.edges().toggleClass('edge-caption-hidden', zoom < 1.05);
       cy.$('.focused').removeClass('node-caption-hidden').removeClass('edge-caption-hidden');
     });
