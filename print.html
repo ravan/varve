@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-b7ef6f64.js";
+            window.path_to_searchindex_js = "searchindex-413e4ee5.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-47ba109b.js"></script>
+        <script src="toc-34f337a1.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -910,6 +910,142 @@ backend that fails the probe simply cannot run <code>cas-failover</code>, and fa
 <code>designated-writer</code>, enforced by the deployment orchestrator instead of the object store. Varve
 will never make CAS a hard requirement for shipping v1 functionality.</p>
 <div style="break-before: page; page-break-before: always;"></div>
+<h1 id="security-rebac-access-control"><a class="header" href="#security-rebac-access-control">Security (ReBAC access control)</a></h1>
+<p>Varve ships native, relationship-based access control (ReBAC) at
+<strong>label / edge-type granularity</strong> — the same class of graph privileges Neo4j
+and Memgraph offer, modeled the graph-native way: <strong>the policy is itself a
+graph</strong>. Users, roles, and grants live as ordinary bitemporal nodes and edges
+in the reserved <code>__security</code> graph, and a principal’s effective privileges are
+resolved by relationship traversal (transitive role membership). Because
+policy is ordinary Varve data, grants are durable, replicate to query nodes
+through the normal log, and carry full system-time history.</p>
+<h2 id="enabling"><a class="header" href="#enabling">Enabling</a></h2>
+<pre><code class="language-toml">[security]
+enabled = true          # default false: exactly the pre-security engine
+admins  = ["root"]      # bootstrap subjects; bypass all checks
+</code></pre>
+<ul>
+<li><strong>Disabled (default):</strong> zero enforcement and zero overhead — nothing changes.</li>
+<li><strong>Enabled:</strong> requests that carry a principal are <strong>deny-by-default</strong>; only
+granted labels and edge types are readable/writable. Requests <em>without</em> a
+principal — the embedded <code>Db</code> API unless you opt in — keep full access,
+SQLite-style (the process owner). The server always sets the principal from
+the authenticated bearer token (see <code>[auth.static]</code>), so every HTTP request
+is enforced.</li>
+<li><code>admins</code> subjects bypass every check and bootstrap the policy; delegate with
+<code>GRANT ADMIN TO ROLE …</code>.</li>
+</ul>
+<p>Embedded enforcement is opt-in per call:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let rows = db.query("MATCH (p:Person) RETURN p.name")
+    .as_principal("ada")     // enforced when [security] enabled
+    .await?;
+db.execute_as(gql, &amp;params, "ada").await?;  // writes enforced the same way
+<span class="boring">}</span></code></pre>
+<h2 id="the-policy-graph"><a class="header" href="#the-policy-graph">The policy graph</a></h2>
+<pre><code class="language-text">(:User {subject})-[:MEMBER_OF]-&gt;(:Role {name})
+(:Role)-[:MEMBER_OF]-&gt;(:Role)                 // transitive inheritance
+(:Role)-[:GRANTED]-&gt;(:Privilege {action, graph, kind, name})
+</code></pre>
+<p><code>action ∈ {read, write, admin}</code>, <code>kind ∈ {nodes, edges}</code>, and <code>graph</code>/<code>name</code>
+accept <code>*</code>. Users are auto-created on first mention; subjects come from the
+authenticator. The <code>__security</code> graph is unreachable through user GQL (all
+<code>__</code>-prefixed graph names are reserved) — only the DDL below touches it.</p>
+<h2 id="ddl"><a class="header" href="#ddl">DDL</a></h2>
+<p>All statements below are mutations (they flow through <code>/v1/tx</code> or
+<code>Db::execute_as</code>) except <code>SHOW …</code>, which are reads (<code>/v1/query</code> or
+<code>Db::query</code>). Both require the caller to be a configured admin or hold
+<code>ADMIN</code>.</p>
+<pre><code class="language-gql">CREATE ROLE reader                       DROP ROLE reader
+GRANT ROLE reader TO USER 'ada'          REVOKE ROLE reader FROM USER 'ada'
+GRANT ROLE senior TO ROLE junior         REVOKE ROLE senior FROM ROLE junior
+
+GRANT READ  ON GRAPH g NODES Person, Company TO ROLE reader
+GRANT WRITE ON GRAPH * NODES *                TO ROLE writer
+GRANT ALL   ON GRAPH g EDGES KNOWS            TO ROLE writer
+REVOKE READ ON GRAPH g NODES Person FROM ROLE reader
+
+GRANT ADMIN TO ROLE ops                  REVOKE ADMIN FROM ROLE ops
+
+SHOW ROLES
+SHOW GRANTS                              -- every role's direct grants
+SHOW GRANTS FOR USER 'ada'               -- transitive closure for a subject
+SHOW GRANTS FOR ROLE reader              -- transitive closure for a role
+</code></pre>
+<p><code>ALL</code> expands to READ + WRITE. Grants are idempotent; a revoke removes exactly
+the grant it names. <code>DROP ROLE</code> severs every membership and grant that flowed
+through the role, atomically.</p>
+<h2 id="semantics-v1"><a class="header" href="#semantics-v1">Semantics (v1)</a></h2>
+<ul>
+<li><strong>Deny-by-default.</strong> A principal with no matching grant sees nothing and
+writes nothing. There is no <code>DENY</code> precedence in v1 — grants only.</li>
+<li><strong>Reading a node</strong> requires READ on <strong>every</strong> label the node carries
+(conservative multi-label rule: a <code>:Person</code> scan never surfaces a
+<code>:Person:Secret</code> node unless both are granted). A node with no labels needs
+the <code>*</code> grant.</li>
+<li><strong>Reading an edge</strong> requires READ on its type <strong>and</strong> both endpoints
+visible — including every intermediate node of a quantified path
+(<code>-[:KNOWS]-&gt;{1,3}</code>): traversal cannot route <em>through</em> a node the principal
+cannot see.</li>
+<li><strong>Writing</strong> (create/delete node, set/remove property or label) requires
+WRITE on every label the affected node carries — before <em>and</em> after the
+change; edge create/delete requires WRITE on the edge type. Any denied
+effect rejects the <strong>whole transaction</strong>: nothing partial ever reaches the
+log.</li>
+<li><strong>MATCH-driven DML is read-filtered too:</strong> a principal cannot delete (or
+even count) what it cannot read.</li>
+<li><strong>Catalog DDL</strong> (<code>CREATE GRAPH</code> / <code>DROP GRAPH</code>) requires admin when
+enforcement applies to the caller.</li>
+<li><strong>Scoping:</strong> <code>ON GRAPH g</code> scopes a grant to one graph; <code>ON GRAPH *</code> covers
+all graphs, current and future.</li>
+<li>HTTP: a denied request maps to <strong>403 <code>forbidden</code></strong> (distinct from 401
+authentication failures).</li>
+</ul>
+<h2 id="operational-notes"><a class="header" href="#operational-notes">Operational notes</a></h2>
+<ul>
+<li><strong>Replication:</strong> grants replicate to query nodes through the normal log —
+a grant acked on the writer is enforced on a follower as soon as its record
+applies (use a basis token to pin a read past a specific grant).</li>
+<li><strong>Performance:</strong> resolved privileges are cached per subject and invalidated
+exactly (the writer and followers bump a policy epoch on any <code>__security</code>
+change), so the steady-state cost for <strong>unrestricted</strong> principals —
+security disabled, no principal, admins, and fully-wildcard grants — is one
+hash lookup per request (measured ≤ ~1% on the traversal benchmark).</li>
+<li><strong>Anchored traversals keep their fast path under active enforcement.</strong>
+Filtered (non-wildcard) principals keep task-12’s anchor-reachable pruning:
+the pruned inputs carry the same visibility semantics as the filtered full
+scan (the fixed-path edge batch is built under the same <code>Visible</code> filter;
+the quantified adjacency keeps only hops with both endpoints visible,
+computed over the anchor-reachable set instead of the whole graph).
+Measured with <code>VARVE_TRAVERSAL_SECURITY=granted</code> (all nodes/edges granted
+by name, so filtering excludes nothing — pure mechanism cost): warm
+anchored 2-hop is ~8.7 ms at 10k nodes / 60k edges and ~20 ms at 1M / 6M —
+parity with the unrestricted path — and the quantified <code>{1,3}</code> is ~25 ms /
+~100 ms (vs ~24 ms / ~51 ms unrestricted; the gap is the reachable-set
+endpoint-visibility check), all within the default <code>[query]</code> budgets.</li>
+<li><strong>Enforcement adds no asymptotic cost to unanchored traversals either.</strong>
+The fast path requires a point anchor (<code>{_id: …}</code> or <code>WHERE x._id = …</code>)
+and its usual shape conditions (single MATCH, homogeneous hops); anything
+else takes the full scan for every principal — that path is O(graph) by
+nature, filtered or not (an unanchored quantified hop at 1M / 6M builds a
+multi-million-entry adjacency and can exceed the default <code>[query] traversal_adjacency_budget</code> — a deterministic <code>ResourcesExhausted</code>, not a
+wrong answer). What enforcement adds on top is bounded: per-row <code>Visible</code>
+label checks, and an endpoint-visibility scan that probes only the
+adjacency’s own (budget-capped) endpoints — never a graph-wide
+visible-node set. Anchor latency-sensitive queries by <code>_id</code> regardless of
+grants.</li>
+<li><strong>Multi-label edges follow the same conservative rule everywhere.</strong> An
+edge is readable/traversable only when EVERY label it carries is granted —
+enforced identically on fixed-hop scans, quantified adjacency, and the
+anchored fast path. (Multi-label edges are not currently constructible
+through GQL or bulk ingest; the rule is pinned by an engine test so any
+future ingest path inherits it.)</li>
+<li><strong>Audit:</strong> the policy graph is bitemporal; <code>SHOW GRANTS … FOR SYSTEM_TIME AS OF …</code>-style time-traveling audit is a planned follow-up on the same
+foundation, as are <code>DENY</code> precedence, property-level privileges,
+TRAVERSE-without-READ, and instance-level (per-node) ReBAC.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
 <h1 id="operations-guide"><a class="header" href="#operations-guide">Operations guide</a></h1>
 <p>This section covers running Varve in production rather than writing GQL against it. Start with
 <a href="#deployment-profiles--sizing">Deployment profiles &amp; sizing</a> to pick a topology and the tuning knobs that matter
@@ -1230,6 +1366,19 @@ so no single L0 group grows beyond what one job can merge in RAM.</p>
 </thead>
 <tbody>
 <tr><td><code>tokens</code></td><td>array of tables (<code>subject</code>, <code>token</code>)</td><td>(required)</td><td>Bearer tokens accepted, each with a distinct subject; at least one is required and tokens must be unique.</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="security"><a class="header" href="#security"><code>[security]</code></a></h2>
+<p>Native ReBAC access control (label / edge-type granularity). Policy itself lives as bitemporal nodes/edges in the reserved <code>__security</code> graph, managed through GQL DDL (<code>CREATE ROLE</code>, <code>GRANT … TO …</code>, <code>SHOW GRANTS</code>, …) and replicated to query nodes through the normal log. Enforcement is deny-by-default for principals without grants; requests without a principal (embedded use) keep full access.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>enabled</code></td><td>boolean</td><td><code>false</code></td><td>Enables enforcement on reads and writes; disabled is exactly the pre-security engine (zero overhead).</td></tr>
+<tr><td><code>admins</code></td><td>array of strings</td><td><code>[]</code></td><td>Bootstrap subjects that bypass every check and may run security DDL (grant <code>ADMIN</code> to a role to delegate).</td></tr>
 </tbody>
 </table>
 </div>

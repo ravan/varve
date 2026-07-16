@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-b7ef6f64.js";
+            window.path_to_searchindex_js = "../searchindex-413e4ee5.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-47ba109b.js"></script>
+        <script src="../toc-34f337a1.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -396,6 +396,19 @@
 </thead>
 <tbody>
 <tr><td><code>tokens</code></td><td>array of tables (<code>subject</code>, <code>token</code>)</td><td>(required)</td><td>Bearer tokens accepted, each with a distinct subject; at least one is required and tokens must be unique.</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="security"><a class="header" href="#security"><code>[security]</code></a></h2>
+<p>Native ReBAC access control (label / edge-type granularity). Policy itself lives as bitemporal nodes/edges in the reserved <code>__security</code> graph, managed through GQL DDL (<code>CREATE ROLE</code>, <code>GRANT … TO …</code>, <code>SHOW GRANTS</code>, …) and replicated to query nodes through the normal log. Enforcement is deny-by-default for principals without grants; requests without a principal (embedded use) keep full access.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>enabled</code></td><td>boolean</td><td><code>false</code></td><td>Enables enforcement on reads and writes; disabled is exactly the pre-security engine (zero overhead).</td></tr>
+<tr><td><code>admins</code></td><td>array of strings</td><td><code>[]</code></td><td>Bootstrap subjects that bypass every check and may run security DDL (grant <code>ADMIN</code> to a role to delegate).</td></tr>
 </tbody>
 </table>
 </div>

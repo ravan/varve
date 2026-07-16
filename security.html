@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Temporal extensions - VarveDB</title>
+        <title>Security (ReBAC) - VarveDB</title>
 
 
         <!-- Custom HTML head -->
@@ -12,33 +12,33 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="theme-color" content="#ffffff">
 
-        <link rel="icon" href="../favicon-de23e50b.svg">
-        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
-        <link rel="stylesheet" href="../css/variables-8adf115d.css">
-        <link rel="stylesheet" href="../css/general-e96d0476.css">
-        <link rel="stylesheet" href="../css/chrome-d279d366.css">
-        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-e96d0476.css">
+        <link rel="stylesheet" href="css/chrome-d279d366.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
-        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
 
         <!-- Highlight.js Stylesheets -->
-        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
-        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
-        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
 
         <!-- Custom theme stylesheets -->
 
 
         <!-- Provide site root and default themes to javascript -->
         <script>
-            const path_to_root = "../";
+            const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-413e4ee5.js";
+            window.path_to_searchindex_js = "searchindex-413e4ee5.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-34f337a1.js"></script>
+        <script src="toc-34f337a1.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -105,7 +105,7 @@
             <!-- populated by js -->
             <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
             <noscript>
-                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
             </noscript>
             <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
                 <div class="sidebar-resize-indicator"></div>
@@ -140,7 +140,7 @@
                     <h1 class="menu-title">VarveDB</h1>
 
                     <div class="right-buttons">
-                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
                             <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
                         </a>
 
@@ -174,128 +174,151 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="bitemporal-queries"><a class="header" href="#bitemporal-queries">Bitemporal queries</a></h1>
-<p>Varve tracks two independent time axes per fact, per the
-<a href="../../../design/2026-07-04-varve-design.html">design specification</a> §3/§8 (Ceiling/Polygon
-resolution, ported from XTDB):</p>
+                        <h1 id="security-rebac-access-control"><a class="header" href="#security-rebac-access-control">Security (ReBAC access control)</a></h1>
+<p>Varve ships native, relationship-based access control (ReBAC) at
+<strong>label / edge-type granularity</strong> — the same class of graph privileges Neo4j
+and Memgraph offer, modeled the graph-native way: <strong>the policy is itself a
+graph</strong>. Users, roles, and grants live as ordinary bitemporal nodes and edges
+in the reserved <code>__security</code> graph, and a principal’s effective privileges are
+resolved by relationship traversal (transitive role membership). Because
+policy is ordinary Varve data, grants are durable, replicate to query nodes
+through the normal log, and carry full system-time history.</p>
+<h2 id="enabling"><a class="header" href="#enabling">Enabling</a></h2>
+<pre><code class="language-toml">[security]
+enabled = true          # default false: exactly the pre-security engine
+admins  = ["root"]      # bootstrap subjects; bypass all checks
+</code></pre>
 <ul>
-<li><strong>Valid time</strong>: when a fact was true in the world. User-controlled via <code>VALID FROM</code>/
-<code>VALID TO</code> on <code>INSERT</code>; defaults to “now” through “forever” (open-ended) if omitted.</li>
-<li><strong>System time</strong>: when Varve learned the fact. Writer-assigned, monotonic, never
-user-settable; every mutation gets the writer’s current system time as its <code>_system_from</code>.</li>
+<li><strong>Disabled (default):</strong> zero enforcement and zero overhead — nothing changes.</li>
+<li><strong>Enabled:</strong> requests that carry a principal are <strong>deny-by-default</strong>; only
+granted labels and edge types are readable/writable. Requests <em>without</em> a
+principal — the embedded <code>Db</code> API unless you opt in — keep full access,
+SQLite-style (the process owner). The server always sets the principal from
+the authenticated bearer token (see <code>[auth.static]</code>), so every HTTP request
+is enforced.</li>
+<li><code>admins</code> subjects bypass every check and bootstrap the policy; delegate with
+<code>GRANT ADMIN TO ROLE …</code>.</li>
 </ul>
-<p>A query’s temporal position on each axis is set independently with <code>FOR VALID_TIME …</code> and
-<code>FOR SYSTEM_TIME …</code>, each accepted at most once per query (a duplicate axis is a parse
-error: <code>"duplicate ..."</code>). Omitting a <code>FOR</code> clause defaults to <code>AS OF now</code> on both axes: plain
-<code>MATCH</code> without any <code>FOR</code> clause is exactly <code>FOR VALID_TIME AS OF now FOR SYSTEM_TIME AS OF now</code>, current state as currently known.</p>
-<h2 id="forms"><a class="header" href="#forms">Forms</a></h2>
-<p>Each axis independently accepts one of four forms (all four verified against
-<code>crates/varve-gql/src/parser.rs</code>’s passing test suite, <code>cargo test -p varve-gql --lib</code>:
-65 passed):</p>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Form</th><th>Meaning</th></tr>
-</thead>
-<tbody>
-<tr><td><code>AS OF &lt;datetime&gt;</code></td><td>a single instant</td></tr>
-<tr><td><code>FROM &lt;datetime&gt; TO &lt;datetime&gt;</code></td><td>a half-open range (<code>from</code> must be strictly earlier than <code>to</code>)</td></tr>
-<tr><td><code>BETWEEN &lt;datetime&gt; AND &lt;datetime&gt;</code></td><td>an inclusive range (<code>from</code> must be earlier than or equal to <code>to</code>)</td></tr>
-<tr><td><code>ALL</code></td><td>every instant on that axis, unbounded</td></tr>
-</tbody>
-</table>
-</div>
-<p><code>&lt;datetime&gt;</code> is <code>TIMESTAMP '&lt;RFC 3339 string&gt;'</code> or <code>DATE '&lt;YYYY-MM-DD&gt;'</code>.</p>
-<p>Both axes on one query, combining a valid-time range with an all-system-time scan:</p>
-<pre><code class="language-gql">FOR VALID_TIME FROM TIMESTAMP '2020-01-01T00:00:00Z' TO TIMESTAMP '2021-01-01T00:00:00Z'
-FOR SYSTEM_TIME ALL
-MATCH (p:Person) RETURN p.name
+<p>Embedded enforcement is opt-in per call:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let rows = db.query("MATCH (p:Person) RETURN p.name")
+    .as_principal("ada")     // enforced when [security] enabled
+    .await?;
+db.execute_as(gql, &amp;params, "ada").await?;  // writes enforced the same way
+<span class="boring">}</span></code></pre>
+<h2 id="the-policy-graph"><a class="header" href="#the-policy-graph">The policy graph</a></h2>
+<pre><code class="language-text">(:User {subject})-[:MEMBER_OF]-&gt;(:Role {name})
+(:Role)-[:MEMBER_OF]-&gt;(:Role)                 // transitive inheritance
+(:Role)-[:GRANTED]-&gt;(:Privilege {action, graph, kind, name})
 </code></pre>
-<p><em>(parser test)</em></p>
-<p>An inclusive valid-time window:</p>
-<pre><code class="language-gql">FOR VALID_TIME BETWEEN DATE '2020-01-01' AND DATE '2021-01-01'
-MATCH (p:Person) RETURN p.name
+<p><code>action ∈ {read, write, admin}</code>, <code>kind ∈ {nodes, edges}</code>, and <code>graph</code>/<code>name</code>
+accept <code>*</code>. Users are auto-created on first mention; subjects come from the
+authenticator. The <code>__security</code> graph is unreachable through user GQL (all
+<code>__</code>-prefixed graph names are reserved) — only the DDL below touches it.</p>
+<h2 id="ddl"><a class="header" href="#ddl">DDL</a></h2>
+<p>All statements below are mutations (they flow through <code>/v1/tx</code> or
+<code>Db::execute_as</code>) except <code>SHOW …</code>, which are reads (<code>/v1/query</code> or
+<code>Db::query</code>). Both require the caller to be a configured admin or hold
+<code>ADMIN</code>.</p>
+<pre><code class="language-gql">CREATE ROLE reader                       DROP ROLE reader
+GRANT ROLE reader TO USER 'ada'          REVOKE ROLE reader FROM USER 'ada'
+GRANT ROLE senior TO ROLE junior         REVOKE ROLE senior FROM ROLE junior
+
+GRANT READ  ON GRAPH g NODES Person, Company TO ROLE reader
+GRANT WRITE ON GRAPH * NODES *                TO ROLE writer
+GRANT ALL   ON GRAPH g EDGES KNOWS            TO ROLE writer
+REVOKE READ ON GRAPH g NODES Person FROM ROLE reader
+
+GRANT ADMIN TO ROLE ops                  REVOKE ADMIN FROM ROLE ops
+
+SHOW ROLES
+SHOW GRANTS                              -- every role's direct grants
+SHOW GRANTS FOR USER 'ada'               -- transitive closure for a subject
+SHOW GRANTS FOR ROLE reader              -- transitive closure for a role
 </code></pre>
-<p><em>(parser test)</em></p>
-<p>System-time travel (“what did we believe at this instant”), exercised end to end by
-<code>cargo run --release --example gql_tour -p varve</code>:</p>
-<pre><code class="language-gql">FOR SYSTEM_TIME AS OF TIMESTAMP '2026-07-12T12:20:28.657968Z'
-MATCH (p:Person) RETURN p._id, p.name ORDER BY p._id
-</code></pre>
-<p><em>(getting-started.md’s live transcript: a person inserted after this timestamp is correctly
-absent from the result, while an earlier-valid-time-but-later-inserted person is also absent,
-because system time governs “what Varve knew then”, independent of valid time)</em></p>
-<p><code>DELETE</code>/<code>MATCH … INSERT</code>/<code>DETACH DELETE</code> all read current state only; a <code>FOR</code> clause on
-any of them is a parse error (“DELETE reads current state - temporal clauses not supported” /
-“MATCH … INSERT reads current state - temporal clauses not supported”). Retroactive/as-of
-mutation is out of scope for v1.</p>
-<h2 id="insert--valid-from--valid-to"><a class="header" href="#insert--valid-from--valid-to"><code>INSERT … VALID FROM</code> / <code>VALID TO</code></a></h2>
-<pre><code class="language-gql">INSERT (:P {_id: 1}) VALID FROM DATE '2020-01-01' TO DATE '2021-01-01'
-</code></pre>
-<p><em>(parser test: <code>VALID FROM</code> must be strictly earlier than <code>VALID TO</code> when both are given)</em></p>
-<pre><code class="language-gql">INSERT (:P {_id: 1}) VALID TO DATE '2021-01-01'
-</code></pre>
-<p><em>(parser test: <code>VALID FROM</code> defaults to “now” when omitted)</em></p>
-<p>A retro-dated insert with no upper bound (defaults to “forever”), exercised live in
-<a href="../getting-started.html">Getting started</a>:</p>
-<pre><code class="language-gql">INSERT (:Person {_id: 3, name: 'Cleo'}) VALID FROM DATE '2020-01-01'
-</code></pre>
-<p><code>VALID FROM</code>/<code>VALID TO</code> also apply to edges:</p>
-<pre><code class="language-gql">INSERT (:P {_id: 1})-[:K]-&gt;(:P {_id: 2}) VALID FROM TIMESTAMP '2020-01-01T00:00:00Z'
-</code></pre>
-<p><em>(parser test)</em></p>
-<h2 id="temporal-functions"><a class="header" href="#temporal-functions">Temporal functions</a></h2>
-<p><code>valid_from(var)</code>, <code>valid_to(var)</code>, and <code>system_from(var)</code> project the bound-in-time fields of
-a matched variable in a <code>RETURN</code> (backed by DataFusion columns <code>_valid_from</code>/<code>_valid_to</code>/
-<code>_system_from</code>, <code>crates/varve-plan/src/functions.rs</code>):</p>
-<pre><code class="language-gql">MATCH (p:Person) RETURN valid_from(p) AS since, valid_to(p), system_from(p)
-</code></pre>
-<p><em>(parser test)</em></p>
-<p>There is no <code>system_to()</code>: per the <a href="../architecture.html">architecture overview</a>, effective
-system-time upper bounds are never stored; they are derived at read time by scanning newer
-events for the same internal id, never persisted as their own field.</p>
-<h2 id="erase-vs-delete-gdpr-semantics"><a class="header" href="#erase-vs-delete-gdpr-semantics"><code>ERASE</code> vs <code>DELETE</code>: GDPR semantics</a></h2>
-<p><code>DELETE</code> (and <code>DETACH DELETE</code>) is an ordinary bitemporal tombstone: the entity disappears from
-current state, but every historical <code>FOR SYSTEM_TIME AS OF &lt;before-the-delete&gt;</code> query still
-sees it, exactly as any other superseded fact. Nothing is physically removed by <code>DELETE</code>
-alone.</p>
-<p><code>ERASE</code> (and <code>DETACH ERASE</code>) is Varve’s GDPR hard-delete extension, not part of standard GQL,
-and behaves differently: it hides the entity’s entire history at every system-time instant, not
-just from now on, and its underlying property/label bytes are physically removed from every
-stored object once compaction and garbage collection have run. The following tests
-(<code>cargo test -p varve --test erase</code> and <code>cargo test -p varve --test gdpr_gc</code>) back these claims,
-cited by exact test name so they can be checked directly against the source:</p>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Test (file)</th><th>Proves</th></tr>
-</thead>
-<tbody>
-<tr><td><code>erase_hides_history_at_every_system_time</code> (<code>erase.rs</code>)</td><td>An erased entity is invisible even to a <code>FOR SYSTEM_TIME AS OF</code> query timestamped before the erase, a deliberate GDPR choice rather than a time-travel bug.</td></tr>
-<tr><td><code>erase_connected_requires_detach</code> (<code>erase.rs</code>)</td><td>A plain <code>ERASE</code> on a node with incident edges fails with <code>EngineError::StillConnected</code> rather than silently orphaning edges; <code>DETACH ERASE</code> is required.</td></tr>
-<tr><td><code>detach_erase_erases_incident_edges</code> (<code>erase.rs</code>)</td><td><code>DETACH ERASE</code> also erases the node’s incident edges, not just the node itself.</td></tr>
-<tr><td><code>erase_then_reinsert_same_id_is_fresh_entity</code> (<code>erase.rs</code>)</td><td>Re-inserting the same <code>_id</code> after an erase starts a genuinely fresh entity, uncontaminated by the erased history.</td></tr>
-<tr><td><code>erased_property_bytes_absent_after_compaction_and_gc</code> (<code>gdpr_gc.rs</code>, Task 2)</td><td>After compaction + GC, an erased entity’s property bytes are absent from the compacted store, not merely hidden by a filter.</td></tr>
-<tr><td><code>post_erase_reinsert_survives_compaction</code> (<code>gdpr_gc.rs</code>, Task 2)</td><td>A re-inserted-after-erase entity survives a subsequent compaction pass correctly (the erase doesn’t corrupt later history for the same id).</td></tr>
-<tr><td><code>erased_bytes_absent_from_every_stored_object_and_log_segment</code> (<code>gdpr_gc.rs</code>, Task 2)</td><td>LOCAL-profile whole-disk proof: scans every stored byte (every log segment and every store object on disk) and asserts the erased entity’s property values appear in none of them.</td></tr>
-<tr><td><code>erased_bytes_absent_from_every_raw_object_on_the_object_store_log_profile</code> (<code>gdpr_gc.rs</code>, Task 3)</td><td>Same proof against the object-store-log profile: lists and GETs every raw <code>v1/</code> key in the object store directly (not through the engine’s own read path), so the check cannot be fooled by a caching or indexing bug.</td></tr>
-<tr><td><code>detach_erase_scrubs_edge_property_bytes_too</code> (<code>gdpr_gc.rs</code>, Task 2)</td><td><code>DETACH ERASE</code> scrubs edge/adjacency property bytes as thoroughly as node bytes; the edge-side GDPR proof.</td></tr>
-</tbody>
-</table>
-</div>
-<p>Reach for <code>DELETE</code> for ordinary “this is no longer true” business logic (history stays
-auditable). Reach for <code>ERASE</code>/<code>DETACH ERASE</code> only when a legal erasure obligation requires the
-data to become unrecoverable after the next compaction + GC cycle.</p>
+<p><code>ALL</code> expands to READ + WRITE. Grants are idempotent; a revoke removes exactly
+the grant it names. <code>DROP ROLE</code> severs every membership and grant that flowed
+through the role, atomically.</p>
+<h2 id="semantics-v1"><a class="header" href="#semantics-v1">Semantics (v1)</a></h2>
+<ul>
+<li><strong>Deny-by-default.</strong> A principal with no matching grant sees nothing and
+writes nothing. There is no <code>DENY</code> precedence in v1 — grants only.</li>
+<li><strong>Reading a node</strong> requires READ on <strong>every</strong> label the node carries
+(conservative multi-label rule: a <code>:Person</code> scan never surfaces a
+<code>:Person:Secret</code> node unless both are granted). A node with no labels needs
+the <code>*</code> grant.</li>
+<li><strong>Reading an edge</strong> requires READ on its type <strong>and</strong> both endpoints
+visible — including every intermediate node of a quantified path
+(<code>-[:KNOWS]-&gt;{1,3}</code>): traversal cannot route <em>through</em> a node the principal
+cannot see.</li>
+<li><strong>Writing</strong> (create/delete node, set/remove property or label) requires
+WRITE on every label the affected node carries — before <em>and</em> after the
+change; edge create/delete requires WRITE on the edge type. Any denied
+effect rejects the <strong>whole transaction</strong>: nothing partial ever reaches the
+log.</li>
+<li><strong>MATCH-driven DML is read-filtered too:</strong> a principal cannot delete (or
+even count) what it cannot read.</li>
+<li><strong>Catalog DDL</strong> (<code>CREATE GRAPH</code> / <code>DROP GRAPH</code>) requires admin when
+enforcement applies to the caller.</li>
+<li><strong>Scoping:</strong> <code>ON GRAPH g</code> scopes a grant to one graph; <code>ON GRAPH *</code> covers
+all graphs, current and future.</li>
+<li>HTTP: a denied request maps to <strong>403 <code>forbidden</code></strong> (distinct from 401
+authentication failures).</li>
+</ul>
+<h2 id="operational-notes"><a class="header" href="#operational-notes">Operational notes</a></h2>
+<ul>
+<li><strong>Replication:</strong> grants replicate to query nodes through the normal log —
+a grant acked on the writer is enforced on a follower as soon as its record
+applies (use a basis token to pin a read past a specific grant).</li>
+<li><strong>Performance:</strong> resolved privileges are cached per subject and invalidated
+exactly (the writer and followers bump a policy epoch on any <code>__security</code>
+change), so the steady-state cost for <strong>unrestricted</strong> principals —
+security disabled, no principal, admins, and fully-wildcard grants — is one
+hash lookup per request (measured ≤ ~1% on the traversal benchmark).</li>
+<li><strong>Anchored traversals keep their fast path under active enforcement.</strong>
+Filtered (non-wildcard) principals keep task-12’s anchor-reachable pruning:
+the pruned inputs carry the same visibility semantics as the filtered full
+scan (the fixed-path edge batch is built under the same <code>Visible</code> filter;
+the quantified adjacency keeps only hops with both endpoints visible,
+computed over the anchor-reachable set instead of the whole graph).
+Measured with <code>VARVE_TRAVERSAL_SECURITY=granted</code> (all nodes/edges granted
+by name, so filtering excludes nothing — pure mechanism cost): warm
+anchored 2-hop is ~8.7 ms at 10k nodes / 60k edges and ~20 ms at 1M / 6M —
+parity with the unrestricted path — and the quantified <code>{1,3}</code> is ~25 ms /
+~100 ms (vs ~24 ms / ~51 ms unrestricted; the gap is the reachable-set
+endpoint-visibility check), all within the default <code>[query]</code> budgets.</li>
+<li><strong>Enforcement adds no asymptotic cost to unanchored traversals either.</strong>
+The fast path requires a point anchor (<code>{_id: …}</code> or <code>WHERE x._id = …</code>)
+and its usual shape conditions (single MATCH, homogeneous hops); anything
+else takes the full scan for every principal — that path is O(graph) by
+nature, filtered or not (an unanchored quantified hop at 1M / 6M builds a
+multi-million-entry adjacency and can exceed the default <code>[query] traversal_adjacency_budget</code> — a deterministic <code>ResourcesExhausted</code>, not a
+wrong answer). What enforcement adds on top is bounded: per-row <code>Visible</code>
+label checks, and an endpoint-visibility scan that probes only the
+adjacency’s own (budget-capped) endpoints — never a graph-wide
+visible-node set. Anchor latency-sensitive queries by <code>_id</code> regardless of
+grants.</li>
+<li><strong>Multi-label edges follow the same conservative rule everywhere.</strong> An
+edge is readable/traversable only when EVERY label it carries is granted —
+enforced identically on fixed-hop scans, quantified adjacency, and the
+anchored fast path. (Multi-label edges are not currently constructible
+through GQL or bulk ingest; the rule is pinned by an engine test so any
+future ingest path inherits it.)</li>
+<li><strong>Audit:</strong> the policy graph is bitemporal; <code>SHOW GRANTS … FOR SYSTEM_TIME AS OF …</code>-style time-traveling audit is a planned follow-up on the same
+foundation, as are <code>DENY</code> precedence, property-level privileges,
+TRAVERSE-without-READ, and instance-level (per-node) ReBAC.</li>
+</ul>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../gql/reference.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="backends.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../gql/deviations.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="ops/index.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -305,11 +328,11 @@ data to become unrecoverable after the next compaction + GC cycle.</p>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../gql/reference.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="backends.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../gql/deviations.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="ops/index.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>
@@ -329,13 +352,13 @@ data to become unrecoverable after the next compaction + GC cycle.</p>
         </script>
 
 
-        <script src="../elasticlunr-ef4e11c1.min.js"></script>
-        <script src="../mark-09e88c2c.min.js"></script>
-        <script src="../searcher-09f2665d.js"></script>
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-09f2665d.js"></script>
 
-        <script src="../clipboard-1626706a.min.js"></script>
-        <script src="../highlight-abc7f01d.js"></script>
-        <script src="../book-609e4cb8.js"></script>
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-abc7f01d.js"></script>
+        <script src="book-609e4cb8.js"></script>
 
         <!-- Custom JS scripts -->
 
