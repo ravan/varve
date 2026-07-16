@@ -359,8 +359,8 @@ mod tests {
     use crate::metrics::EngineMetrics;
     use crate::node::ProgressState;
     use crate::scan::{merged_snapshot, IidSel};
-    use crate::state::{GraphsState, TableKind, DEFAULT_GRAPH};
     use crate::security::SecurityEnforcer;
+    use crate::state::{GraphsState, TableKind, DEFAULT_GRAPH};
     use crate::writer::{spawn_writer, Submission, WriterConfig, WriterHandle, WriterState};
     use bytes::Bytes;
     use std::collections::BTreeMap;
