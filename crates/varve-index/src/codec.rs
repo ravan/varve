@@ -71,8 +71,17 @@ fn decode_put_payload(mut input: &[u8]) -> Result<(Vec<String>, Doc), IndexError
         Ok(u32::from_le_bytes(arr))
     }
 
-    let label_count = read_u32(&mut input)?;
-    let mut labels = Vec::with_capacity(label_count as usize);
+    let label_count = read_u32(&mut input)? as usize;
+    // Every encoded label needs at least its four-byte length prefix. Bound
+    // the count before reserving so corrupt input cannot turn four bytes into
+    // a multi-gigabyte `Vec<String>` allocation.
+    if label_count > input.len() / 4 {
+        return Err(codec_err(format!(
+            "payload label count {label_count} exceeds {} remaining bytes",
+            input.len()
+        )));
+    }
+    let mut labels = Vec::with_capacity(label_count);
     for _ in 0..label_count {
         let len = read_u32(&mut input)? as usize;
         let label = std::str::from_utf8(take(&mut input, len)?)
@@ -683,6 +692,16 @@ mod tests {
     }
 
     #[test]
+    fn put_payload_rejects_impossible_label_count_before_allocating() {
+        let payload = u32::MAX.to_le_bytes();
+        let err = decode_put_payload(&payload).unwrap_err();
+        assert!(
+            err.to_string().contains("label count"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn wrong_schema_is_rejected() {
         // Not an Arrow IPC stream at all. The framing validator now runs
         // first (to bound arrow's allocation): the bogus 4-byte prefix decodes
@@ -747,24 +766,13 @@ mod tests {
         assert!(matches!(decode_events(&corrupt), Err(IndexError::Codec(_))));
     }
 
-    /// Production-safety regression for the record-batch-descriptor
-    /// over-reservation class that `validate_ipc_framing` deliberately does NOT
-    /// police (it bounds the stream framing's `metadata_size`/`bodyLength`, not
-    /// the record-batch-INTERNAL `FieldNode`/`Buffer` length descriptors one
-    /// layer deeper). The committed artifact is the minimized `events` fuzz
-    /// input that made arrow's `RecordBatchDecoder::create_primitive_array` ->
-    /// `ArrayDataBuilder::build` request ~103 GB (`24 * u32::MAX`) from a
-    /// corrupted array-length descriptor. In a normal build that ~103 GB is a
-    /// lazily-backed `alloc_zeroed` (OS shared zero page, never touched → no
-    /// RSS) and our payload decoder rejects the truncated data first, so
-    /// `decode_events` returns a clean `Err` in ~0 ms — which this test asserts
-    /// and which passes under an ordinary `cargo test` build. The "crash" the
-    /// fuzzer reported was only libFuzzer's `-malloc_limit_mb` allocation-REQUEST
-    /// hook firing; the fuzz targets now gate on RSS (`-malloc_limit_mb=0`), and
-    /// a conservative descriptor-vs-`bodyLength` bound (or an arrow-rs upgrade)
-    /// for strict-no-overcommit deployments is an owned post-v1 follow-up.
+    /// Production-safety regression for a corrupt payload declaring
+    /// `u32::MAX` labels. Reserving that many 24-byte `String` values requests
+    /// ~103 GB before the truncated payload is noticed. Some allocators lazily
+    /// overcommit it, while GitHub's Linux runner aborts the process. The
+    /// payload decoder must reject the impossible count before reserving.
     #[test]
-    fn decode_events_returns_clean_err_on_oversized_record_batch_length() {
+    fn decode_events_rejects_oversized_payload_label_count() {
         let bytes: &[u8] =
             include_bytes!("../../../fuzz/regressions/events/record-batch-length-oom.bin");
         assert!(decode_events(bytes).is_err());
