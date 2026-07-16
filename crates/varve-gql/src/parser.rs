@@ -3026,9 +3026,9 @@ mod security_tests {
             "GRANT",
             "GRANT ROLE r",
             "GRANT ROLE r TO",
-            "GRANT ROLE r TO USER ada", // unquoted subject
-            "GRANT READ ON GRAPH g TO ROLE r", // missing NODES/EDGES
-            "GRANT READ ON GRAPH g NODES TO ROLE r", // missing names
+            "GRANT ROLE r TO USER ada",                 // unquoted subject
+            "GRANT READ ON GRAPH g TO ROLE r",          // missing NODES/EDGES
+            "GRANT READ ON GRAPH g NODES TO ROLE r",    // missing names
             "REVOKE READ ON GRAPH g NODES A TO ROLE r", // TO instead of FROM
             "SHOW",
             "SHOW GRANTS FOR",

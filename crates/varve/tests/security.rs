@@ -278,8 +278,7 @@ async fn anchored_fast_path_keeps_enforcement_quantified_hops() {
     grant_reader(&db).await;
 
     let anchored = "MATCH (a:Person {_id: 'p1'})-[:KNOWS]->{2}(c:Person) RETURN c.name";
-    let full =
-        "MATCH (a:Person)-[:KNOWS]->{2}(c:Person) WHERE a.name = 'P1' RETURN c.name";
+    let full = "MATCH (a:Person)-[:KNOWS]->{2}(c:Person) WHERE a.name = 'P1' RETURN c.name";
 
     let batches = query_as(&db, "root", anchored).await.unwrap();
     assert_eq!(strings(&batches, "c.name"), vec!["P3", "P4"]);
@@ -430,7 +429,9 @@ async fn match_driven_dml_cannot_touch_unreadable_nodes() {
     admin(&db, "GRANT READ ON GRAPH * NODES Person TO ROLE wiper").await;
     admin(&db, "GRANT ROLE wiper TO USER 'ada'").await;
 
-    let receipt = run_as(&db, "ada", "MATCH (s:Secret) DELETE s").await.unwrap();
+    let receipt = run_as(&db, "ada", "MATCH (s:Secret) DELETE s")
+        .await
+        .unwrap();
     assert!(
         receipt.side_effects.is_empty(),
         "MATCH over unreadable label must bind nothing"
@@ -453,10 +454,7 @@ async fn ddl_gate_requires_admin_and_security_graph_is_unreachable() {
         run_as(&db, "ada", "GRANT READ ON GRAPH * NODES * TO ROLE reader").await,
         "non-admin GRANT",
     );
-    assert_denied(
-        query_as(&db, "ada", "SHOW GRANTS").await,
-        "non-admin SHOW",
-    );
+    assert_denied(query_as(&db, "ada", "SHOW GRANTS").await, "non-admin SHOW");
 
     // The policy graph itself is unreachable through user GQL on both paths.
     assert!(db
@@ -493,11 +491,7 @@ async fn show_roles_and_grants_report_policy() {
 
     // A principal holding ADMIN through a role may run SHOW too.
     admin(&db, "GRANT ROLE ops TO USER 'opsy'").await;
-    let batches = db
-        .query("SHOW ROLES")
-        .as_principal("opsy")
-        .await
-        .unwrap();
+    let batches = db.query("SHOW ROLES").as_principal("opsy").await.unwrap();
     assert_eq!(strings(&batches, "role"), vec!["ops", "reader"]);
 }
 
@@ -546,7 +540,11 @@ async fn admin_role_bypasses_enforcement() {
     let batches = query_as(&db, "opsy", "MATCH (s:Secret) RETURN s.name")
         .await
         .unwrap();
-    assert_eq!(rows(&batches), 2, "admin-role read sees both Secret-labeled nodes");
+    assert_eq!(
+        rows(&batches),
+        2,
+        "admin-role read sees both Secret-labeled nodes"
+    );
     run_as(&db, "opsy", "INSERT (:Secret {_id: 's2', name: 'S2'})")
         .await
         .unwrap();

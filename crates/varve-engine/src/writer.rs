@@ -945,8 +945,16 @@ async fn resolve_program_impl(
                 resolve_set(state, graph, set, params, system, Some(&overlay), security).await?
             }
             Statement::Remove(remove) => {
-                resolve_remove(state, graph, remove, params, system, Some(&overlay), security)
-                    .await?
+                resolve_remove(
+                    state,
+                    graph,
+                    remove,
+                    params,
+                    system,
+                    Some(&overlay),
+                    security,
+                )
+                .await?
             }
             Statement::Graph(graph_stmt) => resolve_graph_stmt(state, graph_stmt, system)?,
             Statement::Security(stmt) => {
@@ -1136,8 +1144,20 @@ async fn resolve_security_stmt(
     match stmt {
         SecurityStmt::CreateRole(name) => {
             let iid = node_iid(&security::role_node_id(name))?;
-            if visible_payload(state, SECURITY_GRAPH, BindingKind::Node, iid, &bounds, overlay).await?.is_some() {
-                return Err(EngineError::Security(format!("role '{name}' already exists")));
+            if visible_payload(
+                state,
+                SECURITY_GRAPH,
+                BindingKind::Node,
+                iid,
+                &bounds,
+                overlay,
+            )
+            .await?
+            .is_some()
+            {
+                return Err(EngineError::Security(format!(
+                    "role '{name}' already exists"
+                )));
             }
             put_security_node(
                 &mut effects,
@@ -1149,7 +1169,16 @@ async fn resolve_security_stmt(
         }
         SecurityStmt::DropRole(name) => {
             let iid = node_iid(&security::role_node_id(name))?;
-            let Some((labels, doc)) = visible_payload(state, SECURITY_GRAPH, BindingKind::Node, iid, &bounds, overlay).await? else {
+            let Some((labels, doc)) = visible_payload(
+                state,
+                SECURITY_GRAPH,
+                BindingKind::Node,
+                iid,
+                &bounds,
+                overlay,
+            )
+            .await?
+            else {
                 return Err(EngineError::Security(format!("unknown role '{name}'")));
             };
             // Cascade: every MEMBER_OF/GRANTED edge incident to the role
@@ -1176,7 +1205,16 @@ async fn resolve_security_stmt(
                 }
             }
             for (edge, (src, dst)) in incident {
-                if let Some((_, doc)) = visible_payload(state, SECURITY_GRAPH, BindingKind::Edge, edge, &bounds, overlay).await? {
+                if let Some((_, doc)) = visible_payload(
+                    state,
+                    SECURITY_GRAPH,
+                    BindingKind::Edge,
+                    edge,
+                    &bounds,
+                    overlay,
+                )
+                .await?
+                {
                     effects.record_edge_delete(&doc);
                 }
                 delete_security_edge(&mut effects, edge, src, dst, system);
@@ -1198,7 +1236,17 @@ async fn resolve_security_stmt(
                 RoleTarget::User(subject) => {
                     let id = security::user_node_id(subject);
                     let iid = node_iid(&id)?;
-                    if visible_payload(state, SECURITY_GRAPH, BindingKind::Node, iid, &bounds, overlay).await?.is_none() {
+                    if visible_payload(
+                        state,
+                        SECURITY_GRAPH,
+                        BindingKind::Node,
+                        iid,
+                        &bounds,
+                        overlay,
+                    )
+                    .await?
+                    .is_none()
+                    {
                         // Users are auto-created on first mention; subjects
                         // come from the authenticator.
                         put_security_node(
@@ -1217,12 +1265,25 @@ async fn resolve_security_stmt(
                             "cannot grant role '{role}' to itself"
                         )));
                     }
-                    (security::role_node_id(member), require_role(state, member, &bounds, overlay).await?)
+                    (
+                        security::role_node_id(member),
+                        require_role(state, member, &bounds, overlay).await?,
+                    )
                 }
             };
             let edge_id = security::member_edge_id(&from_id, &security::role_node_id(role));
             let iid = edge_iid(&edge_id)?;
-            if visible_payload(state, SECURITY_GRAPH, BindingKind::Edge, iid, &bounds, overlay).await?.is_none() {
+            if visible_payload(
+                state,
+                SECURITY_GRAPH,
+                BindingKind::Edge,
+                iid,
+                &bounds,
+                overlay,
+            )
+            .await?
+            .is_none()
+            {
                 put_security_edge(
                     &mut effects,
                     iid,
@@ -1243,7 +1304,16 @@ async fn resolve_security_stmt(
             let from_iid = node_iid(&from_id)?;
             let edge_id = security::member_edge_id(&from_id, &security::role_node_id(role));
             let iid = edge_iid(&edge_id)?;
-            if let Some((_, doc)) = visible_payload(state, SECURITY_GRAPH, BindingKind::Edge, iid, &bounds, overlay).await? {
+            if let Some((_, doc)) = visible_payload(
+                state,
+                SECURITY_GRAPH,
+                BindingKind::Edge,
+                iid,
+                &bounds,
+                overlay,
+            )
+            .await?
+            {
                 effects.record_edge_delete(&doc);
                 delete_security_edge(&mut effects, iid, from_iid, role_iid, system);
             }
@@ -1253,7 +1323,17 @@ async fn resolve_security_stmt(
             for (action, graph, kind, name) in privilege_scopes(privilege)? {
                 let priv_id = security::privilege_node_id(action, &graph, kind, &name);
                 let priv_iid = node_iid(&priv_id)?;
-                if visible_payload(state, SECURITY_GRAPH, BindingKind::Node, priv_iid, &bounds, overlay).await?.is_none() {
+                if visible_payload(
+                    state,
+                    SECURITY_GRAPH,
+                    BindingKind::Node,
+                    priv_iid,
+                    &bounds,
+                    overlay,
+                )
+                .await?
+                .is_none()
+                {
                     put_security_node(
                         &mut effects,
                         priv_iid,
@@ -1262,8 +1342,18 @@ async fn resolve_security_stmt(
                         system,
                     );
                 }
-                grant_privilege_edge(&mut effects, state, role, role_iid, &priv_id, priv_iid, system, &bounds, overlay)
-                    .await?;
+                grant_privilege_edge(
+                    &mut effects,
+                    state,
+                    role,
+                    role_iid,
+                    &priv_id,
+                    priv_iid,
+                    system,
+                    &bounds,
+                    overlay,
+                )
+                .await?;
             }
         }
         SecurityStmt::RevokePrivilege { privilege, role } => {
@@ -1273,7 +1363,16 @@ async fn resolve_security_stmt(
                 let priv_iid = node_iid(&priv_id)?;
                 let edge_id = security::grant_edge_id(&security::role_node_id(role), &priv_id);
                 let iid = edge_iid(&edge_id)?;
-                if let Some((_, doc)) = visible_payload(state, SECURITY_GRAPH, BindingKind::Edge, iid, &bounds, overlay).await? {
+                if let Some((_, doc)) = visible_payload(
+                    state,
+                    SECURITY_GRAPH,
+                    BindingKind::Edge,
+                    iid,
+                    &bounds,
+                    overlay,
+                )
+                .await?
+                {
                     effects.record_edge_delete(&doc);
                     delete_security_edge(&mut effects, iid, role_iid, priv_iid, system);
                 }
@@ -1281,27 +1380,71 @@ async fn resolve_security_stmt(
         }
         SecurityStmt::GrantAdmin { role } => {
             let role_iid = require_role(state, role, &bounds, overlay).await?;
-            let priv_id = security::privilege_node_id("admin", security::WILDCARD, security::WILDCARD, security::WILDCARD);
+            let priv_id = security::privilege_node_id(
+                "admin",
+                security::WILDCARD,
+                security::WILDCARD,
+                security::WILDCARD,
+            );
             let priv_iid = node_iid(&priv_id)?;
-            if visible_payload(state, SECURITY_GRAPH, BindingKind::Node, priv_iid, &bounds, overlay).await?.is_none() {
+            if visible_payload(
+                state,
+                SECURITY_GRAPH,
+                BindingKind::Node,
+                priv_iid,
+                &bounds,
+                overlay,
+            )
+            .await?
+            .is_none()
+            {
                 put_security_node(
                     &mut effects,
                     priv_iid,
                     security::PRIVILEGE_LABEL,
-                    security::privilege_node_doc("admin", security::WILDCARD, security::WILDCARD, security::WILDCARD),
+                    security::privilege_node_doc(
+                        "admin",
+                        security::WILDCARD,
+                        security::WILDCARD,
+                        security::WILDCARD,
+                    ),
                     system,
                 );
             }
-            grant_privilege_edge(&mut effects, state, role, role_iid, &priv_id, priv_iid, system, &bounds, overlay)
-                .await?;
+            grant_privilege_edge(
+                &mut effects,
+                state,
+                role,
+                role_iid,
+                &priv_id,
+                priv_iid,
+                system,
+                &bounds,
+                overlay,
+            )
+            .await?;
         }
         SecurityStmt::RevokeAdmin { role } => {
             let role_iid = require_role(state, role, &bounds, overlay).await?;
-            let priv_id = security::privilege_node_id("admin", security::WILDCARD, security::WILDCARD, security::WILDCARD);
+            let priv_id = security::privilege_node_id(
+                "admin",
+                security::WILDCARD,
+                security::WILDCARD,
+                security::WILDCARD,
+            );
             let priv_iid = node_iid(&priv_id)?;
             let edge_id = security::grant_edge_id(&security::role_node_id(role), &priv_id);
             let iid = edge_iid(&edge_id)?;
-            if let Some((_, doc)) = visible_payload(state, SECURITY_GRAPH, BindingKind::Edge, iid, &bounds, overlay).await? {
+            if let Some((_, doc)) = visible_payload(
+                state,
+                SECURITY_GRAPH,
+                BindingKind::Edge,
+                iid,
+                &bounds,
+                overlay,
+            )
+            .await?
+            {
                 effects.record_edge_delete(&doc);
                 delete_security_edge(&mut effects, iid, role_iid, priv_iid, system);
             }
@@ -1323,9 +1466,16 @@ async fn require_role(
     overlay: Option<&Overlay>,
 ) -> Result<Iid, EngineError> {
     let iid = security::security_iid(TableKind::Nodes, &security::role_node_id(name))?;
-    if visible_payload(state, SECURITY_GRAPH, BindingKind::Node, iid, bounds, overlay)
-        .await?
-        .is_none()
+    if visible_payload(
+        state,
+        SECURITY_GRAPH,
+        BindingKind::Node,
+        iid,
+        bounds,
+        overlay,
+    )
+    .await?
+    .is_none()
     {
         return Err(EngineError::Security(format!("unknown role '{name}'")));
     }
@@ -1380,9 +1530,16 @@ async fn grant_privilege_edge(
 ) -> Result<(), EngineError> {
     let edge_id = security::grant_edge_id(&security::role_node_id(_role), priv_id);
     let iid = security::security_iid(TableKind::Edges, &edge_id)?;
-    if visible_payload(state, SECURITY_GRAPH, BindingKind::Edge, iid, bounds, overlay)
-        .await?
-        .is_none()
+    if visible_payload(
+        state,
+        SECURITY_GRAPH,
+        BindingKind::Edge,
+        iid,
+        bounds,
+        overlay,
+    )
+    .await?
+    .is_none()
     {
         put_security_edge(
             effects,
@@ -2261,9 +2418,16 @@ async fn resolve_remove(
     overlay: Option<&Overlay>,
     security: Option<&GraphGrants>,
 ) -> Result<Effects, EngineError> {
-    let (binding_rows, kinds) =
-        resolve_match_part(state, graph, &remove.match_part, params, system, overlay, security)
-            .await?;
+    let (binding_rows, kinds) = resolve_match_part(
+        state,
+        graph,
+        &remove.match_part,
+        params,
+        system,
+        overlay,
+        security,
+    )
+    .await?;
     for item in &remove.items {
         kinds
             .get(remove_item_var(item))
@@ -2355,9 +2519,16 @@ async fn resolve_delete(
     overlay: Option<&Overlay>,
     security: Option<&GraphGrants>,
 ) -> Result<Effects, EngineError> {
-    let (binding_rows, kinds) =
-        resolve_match_part(state, graph, &del.match_part, params, system, overlay, security)
-            .await?;
+    let (binding_rows, kinds) = resolve_match_part(
+        state,
+        graph,
+        &del.match_part,
+        params,
+        system,
+        overlay,
+        security,
+    )
+    .await?;
     let target_kind = kinds
         .get(&del.target)
         .ok_or_else(|| EngineError::UnboundVariable(del.target.clone()))?;

@@ -361,14 +361,32 @@ pub struct PrivilegeSpec {
 pub enum SecurityStmt {
     CreateRole(String),
     DropRole(String),
-    GrantRole { role: String, to: RoleTarget },
-    RevokeRole { role: String, from: RoleTarget },
-    GrantPrivilege { privilege: PrivilegeSpec, role: String },
-    RevokePrivilege { privilege: PrivilegeSpec, role: String },
-    GrantAdmin { role: String },
-    RevokeAdmin { role: String },
+    GrantRole {
+        role: String,
+        to: RoleTarget,
+    },
+    RevokeRole {
+        role: String,
+        from: RoleTarget,
+    },
+    GrantPrivilege {
+        privilege: PrivilegeSpec,
+        role: String,
+    },
+    RevokePrivilege {
+        privilege: PrivilegeSpec,
+        role: String,
+    },
+    GrantAdmin {
+        role: String,
+    },
+    RevokeAdmin {
+        role: String,
+    },
     ShowRoles,
-    ShowGrants { target: Option<RoleTarget> },
+    ShowGrants {
+        target: Option<RoleTarget>,
+    },
 }
 
 impl SecurityStmt {

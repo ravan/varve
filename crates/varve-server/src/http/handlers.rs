@@ -240,12 +240,9 @@ fn mapped(e: ServerError) -> Response {
             "writer fenced",
             None,
         ),
-        ServerError::Engine(EngineError::AccessDenied(_)) => error(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "access denied",
-            None,
-        ),
+        ServerError::Engine(EngineError::AccessDenied(_)) => {
+            error(StatusCode::FORBIDDEN, "forbidden", "access denied", None)
+        }
         _ => error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",

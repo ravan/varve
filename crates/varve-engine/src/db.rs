@@ -1779,8 +1779,15 @@ impl Db {
                         ..
                     } if paths.len() == 1
                 ) {
-                self.plan_fast_path(&graph, &q, &clause_specs[0].specs, params, &bounds[0], security)
-                    .await?
+                self.plan_fast_path(
+                    &graph,
+                    &q,
+                    &clause_specs[0].specs,
+                    params,
+                    &bounds[0],
+                    security,
+                )
+                .await?
             } else {
                 None
             };
