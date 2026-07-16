@@ -16,7 +16,9 @@ use crate::state::{
     NODES_TABLE,
 };
 use crate::verify::{verify_database, VerifyReport};
-use crate::writer::{spawn_writer, Submission, WriterConfig, WriterHandle, WriterState};
+use crate::writer::{
+    spawn_writer, EdgePut, NodePut, Payload, Submission, WriterConfig, WriterHandle, WriterState,
+};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::TryStreamExt;
@@ -1264,8 +1266,10 @@ impl Db {
         async {
             self.writer_handle()?
                 .submit(Submission {
-                    statements,
-                    params: params.clone(),
+                    payload: Payload::Program {
+                        statements,
+                        params: params.clone(),
+                    },
                     graph,
                     user: user.to_string(),
                     ack,
@@ -1274,6 +1278,41 @@ impl Db {
             rx.await.map_err(|_| EngineError::WriterUnavailable)?
         }
         .instrument(tracing::info_span!("varve.submit", user = %user))
+        .await
+    }
+
+    /// Bulk ingest (xtdb-style `put-docs`): submits prebuilt node/edge data
+    /// ops as ONE atomic transaction on the default graph, bypassing GQL
+    /// parse, planning, and — crucially — the per-edge endpoint MATCH of
+    /// `MATCH … INSERT`. Endpoints are referenced by node `_id` and their
+    /// existence is NOT verified; a dangling edge is durable but never
+    /// matches a traversal. Acks carry the same guarantee as [`Self::execute`]:
+    /// durable in the log AND applied to the live index.
+    ///
+    /// One call = one transaction = one log record: callers chunk large
+    /// loads (tens of thousands of puts per call) to bound record size.
+    pub async fn ingest(
+        &self,
+        nodes: Vec<NodePut>,
+        edges: Vec<EdgePut>,
+    ) -> Result<TxReceipt, EngineError> {
+        self.require_role(NodeRole::Writer)?;
+        if nodes.is_empty() && edges.is_empty() {
+            return Err(EngineError::NotAMutation);
+        }
+        let (ack, rx) = oneshot::channel();
+        async {
+            self.writer_handle()?
+                .submit(Submission {
+                    payload: Payload::Ingest { nodes, edges },
+                    graph: DEFAULT_GRAPH.to_string(),
+                    user: String::new(),
+                    ack,
+                })
+                .await?;
+            rx.await.map_err(|_| EngineError::WriterUnavailable)?
+        }
+        .instrument(tracing::info_span!("varve.ingest"))
         .await
     }
 
@@ -1289,8 +1328,10 @@ impl Db {
         let (graph, statements) = self.parse_mutation_program(gql)?;
         let (ack, rx) = oneshot::channel();
         if let Err(error) = self.writer_handle()?.try_submit(Submission {
-            statements,
-            params: params.clone(),
+            payload: Payload::Program {
+                statements,
+                params: params.clone(),
+            },
             graph,
             user: user.to_string(),
             ack,

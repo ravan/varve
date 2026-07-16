@@ -8,6 +8,7 @@
 #![allow(clippy::unwrap_used)]
 
 use criterion::{criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
 use varve_types::trie::Bucketer;
 use varve_types::{Iid, Value};
 
@@ -22,9 +23,11 @@ fn bench_trie(c: &mut Criterion) {
 
     c.bench_function("bucketer/bucket_level3", |b| {
         b.iter(|| {
-            iids.iter()
-                .filter_map(|iid| Bucketer::bucket(iid, 3))
-                .count()
+            black_box(
+                iids.iter()
+                    .filter_map(|iid| Bucketer::bucket(black_box(iid), 3))
+                    .count(),
+            )
         })
     });
     c.bench_function("bucketer/path_4_levels", |b| {
