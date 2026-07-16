@@ -198,6 +198,7 @@ async fn edge_adjacency_impl(
     bounds: &TemporalBounds,
     collect_events: bool,
     adjacency_budget: Option<usize>,
+    edge_visible: Option<&std::collections::BTreeSet<String>>,
     overlay: Option<&Overlay>,
 ) -> Result<(Vec<AdjacencyEntry>, Vec<(Iid, Vec<Event>)>), EngineError> {
     // 1. One read lock: live edge events (narrowed by the live adjacency
@@ -294,10 +295,17 @@ async fn edge_adjacency_impl(
         // A hop matches when some visible version is a `Put` carrying `label`
         // (or any label when `None`) AND every requested inline prop equals a
         // present key in that version's doc (decision 13: a missing key is a
-        // non-match, never a wildcard).
+        // non-match, never a wildcard). Under name-scoped edge read grants
+        // (`edge_visible`), that version must ALSO carry only granted labels
+        // — the same deny-by-default rule as `LabelFilter::Visible`, so a
+        // multi-label edge is invisible to traversal exactly as it is to a
+        // scan.
         let matched = visible.iter().any(|v| match &v.event.op {
             Op::Put { labels, doc } => {
                 label.is_none_or(|l| labels.iter().any(|x| x == l))
+                    && edge_visible.is_none_or(|allowed| {
+                        !labels.is_empty() && labels.iter().all(|l| allowed.contains(l))
+                    })
                     && props
                         .iter()
                         .all(|(k, want)| doc.get(k).is_some_and(|got| got == want))
@@ -348,6 +356,7 @@ pub(crate) async fn edge_adjacency(
     anchor: Option<Iid>,
     bounds: &TemporalBounds,
     adjacency_budget: Option<usize>,
+    edge_visible: Option<&std::collections::BTreeSet<String>>,
     overlay: Option<&Overlay>,
 ) -> Result<Vec<AdjacencyEntry>, EngineError> {
     Ok(edge_adjacency_impl(
@@ -361,6 +370,7 @@ pub(crate) async fn edge_adjacency(
         bounds,
         false,
         adjacency_budget,
+        edge_visible,
         overlay,
     )
     .await?
@@ -391,6 +401,7 @@ pub(crate) async fn incident_edges(
         Some(node),
         bounds,
         false,
+        None,
         None,
         overlay,
     )
@@ -445,6 +456,15 @@ pub(crate) struct ReachableEdges {
 /// `Edge` specs share it); pass `None` to skip the batch (a quantified hop
 /// needs only `entries`, and skipping avoids cloning every surviving edge's
 /// event list).
+///
+/// `edge_visible` makes the BFS security-aware: when a principal's edge read
+/// grants are name-scoped, each per-node adjacency lookup skips edges
+/// carrying any non-granted label (the same deny-by-default rule as
+/// `LabelFilter::Visible`), and the batch is built under that filter too —
+/// so both outputs are row-identical to the filtered full scan restricted to
+/// reachable edges. The restricted BFS still collects a superset of every
+/// qualifying path's edges: a qualifying path can only use visible edges, so
+/// every node on one stays reachable through visible edges alone.
 // Fast-path BFS needs graph, hop, bounds, and optional overlay context together.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn reachable_edges(
@@ -454,6 +474,7 @@ pub(crate) async fn reachable_edges(
     anchor: Iid,
     hops: &[HopSpec<'_>],
     batch_label: Option<&str>,
+    edge_visible: Option<&std::collections::BTreeSet<String>>,
     bounds: &TemporalBounds,
     node_budget: usize,
     adjacency_budget: usize,
@@ -491,6 +512,7 @@ pub(crate) async fn reachable_edges(
                 bounds,
                 collect,
                 Some(adjacency_budget),
+                edge_visible,
                 overlay,
             )
             .await?;
@@ -515,13 +537,23 @@ pub(crate) async fn reachable_edges(
     entries.dedup();
 
     let batch = match batch_label {
-        Some(label) => snapshot_entities(
-            edge_events
-                .iter()
-                .map(|(iid, events)| (*iid, events.as_slice())),
-            LabelFilter::Single(label),
-            bounds,
-        )?,
+        Some(label) => {
+            let single = LabelFilter::Single(label);
+            let filter = match edge_visible {
+                Some(allowed) => LabelFilter::Visible {
+                    base: &single,
+                    allowed,
+                },
+                None => LabelFilter::Single(label),
+            };
+            snapshot_entities(
+                edge_events
+                    .iter()
+                    .map(|(iid, events)| (*iid, events.as_slice())),
+                filter,
+                bounds,
+            )?
+        }
         None => None,
     };
     let mut nodes = std::collections::BTreeSet::from([anchor]);
@@ -620,6 +652,118 @@ mod tests {
             valid: TemporalDimension::at(us(n)),
             system: TemporalDimension::at(us(n)),
         }
+    }
+
+    fn edge(entity: u8, sf: i64, labels: &[&str], src: u8, dst: u8) -> Event {
+        Event {
+            iid: raw_iid(entity),
+            system_from: us(sf),
+            valid_from: us(sf),
+            valid_to: EOT,
+            src: Some(iid(src)),
+            dst: Some(iid(dst)),
+            op: Op::Put {
+                labels: labels.iter().map(|l| l.to_string()).collect(),
+                doc: Doc::new(),
+            },
+        }
+    }
+
+    /// Multi-label edges aren't constructible through GQL or `EdgePut`
+    /// (both single-label), so the deny-by-default rule for them is pinned
+    /// here at the adjacency seam: under name-scoped edge read grants
+    /// (`edge_visible`), an edge is traversable only when EVERY label it
+    /// carries is granted — the same rule `LabelFilter::Visible` applies to
+    /// fixed-hop edge scans, kept consistent for quantified traversal and
+    /// the anchored fast path.
+    #[tokio::test]
+    async fn edge_visibility_excludes_partially_granted_multi_label_edges() {
+        use std::collections::BTreeSet;
+
+        // (1)-[:KNOWS]->(2) single-label; (1)-[:KNOWS:SECRET]->(3) multi-label.
+        let store = memory_store();
+        let mut table = TableState::new();
+        table
+            .edges
+            .live
+            .append(edge(101, 1, &["KNOWS"], 1, 2))
+            .unwrap();
+        table
+            .edges
+            .live
+            .append(edge(102, 1, &["KNOWS", "SECRET"], 1, 3))
+            .unwrap();
+        let state = {
+            let mut graphs = GraphsState::new();
+            graphs.graphs.insert(DEFAULT_GRAPH.to_string(), table);
+            Arc::new(RwLock::new(graphs))
+        };
+        let bounds = at(5);
+        let adjacency = |edge_visible: Option<BTreeSet<String>>| {
+            let state = Arc::clone(&state);
+            let store = Arc::clone(&store);
+            async move {
+                edge_adjacency(
+                    &state,
+                    &store,
+                    DEFAULT_GRAPH,
+                    "KNOWS",
+                    &[],
+                    AdjDirection::Out,
+                    None,
+                    &bounds,
+                    None,
+                    edge_visible.as_ref(),
+                    None,
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // Unrestricted (`None`): both edges traversable via :KNOWS.
+        assert_eq!(adjacency(None).await.len(), 2);
+
+        // KNOWS granted by name: the KNOWS:SECRET edge must be invisible —
+        // every label on the edge needs a grant, exactly as in a scan.
+        let filtered = adjacency(Some(BTreeSet::from(["KNOWS".to_string()]))).await;
+        assert_eq!(filtered.len(), 1, "multi-label edge must be filtered");
+        assert_eq!(filtered[0].neighbor, iid(2));
+
+        // Both labels granted: visible again.
+        let both = BTreeSet::from(["KNOWS".to_string(), "SECRET".to_string()]);
+        assert_eq!(adjacency(Some(both.clone())).await.len(), 2);
+
+        // The anchored fast path's BFS applies the same rule: its entries
+        // feed the quantified adjacency directly, so a partially-granted
+        // edge must not extend reachability there either.
+        let hops = [HopSpec {
+            label: "KNOWS",
+            props: &[],
+            direction: AdjDirection::Out,
+        }];
+        let allowed = BTreeSet::from(["KNOWS".to_string()]);
+        let reachable = reachable_edges(
+            &state,
+            &store,
+            DEFAULT_GRAPH,
+            iid(1),
+            &hops,
+            None,
+            Some(&allowed),
+            &bounds,
+            1_000,
+            1_000,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reachable.entries.len(),
+            1,
+            "fast-path BFS must exclude the partially-granted edge"
+        );
+        assert_eq!(reachable.entries[0].neighbor, iid(2));
     }
 
     /// Flushes `persisted` into block 0 on a memory store and stages

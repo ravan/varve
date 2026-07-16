@@ -135,9 +135,86 @@ fn report_progress(
     *last_report = now;
 }
 
+/// Opt-in security guardrail mode (`VARVE_TRAVERSAL_SECURITY=…`): opens the
+/// store with `[security] enabled = true` and runs every timed query as the
+/// `bench` principal.
+///
+/// - `wildcard`: `GRANT ALL ON GRAPH * NODES|EDGES *` — short-circuits to
+///   unrestricted enforcement; expected overhead is one cached context
+///   lookup per query (≤ ~1%), and the anchored fast path is kept.
+/// - `granted`: explicit `READ ON GRAPH * NODES Person` + `EDGES KNOWS` —
+///   ACTIVE enforcement: per-row visible-label filtering, endpoint-visible
+///   quantified expansion (builds the visible-node set per query), and the
+///   anchored fast path disabled. This is the honest "secured tenant" cost.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SecurityMode {
+    Off,
+    Wildcard,
+    Granted,
+}
+
+fn security_mode() -> Result<SecurityMode, Box<dyn std::error::Error>> {
+    match std::env::var("VARVE_TRAVERSAL_SECURITY") {
+        Ok(value) if value == "wildcard" => Ok(SecurityMode::Wildcard),
+        Ok(value) if value == "granted" => Ok(SecurityMode::Granted),
+        Ok(value) if value == "off" => Ok(SecurityMode::Off),
+        Ok(value) => Err(format!(
+            "VARVE_TRAVERSAL_SECURITY must be 'off', 'wildcard', or 'granted', got '{value}'"
+        )
+        .into()),
+        Err(std::env::VarError::NotPresent) => Ok(SecurityMode::Off),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Warm-iteration count (`VARVE_TRAVERSAL_WARM_ITERS`, default 100): the 1M
+/// `granted` run pays a full visible-node-set build per quantified query, so
+/// a smaller sample keeps its wall time sane without changing what is
+/// measured.
+fn warm_iters() -> Result<usize, Box<dyn std::error::Error>> {
+    match std::env::var("VARVE_TRAVERSAL_WARM_ITERS") {
+        Ok(value) => {
+            let parsed = value.parse::<usize>()?;
+            if parsed == 0 {
+                return Err("VARVE_TRAVERSAL_WARM_ITERS must be greater than zero".into());
+            }
+            Ok(parsed)
+        }
+        Err(std::env::VarError::NotPresent) => Ok(WARM_ITERS),
+        Err(error) => Err(error.into()),
+    }
+}
+
+const BENCH_PRINCIPAL: &str = "bench";
+
+/// Optional `[query]` budget override (`VARVE_TRAVERSAL_ADJ_BUDGET`): active
+/// (non-wildcard) enforcement disables the anchored fast path, so a
+/// quantified hop builds the FULL edge adjacency and large graphs trip the
+/// default 250k `traversal_adjacency_budget` by design. Raising it here lets
+/// the secured run complete so its cost can be measured.
+fn adjacency_budget() -> Result<Option<usize>, Box<dyn std::error::Error>> {
+    match std::env::var("VARVE_TRAVERSAL_ADJ_BUDGET") {
+        Ok(value) => Ok(Some(value.parse::<usize>()?)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn config(dir: &Path) -> Result<Config, Box<dyn std::error::Error>> {
     let log_dir = format!("{:?}", dir.join("log").display().to_string());
     let store_dir = format!("{:?}", dir.join("store").display().to_string());
+    let security = if security_mode()? == SecurityMode::Off {
+        String::new()
+    } else {
+        "[security]\nenabled = true\nadmins = [\"root\"]\n".to_string()
+    };
+    let query_tuning = match adjacency_budget()? {
+        Some(budget) => format!(
+            "[query]\ntraversal_adjacency_budget = {budget}\npath_row_budget = {budget}\n\
+             path_frontier_budget = {budget}\ntraversal_node_budget = {budget}\n"
+        ),
+        None => String::new(),
+    };
     Ok(Config::from_toml_str(&format!(
         // group_commit_window_ms = 1 (mirrors tests/blocks.rs's blocks_config
         // helper): ingest here is a single sequential writer awaiting each
@@ -148,26 +225,34 @@ fn config(dir: &Path) -> Result<Config, Box<dyn std::error::Error>> {
         "[log]\nbackend = \"local\"\ngroup_commit_window_ms = 1\n\
          [log.local]\ndir = {log_dir}\n\
          [storage]\nbackend = \"local\"\nmax_block_rows = {MAX_BLOCK_ROWS}\n\
-         [storage.local]\ndir = {store_dir}\n"
+         [storage.local]\ndir = {store_dir}\n\
+         {security}{query_tuning}"
     ))?)
 }
 
-async fn two_hop(db: &Db) -> Result<usize, Box<dyn std::error::Error>> {
-    let rows = db
-        .query(format!(
-            "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) \
-             WHERE a._id = {ANCHOR} RETURN c._id"
-        ))
-        .await?;
+async fn two_hop(db: &Db, principal: Option<&str>) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut q = db.query(format!(
+        "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) \
+         WHERE a._id = {ANCHOR} RETURN c._id"
+    ));
+    if let Some(principal) = principal {
+        q = q.as_principal(principal);
+    }
+    let rows = q.await?;
     Ok(rows.iter().map(|b| b.num_rows()).sum())
 }
 
-async fn quantified_1_3(db: &Db) -> Result<usize, Box<dyn std::error::Error>> {
-    let rows = db
-        .query(format!(
-            "MATCH (a:Person)-[:KNOWS]->{{1,3}}(b:Person) WHERE a._id = {ANCHOR} RETURN b._id"
-        ))
-        .await?;
+async fn quantified_1_3(
+    db: &Db,
+    principal: Option<&str>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut q = db.query(format!(
+        "MATCH (a:Person)-[:KNOWS]->{{1,3}}(b:Person) WHERE a._id = {ANCHOR} RETURN b._id"
+    ));
+    if let Some(principal) = principal {
+        q = q.as_principal(principal);
+    }
+    let rows = q.await?;
     Ok(rows.iter().map(|b| b.num_rows()).sum())
 }
 
@@ -192,8 +277,9 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<usize, Box<dyn std::error::Error>>>,
 {
-    let mut times = Vec::with_capacity(WARM_ITERS);
-    for _ in 0..WARM_ITERS {
+    let iters = warm_iters()?;
+    let mut times = Vec::with_capacity(iters);
+    for _ in 0..iters {
         let t0 = Instant::now();
         let rows = f().await?;
         times.push(t0.elapsed());
@@ -381,21 +467,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // Phase 2c (opt-in): security guardrail — grant the bench principal per
+    // the selected mode, then run every timed query as it.
+    let principal = match security_mode()? {
+        SecurityMode::Off => None,
+        mode => {
+            let grants: &[&str] = match mode {
+                SecurityMode::Wildcard => &[
+                    "GRANT ALL ON GRAPH * NODES * TO ROLE bench",
+                    "GRANT ALL ON GRAPH * EDGES * TO ROLE bench",
+                ],
+                _ => &[
+                    "GRANT READ ON GRAPH * NODES Person TO ROLE bench",
+                    "GRANT READ ON GRAPH * EDGES KNOWS TO ROLE bench",
+                ],
+            };
+            let params = std::collections::BTreeMap::new();
+            db.execute_as("CREATE ROLE bench", &params, "root").await?;
+            for ddl in grants {
+                db.execute_as(ddl, &params, "root").await?;
+            }
+            db.execute_as(
+                &format!("GRANT ROLE bench TO USER '{BENCH_PRINCIPAL}'"),
+                &params,
+                "root",
+            )
+            .await?;
+            let label = if mode == SecurityMode::Wildcard {
+                "wildcard"
+            } else {
+                "granted"
+            };
+            println!("security {label}-grant principal={BENCH_PRINCIPAL}");
+            Some(BENCH_PRINCIPAL)
+        }
+    };
+
     // Phase 3: 2-hop friend-of-friend — cold once, then warm.
     let cold_started = Instant::now();
-    let two_hop_rows = two_hop(&db).await?;
+    let two_hop_rows = two_hop(&db, principal).await?;
     let two_hop_cold = cold_started.elapsed();
-    let two_hop_warm = warm_timings(|| two_hop(&db), two_hop_rows, "2-hop").await?;
+    let two_hop_warm = warm_timings(|| two_hop(&db, principal), two_hop_rows, "2-hop").await?;
     let two_hop_warm_avg = avg(&two_hop_warm);
     let two_hop_warm_p50 = p50(two_hop_warm);
+    println!(
+        "2-hop ({two_hop_rows} rows) cold {two_hop_cold:.2?} warm avg {two_hop_warm_avg:.2?} p50 {two_hop_warm_p50:.2?}"
+    );
 
     // Phase 4: -[:KNOWS]->{1,3} — same shape.
     let cold_started = Instant::now();
-    let q13_rows = quantified_1_3(&db).await?;
+    let q13_rows = quantified_1_3(&db, principal).await?;
     let q13_cold = cold_started.elapsed();
-    let q13_warm = warm_timings(|| quantified_1_3(&db), q13_rows, "{1,3}").await?;
+    let q13_warm = warm_timings(|| quantified_1_3(&db, principal), q13_rows, "{1,3}").await?;
     let q13_warm_avg = avg(&q13_warm);
     let q13_warm_p50 = p50(q13_warm);
+    println!(
+        "{{1,3}} ({q13_rows} rows) cold {q13_cold:.2?} warm avg {q13_warm_avg:.2?} p50 {q13_warm_p50:.2?}"
+    );
 
     println!(
         "ingest {:.2}s · {units_per_sec:.0} {unit}/s · \

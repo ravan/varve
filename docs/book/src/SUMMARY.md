@@ -8,6 +8,7 @@
   - [Temporal extensions](gql/temporal.md)
   - [Deviations & conformance](gql/deviations.md)
 - [Backends & capability matrix](backends.md)
+- [Security (ReBAC)](security.md)
 - [Operations guide](ops/README.md)
   - [Deployment profiles & sizing](ops/profiles.md)
   - [Configuration reference](ops/configuration.md)

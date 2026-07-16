@@ -51,6 +51,13 @@ pub enum LabelFilter<'a> {
     Single(&'a str),
     All(&'a [String]),
     Any(&'a [String]),
+    /// `base` AND every label on the row is in `allowed` — the engine's
+    /// label-level read-security filter (deny-by-default: a row carrying any
+    /// non-granted label, or no labels at all, never matches).
+    Visible {
+        base: &'a LabelFilter<'a>,
+        allowed: &'a std::collections::BTreeSet<String>,
+    },
 }
 
 impl LabelFilter<'_> {
@@ -66,6 +73,11 @@ impl LabelFilter<'_> {
             Self::Any(allowed) => allowed
                 .iter()
                 .any(|label| labels.iter().any(|candidate| candidate == label)),
+            Self::Visible { base, allowed } => {
+                !labels.is_empty()
+                    && labels.iter().all(|label| allowed.contains(label))
+                    && base.matches(labels)
+            }
         }
     }
 }

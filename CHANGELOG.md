@@ -31,6 +31,41 @@ read-scaling query nodes over any S3-compatible object store.
 - An adapted GQL TCK plus the temporal suites run in CI (current pass rate
   ≈ 0.87 with reasoned exclusions — see `docs/book/src/gql/deviations.md`).
 
+### Access control (ReBAC)
+
+- Native relationship-based access control at label / edge-type granularity
+  (Neo4j/Memgraph-class graph privileges): policy lives as bitemporal
+  nodes/edges in the reserved `__security` graph, and a principal's effective
+  privileges resolve by transitive `MEMBER_OF` traversal. Managed via GQL DDL
+  (`CREATE ROLE`, `GRANT READ|WRITE|ALL ON GRAPH … NODES|EDGES … TO ROLE …`,
+  `GRANT ADMIN`, `SHOW ROLES` / `SHOW GRANTS`).
+- Deny-by-default enforcement on **both reads and writes** when
+  `[security] enabled = true` and a principal is set: conservative
+  multi-label reads, endpoint-visible edge traversal (including through
+  quantified paths), whole-transaction rejection on any denied write effect,
+  and read-filtered MATCH-driven DML. Denied HTTP requests map to
+  403 `forbidden`.
+- Grants replicate to query nodes through the normal log; resolved privileges
+  are cached per subject with exact epoch invalidation. Disabled (the
+  default) is byte-identical to the pre-security engine, and fully-wildcard
+  grants short-circuit to the unrestricted path (measured ≤ ~1% overhead).
+- Security-aware anchored pruning: filtered (non-wildcard) principals keep
+  the anchored traversal fast path — the pruned edge inputs are built under
+  the same visibility filters as the full scan, with quantified-hop endpoint
+  visibility computed over the anchor-reachable set instead of the whole
+  graph. Measured at parity with the unrestricted path on anchored 2-hop
+  (~9 ms at 10k nodes, ~20 ms at 1M vs formerly ~96 ms / ~20 s) and within
+  default `[query]` budgets on quantified hops. Unanchored quantified hops
+  likewise probe endpoint visibility only over the adjacency's own
+  (budget-capped) endpoints, never a graph-wide visible-node set — so
+  enforcement adds only bounded per-row cost to the full-scan path too.
+- Multi-label edge visibility is conservative everywhere: an edge is
+  traversable only when every label it carries is granted, enforced
+  identically on fixed-hop scans, quantified adjacency, and the anchored
+  fast path (pinned by an engine test; multi-label edges are not yet
+  constructible through GQL or bulk ingest). See
+  `docs/book/src/security.md`.
+
 ### Durability
 
 - Write-ahead log with group commit: a batch is durable (one fsync, or one

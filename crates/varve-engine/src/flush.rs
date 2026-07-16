@@ -360,6 +360,7 @@ mod tests {
     use crate::node::ProgressState;
     use crate::scan::{merged_snapshot, IidSel};
     use crate::state::{GraphsState, TableKind, DEFAULT_GRAPH};
+    use crate::security::SecurityEnforcer;
     use crate::writer::{spawn_writer, Submission, WriterConfig, WriterHandle, WriterState};
     use bytes::Bytes;
     use std::collections::BTreeMap;
@@ -399,6 +400,7 @@ mod tests {
             progress,
             lease: watch::channel(LeaseState::Unfenced).1,
             metrics: Arc::new(EngineMetrics::default()),
+            security: SecurityEnforcer::new(crate::security::SecurityTuning::default()),
         };
         let cfg = WriterConfig {
             window: Duration::ZERO,

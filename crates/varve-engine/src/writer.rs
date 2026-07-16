@@ -18,6 +18,7 @@ use crate::db::{
 use crate::metrics::EngineMetrics;
 use crate::node::ProgressState;
 use crate::scan::{incident_edges, AdjDirection};
+use crate::security::{self, GraphGrants, SecurityEnforcer, SECURITY_GRAPH};
 use crate::state::{
     GraphsState, PersistedTrie, TableKind, DEFAULT_GRAPH, EDGES_TABLE, META_GRAPH, NODES_TABLE,
 };
@@ -34,8 +35,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tracing::Instrument;
 use varve_gql::ast::{
     Clause, Direction, Expr, GraphStmt, InsertStmt, LabelSpec, MatchPart, MutKind, MutateStmt,
-    NodePattern, QueryBody, RemoveItem, RemoveStmt, ReturnClause, SetItem, SetStmt, SortItem,
-    Statement, TemporalClauses,
+    NodePattern, PrivilegeAction, PrivilegeKind, QueryBody, RemoveItem, RemoveStmt, ReturnClause,
+    RoleTarget, SecurityStmt, SetItem, SetStmt, SortItem, Statement, TemporalClauses,
 };
 use varve_index::{decode_events, encode_events, visible_events, Event, Op};
 use varve_log::{Log, LogRecord, TableEffects};
@@ -201,6 +202,10 @@ pub(crate) struct WriterState {
     pub lease: watch::Receiver<LeaseState>,
     /// I/O-free engine counters (Task 12, spec §12), shared with `DbInner`.
     pub metrics: Arc<EngineMetrics>,
+    /// `[security]` enforcement state, shared with `DbInner` — the writer
+    /// gates DDL on admin-ship and checks resolved effects against write
+    /// grants before anything is staged.
+    pub security: Arc<SecurityEnforcer>,
 }
 
 /// One staged-but-not-yet-durable transaction: its log record, the per-table
@@ -621,6 +626,9 @@ fn statement_reads(stmt: &Statement) -> bool {
         Statement::Set(_) | Statement::Remove(_) => true,
         Statement::Query(_) => false,
         Statement::Graph(_) => false,
+        // Security DDL reads the current policy graph (role existence,
+        // incident grants), so it must observe every earlier staged tx.
+        Statement::Security(_) => true,
     }
 }
 
@@ -843,16 +851,25 @@ async fn resolve_program_impl(
     let has_catalog = statements
         .iter()
         .any(|stmt| matches!(stmt, Statement::Graph(_)));
-    let has_non_catalog = statements
+    let has_security = statements
         .iter()
-        .any(|stmt| !matches!(stmt, Statement::Graph(_)));
-    if has_catalog && has_non_catalog {
+        .any(|stmt| matches!(stmt, Statement::Security(_)));
+    if statements
+        .iter()
+        .any(|stmt| matches!(stmt, Statement::Security(s) if s.is_show()))
+    {
+        return Err(EngineError::NotAMutation); // SHOW is a read; use query()
+    }
+    let has_data = statements
+        .iter()
+        .any(|stmt| !matches!(stmt, Statement::Graph(_) | Statement::Security(_)));
+    if (has_catalog || has_security) && has_data || (has_catalog && has_security) {
         return Err(EngineError::Unsupported(
-            "mixing catalog and data statements in one transaction".into(),
+            "mixing catalog/security and data statements in one transaction".into(),
         ));
     }
 
-    if has_non_catalog {
+    if has_data {
         let exists = state
             .state
             .read()
@@ -864,6 +881,30 @@ async fn resolve_program_impl(
         }
     }
 
+    // Security gates run BEFORE the tx id is assigned, so a denied
+    // submission burns nothing. Catalog and security DDL are admin-only
+    // under enforcement; data statements resolve the submitter's write
+    // grants once and check every statement's effects against them below.
+    let gate_now = state.clock.watermark();
+    if (has_catalog || has_security)
+        && !state
+            .security
+            .is_admin(&state.state, &state.store, user, gate_now)
+            .await?
+    {
+        return Err(EngineError::AccessDenied(format!(
+            "user '{user}' is not an administrator (catalog and security DDL require ADMIN)"
+        )));
+    }
+    let enforcement: Option<GraphGrants> = if has_data {
+        state
+            .security
+            .enforcement_for(&state.state, &state.store, user, graph, gate_now)
+            .await?
+    } else {
+        None
+    };
+
     state.next_tx_id += 1;
     let tx_id = state.next_tx_id;
     tracing::Span::current().record("tx_id", tx_id);
@@ -872,7 +913,14 @@ async fn resolve_program_impl(
     let mut overlay = Overlay::default();
     let mut effects = Effects::default();
     let mut generated_ordinal: usize = 0;
-    let effect_graph = if has_catalog { META_GRAPH } else { graph };
+    let effect_graph = if has_catalog {
+        META_GRAPH
+    } else if has_security {
+        SECURITY_GRAPH
+    } else {
+        graph
+    };
+    let security = enforcement.as_ref();
 
     for stmt in statements {
         let statement_effects = match &stmt {
@@ -886,26 +934,105 @@ async fn resolve_program_impl(
                     system,
                     &mut generated_ordinal,
                     Some(&overlay),
+                    security,
                 )
                 .await?
             }
             Statement::Mutate(del) => {
-                resolve_delete(state, graph, del, params, system, Some(&overlay)).await?
+                resolve_delete(state, graph, del, params, system, Some(&overlay), security).await?
             }
             Statement::Set(set) => {
-                resolve_set(state, graph, set, params, system, Some(&overlay)).await?
+                resolve_set(state, graph, set, params, system, Some(&overlay), security).await?
             }
             Statement::Remove(remove) => {
-                resolve_remove(state, graph, remove, params, system, Some(&overlay)).await?
+                resolve_remove(state, graph, remove, params, system, Some(&overlay), security)
+                    .await?
             }
             Statement::Graph(graph_stmt) => resolve_graph_stmt(state, graph_stmt, system)?,
+            Statement::Security(stmt) => {
+                resolve_security_stmt(state, stmt, system, Some(&overlay)).await?
+            }
             Statement::Query(_) => return Err(EngineError::NotAMutation),
         };
+        if let Some(sec) = security {
+            // Any denied effect rejects the WHOLE transaction: the error
+            // propagates before anything is staged, so no partial effects
+            // ever reach the log.
+            enforce_write_effects(
+                state,
+                graph,
+                &statement_effects,
+                sec,
+                Some(&overlay),
+                system,
+                user,
+            )
+            .await?;
+        }
         append_effects_to_overlay(&mut overlay, &statement_effects)?;
         effects.merge(statement_effects);
     }
 
     seal_effects(tx_id, system, user, effect_graph, effects)
+}
+
+/// Effect-level write enforcement: every label on every affected node (its
+/// new labels for a `Put`, plus its currently visible labels for updates and
+/// deletes) must be write-granted, and every affected edge's type likewise.
+async fn enforce_write_effects(
+    state: &WriterState,
+    graph: &str,
+    effects: &Effects,
+    sec: &GraphGrants,
+    overlay: Option<&Overlay>,
+    system: Instant,
+    user: &str,
+) -> Result<(), EngineError> {
+    let bounds = TemporalBounds {
+        valid: TemporalDimension::at(system),
+        system: TemporalDimension::at(system),
+    };
+    for (kind, events, grants, what) in [
+        (
+            BindingKind::Node,
+            &effects.nodes,
+            &sec.write_nodes,
+            "node labels",
+        ),
+        (
+            BindingKind::Edge,
+            &effects.edges,
+            &sec.write_edges,
+            "edge types",
+        ),
+    ] {
+        if grants.wildcard {
+            continue;
+        }
+        for event in events {
+            let mut labels: BTreeSet<String> = BTreeSet::new();
+            if let Op::Put { labels: new, .. } = &event.op {
+                labels.extend(new.iter().cloned());
+            }
+            // Updates and deletes are governed by the entity's CURRENT
+            // labels too (removing a `:Secret` label needs WRITE on Secret).
+            if let Some((existing, _)) =
+                visible_payload(state, graph, kind, event.iid, &bounds, overlay).await?
+            {
+                labels.extend(existing);
+            }
+            let denied: Vec<&String> = labels
+                .iter()
+                .filter(|label| !grants.names.contains(*label))
+                .collect();
+            if labels.is_empty() || !denied.is_empty() {
+                return Err(EngineError::AccessDenied(format!(
+                    "user '{user}' lacks WRITE on {what} {denied:?} in graph '{graph}'"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn graph_catalog_iid(name: &str) -> Result<Iid, EngineError> {
@@ -985,6 +1112,341 @@ fn resolve_graph_stmt(
         }
     }
     Ok(effects)
+}
+
+/// Lowers one security DDL statement into effects on the reserved
+/// `__security` graph — the same shape as [`resolve_graph_stmt`] (validate
+/// against current state, emit events), but the entities are policy nodes and
+/// edges with deterministic `_id`s: a re-grant resolves to the same iid
+/// (idempotent) and a revoke deletes exactly the edge it means.
+async fn resolve_security_stmt(
+    state: &WriterState,
+    stmt: &SecurityStmt,
+    system: Instant,
+    overlay: Option<&Overlay>,
+) -> Result<Effects, EngineError> {
+    let bounds = TemporalBounds {
+        valid: TemporalDimension::at(system),
+        system: TemporalDimension::at(system),
+    };
+    let node_iid = |id: &str| security::security_iid(TableKind::Nodes, id);
+    let edge_iid = |id: &str| security::security_iid(TableKind::Edges, id);
+
+    let mut effects = Effects::default();
+    match stmt {
+        SecurityStmt::CreateRole(name) => {
+            let iid = node_iid(&security::role_node_id(name))?;
+            if visible_payload(state, SECURITY_GRAPH, BindingKind::Node, iid, &bounds, overlay).await?.is_some() {
+                return Err(EngineError::Security(format!("role '{name}' already exists")));
+            }
+            put_security_node(
+                &mut effects,
+                iid,
+                security::ROLE_LABEL,
+                security::role_node_doc(name),
+                system,
+            );
+        }
+        SecurityStmt::DropRole(name) => {
+            let iid = node_iid(&security::role_node_id(name))?;
+            let Some((labels, doc)) = visible_payload(state, SECURITY_GRAPH, BindingKind::Node, iid, &bounds, overlay).await? else {
+                return Err(EngineError::Security(format!("unknown role '{name}'")));
+            };
+            // Cascade: every MEMBER_OF/GRANTED edge incident to the role
+            // (memberships into it, its own memberships, its grants) dies
+            // with it in this one tx.
+            let mut incident: BTreeMap<Iid, (Iid, Iid)> = BTreeMap::new();
+            for dir in [AdjDirection::Out, AdjDirection::In] {
+                for entry in incident_edges(
+                    &state.state,
+                    &state.store,
+                    SECURITY_GRAPH,
+                    dir,
+                    iid,
+                    &bounds,
+                    overlay,
+                )
+                .await?
+                {
+                    let (src, dst) = match dir {
+                        AdjDirection::Out => (entry.node, entry.neighbor),
+                        AdjDirection::In => (entry.neighbor, entry.node),
+                    };
+                    incident.insert(entry.edge, (src, dst));
+                }
+            }
+            for (edge, (src, dst)) in incident {
+                if let Some((_, doc)) = visible_payload(state, SECURITY_GRAPH, BindingKind::Edge, edge, &bounds, overlay).await? {
+                    effects.record_edge_delete(&doc);
+                }
+                delete_security_edge(&mut effects, edge, src, dst, system);
+            }
+            effects.record_node_delete(&labels, &doc);
+            effects.nodes.push(Event {
+                iid,
+                system_from: system,
+                valid_from: system,
+                valid_to: Instant::END_OF_TIME,
+                src: None,
+                dst: None,
+                op: Op::Delete,
+            });
+        }
+        SecurityStmt::GrantRole { role, to } => {
+            let role_iid = require_role(state, role, &bounds, overlay).await?;
+            let (from_id, from_iid) = match to {
+                RoleTarget::User(subject) => {
+                    let id = security::user_node_id(subject);
+                    let iid = node_iid(&id)?;
+                    if visible_payload(state, SECURITY_GRAPH, BindingKind::Node, iid, &bounds, overlay).await?.is_none() {
+                        // Users are auto-created on first mention; subjects
+                        // come from the authenticator.
+                        put_security_node(
+                            &mut effects,
+                            iid,
+                            security::USER_LABEL,
+                            security::user_node_doc(subject),
+                            system,
+                        );
+                    }
+                    (id, iid)
+                }
+                RoleTarget::Role(member) => {
+                    if member == role {
+                        return Err(EngineError::Security(format!(
+                            "cannot grant role '{role}' to itself"
+                        )));
+                    }
+                    (security::role_node_id(member), require_role(state, member, &bounds, overlay).await?)
+                }
+            };
+            let edge_id = security::member_edge_id(&from_id, &security::role_node_id(role));
+            let iid = edge_iid(&edge_id)?;
+            if visible_payload(state, SECURITY_GRAPH, BindingKind::Edge, iid, &bounds, overlay).await?.is_none() {
+                put_security_edge(
+                    &mut effects,
+                    iid,
+                    security::MEMBER_OF_EDGE,
+                    security::edge_only_doc(edge_id),
+                    from_iid,
+                    role_iid,
+                    system,
+                );
+            }
+        }
+        SecurityStmt::RevokeRole { role, from } => {
+            let role_iid = require_role(state, role, &bounds, overlay).await?;
+            let from_id = match from {
+                RoleTarget::User(subject) => security::user_node_id(subject),
+                RoleTarget::Role(member) => security::role_node_id(member),
+            };
+            let from_iid = node_iid(&from_id)?;
+            let edge_id = security::member_edge_id(&from_id, &security::role_node_id(role));
+            let iid = edge_iid(&edge_id)?;
+            if let Some((_, doc)) = visible_payload(state, SECURITY_GRAPH, BindingKind::Edge, iid, &bounds, overlay).await? {
+                effects.record_edge_delete(&doc);
+                delete_security_edge(&mut effects, iid, from_iid, role_iid, system);
+            }
+        }
+        SecurityStmt::GrantPrivilege { privilege, role } => {
+            let role_iid = require_role(state, role, &bounds, overlay).await?;
+            for (action, graph, kind, name) in privilege_scopes(privilege)? {
+                let priv_id = security::privilege_node_id(action, &graph, kind, &name);
+                let priv_iid = node_iid(&priv_id)?;
+                if visible_payload(state, SECURITY_GRAPH, BindingKind::Node, priv_iid, &bounds, overlay).await?.is_none() {
+                    put_security_node(
+                        &mut effects,
+                        priv_iid,
+                        security::PRIVILEGE_LABEL,
+                        security::privilege_node_doc(action, &graph, kind, &name),
+                        system,
+                    );
+                }
+                grant_privilege_edge(&mut effects, state, role, role_iid, &priv_id, priv_iid, system, &bounds, overlay)
+                    .await?;
+            }
+        }
+        SecurityStmt::RevokePrivilege { privilege, role } => {
+            let role_iid = require_role(state, role, &bounds, overlay).await?;
+            for (action, graph, kind, name) in privilege_scopes(privilege)? {
+                let priv_id = security::privilege_node_id(action, &graph, kind, &name);
+                let priv_iid = node_iid(&priv_id)?;
+                let edge_id = security::grant_edge_id(&security::role_node_id(role), &priv_id);
+                let iid = edge_iid(&edge_id)?;
+                if let Some((_, doc)) = visible_payload(state, SECURITY_GRAPH, BindingKind::Edge, iid, &bounds, overlay).await? {
+                    effects.record_edge_delete(&doc);
+                    delete_security_edge(&mut effects, iid, role_iid, priv_iid, system);
+                }
+            }
+        }
+        SecurityStmt::GrantAdmin { role } => {
+            let role_iid = require_role(state, role, &bounds, overlay).await?;
+            let priv_id = security::privilege_node_id("admin", security::WILDCARD, security::WILDCARD, security::WILDCARD);
+            let priv_iid = node_iid(&priv_id)?;
+            if visible_payload(state, SECURITY_GRAPH, BindingKind::Node, priv_iid, &bounds, overlay).await?.is_none() {
+                put_security_node(
+                    &mut effects,
+                    priv_iid,
+                    security::PRIVILEGE_LABEL,
+                    security::privilege_node_doc("admin", security::WILDCARD, security::WILDCARD, security::WILDCARD),
+                    system,
+                );
+            }
+            grant_privilege_edge(&mut effects, state, role, role_iid, &priv_id, priv_iid, system, &bounds, overlay)
+                .await?;
+        }
+        SecurityStmt::RevokeAdmin { role } => {
+            let role_iid = require_role(state, role, &bounds, overlay).await?;
+            let priv_id = security::privilege_node_id("admin", security::WILDCARD, security::WILDCARD, security::WILDCARD);
+            let priv_iid = node_iid(&priv_id)?;
+            let edge_id = security::grant_edge_id(&security::role_node_id(role), &priv_id);
+            let iid = edge_iid(&edge_id)?;
+            if let Some((_, doc)) = visible_payload(state, SECURITY_GRAPH, BindingKind::Edge, iid, &bounds, overlay).await? {
+                effects.record_edge_delete(&doc);
+                delete_security_edge(&mut effects, iid, role_iid, priv_iid, system);
+            }
+        }
+        SecurityStmt::ShowRoles | SecurityStmt::ShowGrants { .. } => {
+            return Err(EngineError::NotAMutation);
+        }
+    }
+    Ok(effects)
+}
+
+/// The role node's iid, or `Security("unknown role …")` when it does not
+/// exist at `bounds` (including earlier statements of the same tx via the
+/// overlay).
+async fn require_role(
+    state: &WriterState,
+    name: &str,
+    bounds: &TemporalBounds,
+    overlay: Option<&Overlay>,
+) -> Result<Iid, EngineError> {
+    let iid = security::security_iid(TableKind::Nodes, &security::role_node_id(name))?;
+    if visible_payload(state, SECURITY_GRAPH, BindingKind::Node, iid, bounds, overlay)
+        .await?
+        .is_none()
+    {
+        return Err(EngineError::Security(format!("unknown role '{name}'")));
+    }
+    Ok(iid)
+}
+
+/// Expands one surface privilege spec into `(action, graph, kind, name)`
+/// scopes: `ALL` → read + write, `*` lists → the literal wildcard name.
+fn privilege_scopes(
+    privilege: &varve_gql::ast::PrivilegeSpec,
+) -> Result<Vec<(&'static str, String, &'static str, String)>, EngineError> {
+    let actions: &[&'static str] = match privilege.action {
+        PrivilegeAction::Read => &["read"],
+        PrivilegeAction::Write => &["write"],
+        PrivilegeAction::All => &["read", "write"],
+    };
+    let graph = match &privilege.graph {
+        None => security::WILDCARD.to_string(),
+        Some(graph) => {
+            validate_user_graph_name(graph)?;
+            graph.clone()
+        }
+    };
+    let kind = match privilege.kind {
+        PrivilegeKind::Nodes => "nodes",
+        PrivilegeKind::Edges => "edges",
+    };
+    let names: Vec<String> = match &privilege.names {
+        None => vec![security::WILDCARD.to_string()],
+        Some(names) => names.clone(),
+    };
+    let mut scopes = Vec::with_capacity(actions.len() * names.len());
+    for action in actions {
+        for name in &names {
+            scopes.push((*action, graph.clone(), kind, name.clone()));
+        }
+    }
+    Ok(scopes)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn grant_privilege_edge(
+    effects: &mut Effects,
+    state: &WriterState,
+    _role: &str,
+    role_iid: Iid,
+    priv_id: &str,
+    priv_iid: Iid,
+    system: Instant,
+    bounds: &TemporalBounds,
+    overlay: Option<&Overlay>,
+) -> Result<(), EngineError> {
+    let edge_id = security::grant_edge_id(&security::role_node_id(_role), priv_id);
+    let iid = security::security_iid(TableKind::Edges, &edge_id)?;
+    if visible_payload(state, SECURITY_GRAPH, BindingKind::Edge, iid, bounds, overlay)
+        .await?
+        .is_none()
+    {
+        put_security_edge(
+            effects,
+            iid,
+            security::GRANTED_EDGE,
+            security::edge_only_doc(edge_id),
+            role_iid,
+            priv_iid,
+            system,
+        );
+    }
+    Ok(())
+}
+
+fn put_security_node(effects: &mut Effects, iid: Iid, label: &str, doc: Doc, system: Instant) {
+    effects.record_node_create(&[label.to_string()], &doc);
+    effects.nodes.push(Event {
+        iid,
+        system_from: system,
+        valid_from: system,
+        valid_to: Instant::END_OF_TIME,
+        src: None,
+        dst: None,
+        op: Op::Put {
+            labels: vec![label.to_string()],
+            doc,
+        },
+    });
+}
+
+fn put_security_edge(
+    effects: &mut Effects,
+    iid: Iid,
+    label: &str,
+    doc: Doc,
+    src: Iid,
+    dst: Iid,
+    system: Instant,
+) {
+    effects.record_edge_create(&doc);
+    effects.edges.push(Event {
+        iid,
+        system_from: system,
+        valid_from: system,
+        valid_to: Instant::END_OF_TIME,
+        src: Some(src),
+        dst: Some(dst),
+        op: Op::Put {
+            labels: vec![label.to_string()],
+            doc,
+        },
+    });
+}
+
+fn delete_security_edge(effects: &mut Effects, iid: Iid, src: Iid, dst: Iid, system: Instant) {
+    effects.edges.push(Event {
+        iid,
+        system_from: system,
+        valid_from: system,
+        valid_to: Instant::END_OF_TIME,
+        src: Some(src),
+        dst: Some(dst),
+        op: Op::Delete,
+    });
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1104,6 +1566,7 @@ async fn resolve_match_part(
     params: &BTreeMap<String, Value>,
     system: Instant,
     overlay: Option<&Overlay>,
+    security: Option<&GraphGrants>,
 ) -> Result<(Vec<HashMap<String, Iid>>, BTreeMap<String, BindingKind>), EngineError> {
     let (vars, kinds) = match_binding_vars(match_part)?;
     let body = match_part_body(match_part, &vars);
@@ -1120,6 +1583,7 @@ async fn resolve_match_part(
         state.query_limits,
         None,
         overlay,
+        security,
     )
     .await?;
     let rows = varve_plan::binding_rows_with_limits(
@@ -1206,6 +1670,7 @@ fn match_projection_body(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resolve_match_projection(
     state: &WriterState,
     graph: &str,
@@ -1214,6 +1679,7 @@ async fn resolve_match_projection(
     system: Instant,
     projected: Vec<(Expr, Option<String>)>,
     overlay: Option<&Overlay>,
+    security: Option<&GraphGrants>,
 ) -> Result<(Vec<RecordBatch>, Vec<String>, BTreeMap<String, BindingKind>), EngineError> {
     let (vars, kinds) = match_binding_vars(match_part)?;
     let mut items = vars
@@ -1243,6 +1709,7 @@ async fn resolve_match_projection(
         state.query_limits,
         None,
         overlay,
+        security,
     )
     .await?;
     let batches = varve_plan::execute_body_with_limits(
@@ -1516,6 +1983,7 @@ async fn resolve_insert(
     system: Instant,
     generated_ordinal: &mut usize,
     overlay: Option<&Overlay>,
+    security: Option<&GraphGrants>,
 ) -> Result<Effects, EngineError> {
     let valid_from = ins.valid_from.unwrap_or(system);
     let valid_to = ins.valid_to.unwrap_or(Instant::END_OF_TIME);
@@ -1528,7 +1996,7 @@ async fn resolve_insert(
 
     let (binding_rows, binding_kinds) = match &ins.match_part {
         None => (vec![HashMap::new()], BTreeMap::new()),
-        Some(mp) => resolve_match_part(state, graph, mp, params, system, overlay).await?,
+        Some(mp) => resolve_match_part(state, graph, mp, params, system, overlay, security).await?,
     };
 
     // 2. Per binding row, walk the INSERT paths creating events.
@@ -1682,6 +2150,7 @@ async fn resolve_set(
     params: &BTreeMap<String, Value>,
     system: Instant,
     overlay: Option<&Overlay>,
+    security: Option<&GraphGrants>,
 ) -> Result<Effects, EngineError> {
     let (_, target_kinds) = match_binding_vars(&set.match_part)?;
     for item in &set.items {
@@ -1707,6 +2176,7 @@ async fn resolve_set(
         system,
         projected,
         overlay,
+        security,
     )
     .await?;
     let bounds = TemporalBounds {
@@ -1789,9 +2259,11 @@ async fn resolve_remove(
     params: &BTreeMap<String, Value>,
     system: Instant,
     overlay: Option<&Overlay>,
+    security: Option<&GraphGrants>,
 ) -> Result<Effects, EngineError> {
     let (binding_rows, kinds) =
-        resolve_match_part(state, graph, &remove.match_part, params, system, overlay).await?;
+        resolve_match_part(state, graph, &remove.match_part, params, system, overlay, security)
+            .await?;
     for item in &remove.items {
         kinds
             .get(remove_item_var(item))
@@ -1881,9 +2353,11 @@ async fn resolve_delete(
     params: &BTreeMap<String, Value>,
     system: Instant,
     overlay: Option<&Overlay>,
+    security: Option<&GraphGrants>,
 ) -> Result<Effects, EngineError> {
     let (binding_rows, kinds) =
-        resolve_match_part(state, graph, &del.match_part, params, system, overlay).await?;
+        resolve_match_part(state, graph, &del.match_part, params, system, overlay, security)
+            .await?;
     let target_kind = kinds
         .get(&del.target)
         .ok_or_else(|| EngineError::UnboundVariable(del.target.clone()))?;
@@ -2238,6 +2712,8 @@ fn apply(state: &WriterState, staged: &mut [Staged]) -> Result<(), String> {
             }
         }
 
+        let touches_security =
+            s.graph == SECURITY_GRAPH && (!s.events.nodes.is_empty() || !s.events.edges.is_empty());
         let table = shared
             .graph_mut(&s.graph)
             .ok_or_else(|| format!("unknown graph '{}'", s.graph))?;
@@ -2246,6 +2722,10 @@ fn apply(state: &WriterState, staged: &mut [Staged]) -> Result<(), String> {
         }
         for event in std::mem::take(&mut s.events.edges) {
             table.edges.live.append(event).map_err(|e| e.to_string())?;
+        }
+        if touches_security {
+            // Exact invalidation for the per-subject SecurityContext cache.
+            shared.security_epoch += 1;
         }
     }
     Ok(())
@@ -2450,6 +2930,7 @@ mod tests {
             progress,
             lease: watch::channel(LeaseState::Unfenced).1,
             metrics: Arc::new(EngineMetrics::default()),
+            security: SecurityEnforcer::new(crate::security::SecurityTuning::default()),
         };
         (spawn_writer(writer_state, cfg), state, progress_rx)
     }
@@ -2517,6 +2998,7 @@ mod tests {
             progress,
             lease,
             metrics: Arc::new(EngineMetrics::default()),
+            security: SecurityEnforcer::new(crate::security::SecurityTuning::default()),
         };
         (spawn_writer(writer_state, cfg), state, progress_rx)
     }
@@ -2699,6 +3181,7 @@ mod tests {
             progress,
             lease: lease_rx,
             metrics: Arc::new(EngineMetrics::default()),
+            security: SecurityEnforcer::new(crate::security::SecurityTuning::default()),
         };
 
         // `select_compaction_jobs`'s L0 job needs `CompactionConfig::default()
@@ -2870,6 +3353,7 @@ mod tests {
             progress,
             lease: watch::channel(LeaseState::Unfenced).1,
             metrics: Arc::new(EngineMetrics::default()),
+            security: SecurityEnforcer::new(crate::security::SecurityTuning::default()),
         };
 
         let outcome = flush(&mut state, vec![bad_staged]).await;
@@ -3254,6 +3738,7 @@ mod tests {
             progress,
             lease: watch::channel(LeaseState::Unfenced).1,
             metrics: Arc::new(EngineMetrics::default()),
+            security: SecurityEnforcer::new(crate::security::SecurityTuning::default()),
         };
 
         let program = varve_gql::parse_program("INSERT (:P {_id: 1})").unwrap();

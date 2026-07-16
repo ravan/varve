@@ -162,6 +162,15 @@ Tuning for `[auth] backend = "static"` (a bearer-token allowlist).
 |---|---|---|---|
 | `tokens` | array of tables (`subject`, `token`) | (required) | Bearer tokens accepted, each with a distinct subject; at least one is required and tokens must be unique. |
 
+## `[security]`
+
+Native ReBAC access control (label / edge-type granularity). Policy itself lives as bitemporal nodes/edges in the reserved `__security` graph, managed through GQL DDL (`CREATE ROLE`, `GRANT … TO …`, `SHOW GRANTS`, …) and replicated to query nodes through the normal log. Enforcement is deny-by-default for principals without grants; requests without a principal (embedded use) keep full access.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `false` | Enables enforcement on reads and writes; disabled is exactly the pre-security engine (zero overhead). |
+| `admins` | array of strings | `[]` | Bootstrap subjects that bypass every check and may run security DDL (grant `ADMIN` to a role to delegate). |
+
 ## `[metrics]`
 
 Metrics sink backend selection.
