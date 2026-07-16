@@ -109,6 +109,10 @@ impl TableState {
 pub(crate) struct GraphsState {
     pub graphs: BTreeMap<String, TableState>,
     pub catalog_graphs: BTreeMap<Iid, String>,
+    /// Bumped on every effect applied to the reserved `__security` graph
+    /// (writer apply and follower replay alike) — the exact invalidation key
+    /// for the per-subject [`crate::security::SecurityContext`] cache.
+    pub security_epoch: u64,
 }
 
 impl GraphsState {
@@ -116,9 +120,14 @@ impl GraphsState {
         let mut graphs = BTreeMap::new();
         graphs.insert(DEFAULT_GRAPH.to_string(), TableState::new());
         graphs.insert(META_GRAPH.to_string(), TableState::new());
+        graphs.insert(
+            crate::security::SECURITY_GRAPH.to_string(),
+            TableState::new(),
+        );
         GraphsState {
             graphs,
             catalog_graphs: BTreeMap::new(),
+            security_epoch: 0,
         }
     }
 

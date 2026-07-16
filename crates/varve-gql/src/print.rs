@@ -23,7 +23,59 @@ fn print_statement(stmt: &Statement) -> String {
         Statement::Remove(stmt) => print_remove(stmt),
         Statement::Graph(GraphStmt::Create(graph)) => format!("CREATE GRAPH {graph}"),
         Statement::Graph(GraphStmt::Drop(graph)) => format!("DROP GRAPH {graph}"),
+        Statement::Security(stmt) => print_security(stmt),
     }
+}
+
+fn print_security(stmt: &SecurityStmt) -> String {
+    match stmt {
+        SecurityStmt::CreateRole(name) => format!("CREATE ROLE {name}"),
+        SecurityStmt::DropRole(name) => format!("DROP ROLE {name}"),
+        SecurityStmt::GrantRole { role, to } => {
+            format!("GRANT ROLE {role} TO {}", print_role_target(to))
+        }
+        SecurityStmt::RevokeRole { role, from } => {
+            format!("REVOKE ROLE {role} FROM {}", print_role_target(from))
+        }
+        SecurityStmt::GrantPrivilege { privilege, role } => {
+            format!("GRANT {} TO ROLE {role}", print_privilege(privilege))
+        }
+        SecurityStmt::RevokePrivilege { privilege, role } => {
+            format!("REVOKE {} FROM ROLE {role}", print_privilege(privilege))
+        }
+        SecurityStmt::GrantAdmin { role } => format!("GRANT ADMIN TO ROLE {role}"),
+        SecurityStmt::RevokeAdmin { role } => format!("REVOKE ADMIN FROM ROLE {role}"),
+        SecurityStmt::ShowRoles => "SHOW ROLES".to_string(),
+        SecurityStmt::ShowGrants { target: None } => "SHOW GRANTS".to_string(),
+        SecurityStmt::ShowGrants {
+            target: Some(target),
+        } => format!("SHOW GRANTS FOR {}", print_role_target(target)),
+    }
+}
+
+fn print_role_target(target: &RoleTarget) -> String {
+    match target {
+        RoleTarget::User(subject) => format!("USER '{}'", subject.replace('\'', "''")),
+        RoleTarget::Role(role) => format!("ROLE {role}"),
+    }
+}
+
+fn print_privilege(privilege: &PrivilegeSpec) -> String {
+    let action = match privilege.action {
+        PrivilegeAction::Read => "READ",
+        PrivilegeAction::Write => "WRITE",
+        PrivilegeAction::All => "ALL",
+    };
+    let graph = privilege.graph.as_deref().unwrap_or("*");
+    let kind = match privilege.kind {
+        PrivilegeKind::Nodes => "NODES",
+        PrivilegeKind::Edges => "EDGES",
+    };
+    let names = match &privilege.names {
+        None => "*".to_string(),
+        Some(names) => names.join(", "),
+    };
+    format!("{action} ON GRAPH {graph} {kind} {names}")
 }
 
 fn print_insert(stmt: &InsertStmt) -> String {

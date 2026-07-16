@@ -526,6 +526,32 @@ impl Parser {
         }
     }
 
+    /// Security DDL words (GRANT, REVOKE, ROLE, …) are CONTEXTUAL keywords:
+    /// they stay ordinary identifiers everywhere else (labels, variables,
+    /// properties named `user` or `read` keep working), and are only
+    /// recognized case-insensitively at the positions the security grammar
+    /// expects them.
+    fn peek_soft_kw(&self, word: &str) -> bool {
+        matches!(self.peek(), TokenKind::Ident(s) if s.eq_ignore_ascii_case(word))
+    }
+
+    fn eat_soft_kw(&mut self, word: &str) -> bool {
+        if self.peek_soft_kw(word) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect_soft_kw(&mut self, word: &str) -> Result<(), GqlError> {
+        if self.eat_soft_kw(word) {
+            Ok(())
+        } else {
+            Err(self.err(format!("expected {word}, found {:?}", self.peek())))
+        }
+    }
+
     fn statement(&mut self) -> Result<Statement, GqlError> {
         match self.peek() {
             TokenKind::Kw(Keyword::Insert) => {
@@ -547,6 +573,11 @@ impl Parser {
             }
             TokenKind::Kw(Keyword::Create) => {
                 self.pos += 1;
+                if self.eat_soft_kw("ROLE") {
+                    return Ok(Statement::Security(SecurityStmt::CreateRole(
+                        self.ident("role name")?,
+                    )));
+                }
                 self.expect(&TokenKind::Kw(Keyword::Graph), "GRAPH")?;
                 Ok(Statement::Graph(GraphStmt::Create(
                     self.ident("graph name")?,
@@ -554,11 +585,157 @@ impl Parser {
             }
             TokenKind::Kw(Keyword::Drop) => {
                 self.pos += 1;
+                if self.eat_soft_kw("ROLE") {
+                    return Ok(Statement::Security(SecurityStmt::DropRole(
+                        self.ident("role name")?,
+                    )));
+                }
                 self.expect(&TokenKind::Kw(Keyword::Graph), "GRAPH")?;
                 Ok(Statement::Graph(GraphStmt::Drop(self.ident("graph name")?)))
             }
-            _ => Err(self.err("expected INSERT, MATCH, FOR, CREATE GRAPH, or DROP GRAPH")),
+            _ if self.peek_soft_kw("GRANT") => {
+                self.pos += 1;
+                self.grant_stmt().map(Statement::Security)
+            }
+            _ if self.peek_soft_kw("REVOKE") => {
+                self.pos += 1;
+                self.revoke_stmt().map(Statement::Security)
+            }
+            _ if self.peek_soft_kw("SHOW") => {
+                self.pos += 1;
+                self.show_stmt().map(Statement::Security)
+            }
+            _ => Err(self.err(
+                "expected INSERT, MATCH, FOR, CREATE GRAPH/ROLE, DROP GRAPH/ROLE, GRANT, \
+                 REVOKE, or SHOW",
+            )),
         }
+    }
+
+    /// After `GRANT`: `ROLE r TO USER 's'|ROLE r2`, `ADMIN TO ROLE r`, or a
+    /// privilege form `READ|WRITE|ALL ON GRAPH g|* NODES|EDGES … TO ROLE r`.
+    fn grant_stmt(&mut self) -> Result<SecurityStmt, GqlError> {
+        if self.eat_soft_kw("ROLE") {
+            let role = self.ident("role name")?;
+            self.expect(&TokenKind::Kw(Keyword::To), "TO")?;
+            let to = self.role_target()?;
+            return Ok(SecurityStmt::GrantRole { role, to });
+        }
+        if self.eat_soft_kw("ADMIN") {
+            self.expect(&TokenKind::Kw(Keyword::To), "TO")?;
+            self.expect_soft_kw("ROLE")?;
+            return Ok(SecurityStmt::GrantAdmin {
+                role: self.ident("role name")?,
+            });
+        }
+        let privilege = self.privilege_spec()?;
+        self.expect(&TokenKind::Kw(Keyword::To), "TO")?;
+        self.expect_soft_kw("ROLE")?;
+        Ok(SecurityStmt::GrantPrivilege {
+            privilege,
+            role: self.ident("role name")?,
+        })
+    }
+
+    /// Mirror of [`Self::grant_stmt`] with `FROM` in place of `TO`.
+    fn revoke_stmt(&mut self) -> Result<SecurityStmt, GqlError> {
+        if self.eat_soft_kw("ROLE") {
+            let role = self.ident("role name")?;
+            self.expect(&TokenKind::Kw(Keyword::From), "FROM")?;
+            let from = self.role_target()?;
+            return Ok(SecurityStmt::RevokeRole { role, from });
+        }
+        if self.eat_soft_kw("ADMIN") {
+            self.expect(&TokenKind::Kw(Keyword::From), "FROM")?;
+            self.expect_soft_kw("ROLE")?;
+            return Ok(SecurityStmt::RevokeAdmin {
+                role: self.ident("role name")?,
+            });
+        }
+        let privilege = self.privilege_spec()?;
+        self.expect(&TokenKind::Kw(Keyword::From), "FROM")?;
+        self.expect_soft_kw("ROLE")?;
+        Ok(SecurityStmt::RevokePrivilege {
+            privilege,
+            role: self.ident("role name")?,
+        })
+    }
+
+    fn show_stmt(&mut self) -> Result<SecurityStmt, GqlError> {
+        if self.eat_soft_kw("ROLES") {
+            return Ok(SecurityStmt::ShowRoles);
+        }
+        self.expect_soft_kw("GRANTS")?;
+        if *self.peek() == TokenKind::Kw(Keyword::For) {
+            self.pos += 1;
+            return Ok(SecurityStmt::ShowGrants {
+                target: Some(self.role_target()?),
+            });
+        }
+        Ok(SecurityStmt::ShowGrants { target: None })
+    }
+
+    /// `USER '<subject>'` (quoted — subjects come from the authenticator and
+    /// may contain any character) or `ROLE <name>`.
+    fn role_target(&mut self) -> Result<RoleTarget, GqlError> {
+        if self.eat_soft_kw("USER") {
+            return match self.bump() {
+                TokenKind::Str(subject) => Ok(RoleTarget::User(subject)),
+                other => Err(GqlError::Parse {
+                    offset: self.tokens[self.pos - 1].offset,
+                    msg: format!("expected quoted user subject, found {other:?}"),
+                }),
+            };
+        }
+        if self.eat_soft_kw("ROLE") {
+            return Ok(RoleTarget::Role(self.ident("role name")?));
+        }
+        Err(self.err("expected USER '<subject>' or ROLE <name>"))
+    }
+
+    fn privilege_spec(&mut self) -> Result<PrivilegeSpec, GqlError> {
+        let action = if self.eat_soft_kw("READ") {
+            PrivilegeAction::Read
+        } else if self.eat_soft_kw("WRITE") {
+            PrivilegeAction::Write
+        } else if *self.peek() == TokenKind::Kw(Keyword::All) {
+            self.pos += 1;
+            PrivilegeAction::All
+        } else {
+            return Err(self.err("expected ROLE, ADMIN, READ, WRITE, or ALL"));
+        };
+        self.expect_soft_kw("ON")?;
+        self.expect(&TokenKind::Kw(Keyword::Graph), "GRAPH")?;
+        let graph = if *self.peek() == TokenKind::Star {
+            self.pos += 1;
+            None
+        } else {
+            Some(self.ident("graph name")?)
+        };
+        let kind = if self.eat_soft_kw("NODES") {
+            PrivilegeKind::Nodes
+        } else if self.eat_soft_kw("EDGES") {
+            PrivilegeKind::Edges
+        } else {
+            return Err(self.err("expected NODES or EDGES"));
+        };
+        let names = if *self.peek() == TokenKind::Star {
+            self.pos += 1;
+            None
+        } else {
+            let mut names = vec![self.ident("label or edge type")?];
+            while *self.peek() == TokenKind::Comma {
+                self.pos += 1;
+                names.push(self.ident("label or edge type")?);
+            }
+            Some(names)
+        };
+        Ok(PrivilegeSpec {
+            action,
+            graph,
+            kind,
+            names,
+        })
     }
 
     /// Parses zero or more `FOR VALID_TIME …` / `FOR SYSTEM_TIME …` clauses.
@@ -2767,5 +2944,110 @@ mod tests {
                 unions: vec![],
             }))
         );
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use crate::ast::*;
+    use crate::{parse, to_gql};
+
+    /// Every DDL form round-trips: parse → print → parse yields the same AST,
+    /// and the printed text is the canonical uppercase form.
+    #[test]
+    fn security_ddl_round_trips_through_print() {
+        let canonical = [
+            "CREATE ROLE reader",
+            "DROP ROLE reader",
+            "GRANT ROLE reader TO USER 'ada'",
+            "GRANT ROLE reader TO ROLE auditor",
+            "REVOKE ROLE reader FROM USER 'ada'",
+            "REVOKE ROLE reader FROM ROLE auditor",
+            "GRANT READ ON GRAPH g NODES Person, Company TO ROLE reader",
+            "GRANT WRITE ON GRAPH * NODES * TO ROLE writer",
+            "GRANT ALL ON GRAPH g EDGES KNOWS TO ROLE writer",
+            "REVOKE READ ON GRAPH g NODES Person, Company FROM ROLE reader",
+            "REVOKE ALL ON GRAPH * EDGES * FROM ROLE writer",
+            "GRANT ADMIN TO ROLE ops",
+            "REVOKE ADMIN FROM ROLE ops",
+            "SHOW ROLES",
+            "SHOW GRANTS",
+            "SHOW GRANTS FOR USER 'ada'",
+            "SHOW GRANTS FOR ROLE reader",
+        ];
+        for gql in canonical {
+            let stmt = parse(gql).unwrap_or_else(|e| panic!("parse {gql}: {e}"));
+            assert!(matches!(stmt, Statement::Security(_)), "{gql}");
+            let printed = to_gql(&stmt);
+            assert_eq!(printed, gql, "canonical print of {gql}");
+            let reparsed = parse(&printed).unwrap_or_else(|e| panic!("reparse {printed}: {e}"));
+            assert_eq!(reparsed, stmt, "round trip of {gql}");
+        }
+    }
+
+    #[test]
+    fn security_keywords_are_case_insensitive_and_contextual() {
+        // Lowercase everywhere.
+        let stmt = parse("grant read on graph g nodes Person to role reader").unwrap();
+        assert_eq!(
+            stmt,
+            Statement::Security(SecurityStmt::GrantPrivilege {
+                privilege: PrivilegeSpec {
+                    action: PrivilegeAction::Read,
+                    graph: Some("g".into()),
+                    kind: PrivilegeKind::Nodes,
+                    names: Some(vec!["Person".into()]),
+                },
+                role: "reader".into(),
+            })
+        );
+        // The same words stay plain identifiers outside the security grammar:
+        // labels, variables, and properties named like the soft keywords work.
+        parse("MATCH (grant:read {show: 1}) RETURN grant.show").unwrap();
+        parse("INSERT (:User {role: 'admin'})").unwrap();
+    }
+
+    #[test]
+    fn user_subject_quotes_escape_in_print() {
+        let stmt = parse("GRANT ROLE r TO USER 'o''brien'").unwrap();
+        assert_eq!(
+            stmt,
+            Statement::Security(SecurityStmt::GrantRole {
+                role: "r".into(),
+                to: RoleTarget::User("o'brien".into()),
+            })
+        );
+        assert_eq!(to_gql(&stmt), "GRANT ROLE r TO USER 'o''brien'");
+    }
+
+    #[test]
+    fn malformed_security_ddl_is_rejected() {
+        for gql in [
+            "GRANT",
+            "GRANT ROLE r",
+            "GRANT ROLE r TO",
+            "GRANT ROLE r TO USER ada", // unquoted subject
+            "GRANT READ ON GRAPH g TO ROLE r", // missing NODES/EDGES
+            "GRANT READ ON GRAPH g NODES TO ROLE r", // missing names
+            "REVOKE READ ON GRAPH g NODES A TO ROLE r", // TO instead of FROM
+            "SHOW",
+            "SHOW GRANTS FOR",
+        ] {
+            assert!(parse(gql).is_err(), "{gql} should not parse");
+        }
+    }
+
+    #[test]
+    fn show_is_a_read_and_ddl_is_not() {
+        let show = parse("SHOW GRANTS").unwrap();
+        let Statement::Security(show) = show else {
+            panic!()
+        };
+        assert!(show.is_show());
+        let ddl = parse("CREATE ROLE r").unwrap();
+        let Statement::Security(ddl) = ddl else {
+            panic!()
+        };
+        assert!(!ddl.is_show());
     }
 }

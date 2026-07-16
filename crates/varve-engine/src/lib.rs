@@ -11,6 +11,7 @@ mod node;
 pub mod registries;
 mod replay;
 mod scan;
+pub mod security;
 mod state;
 mod verify;
 mod writer;
@@ -30,6 +31,7 @@ pub use node::{
     DEFAULT_BASIS_TIMEOUT_MS, DEFAULT_TAIL_BATCH_RECORDS, DEFAULT_TAIL_POLL_INTERVAL_MS,
 };
 pub use registries::Registries;
+pub use security::SecurityTuning;
 pub use varve_storage::{ProbeReport, ProbeVerdict};
 pub use verify::VerifyReport;
 pub use writer::{EdgePut, NodePut};

@@ -451,6 +451,31 @@ fn sections() -> Vec<Section> {
             }],
         },
         Section {
+            name: "security",
+            intro: "Native ReBAC access control (label / edge-type granularity). Policy itself \
+                    lives as bitemporal nodes/edges in the reserved `__security` graph, managed \
+                    through GQL DDL (`CREATE ROLE`, `GRANT … TO …`, `SHOW GRANTS`, …) and \
+                    replicated to query nodes through the normal log. Enforcement is \
+                    deny-by-default for principals without grants; requests without a principal \
+                    (embedded use) keep full access.",
+            entries: vec![
+                Entry {
+                    key: "enabled",
+                    r#type: "boolean",
+                    default: code(false),
+                    description: "Enables enforcement on reads and writes; disabled is exactly \
+                                  the pre-security engine (zero overhead).",
+                },
+                Entry {
+                    key: "admins",
+                    r#type: "array of strings",
+                    default: string_array(&[]),
+                    description: "Bootstrap subjects that bypass every check and may run \
+                                  security DDL (grant `ADMIN` to a role to delegate).",
+                },
+            ],
+        },
+        Section {
             name: "metrics",
             intro: "Metrics sink backend selection.",
             entries: vec![Entry {
@@ -558,6 +583,7 @@ mod tests {
             "[server.http]",
             "[auth]",
             "[auth.static]",
+            "[security]",
             "[metrics]",
             "[metrics.otlp]",
         ] {

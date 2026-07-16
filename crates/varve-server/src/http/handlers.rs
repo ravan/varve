@@ -37,6 +37,7 @@ pub(super) fn unauthorized() -> Response {
 }
 pub(super) async fn query(
     State(c): State<HttpContext>,
+    Extension(p): Extension<Principal>,
     headers: HeaderMap,
     Json(r): Json<QueryRequest>,
 ) -> Response {
@@ -48,7 +49,15 @@ pub(super) async fn query(
         Ok(v) => v,
         Err(e) => return mapped(e),
     };
-    let mut q = c.frontend.db.query(r.gql).params(params);
+    // The authenticated principal always rides along; with `[security]`
+    // disabled it is inert (attribution only), with it enabled the engine
+    // enforces the subject's grants (deny-by-default).
+    let mut q = c
+        .frontend
+        .db
+        .query(r.gql)
+        .params(params)
+        .as_principal(p.subject);
     if let Some(b) = r.basis {
         match BasisToken::try_from(b) {
             Ok(v) => q = q.basis(v),
@@ -231,6 +240,12 @@ fn mapped(e: ServerError) -> Response {
             "writer fenced",
             None,
         ),
+        ServerError::Engine(EngineError::AccessDenied(_)) => error(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "access denied",
+            None,
+        ),
         _ => error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",
@@ -280,5 +295,15 @@ mod tests {
             "stale epoch".into(),
         )));
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// ReBAC enforcement: a denied read or write maps to 403 `forbidden`,
+    /// clearly distinct from 401 (authentication) and 400 (malformed).
+    #[test]
+    fn access_denied_maps_to_403_forbidden() {
+        let response = mapped(ServerError::Engine(EngineError::AccessDenied(
+            "user 'ada' lacks READ".into(),
+        )));
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }

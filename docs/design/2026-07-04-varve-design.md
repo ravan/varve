@@ -27,7 +27,7 @@ Inspiration: XTDB 2.x (architecture studied in depth from `refs/xtdb`; see §14 
 
 ### Non-goals for v1 (roadmap, behind interfaces)
 
-Multi-writer log submission, interactive ACID sessions (`BEGIN`/`COMMIT`), Kafka log backend, Bolt/pgwire protocol frontends, GQL schema/graph-type DDL enforcement (closed graph types), `SHORTEST`/`CHEAPEST` path search, factorized / worst-case-optimal joins, RBAC, replication of the log itself.
+Multi-writer log submission, interactive ACID sessions (`BEGIN`/`COMMIT`), Kafka log backend, Bolt/pgwire protocol frontends, GQL schema/graph-type DDL enforcement (closed graph types), `SHORTEST`/`CHEAPEST` path search, factorized / worst-case-optimal joins, RBAC (since delivered post-plan as native ReBAC label/edge-type access control — see `docs/book/src/security.md`), replication of the log itself.
 
 ---
 

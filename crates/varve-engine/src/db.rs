@@ -11,6 +11,7 @@ use crate::node::{
 use crate::registries::Registries;
 use crate::replay::{apply_catalog_event, apply_decoded_log_record, decode_log_record};
 use crate::scan::merged_snapshot;
+use crate::security::{GraphGrants, SecurityEnforcer, SecurityTuning};
 use crate::state::{
     GraphsState, PersistedTrie, TableKind, TableState, DEFAULT_GRAPH, EDGES_TABLE, META_GRAPH,
     NODES_TABLE,
@@ -129,6 +130,10 @@ pub enum EngineError {
     WriterFenced(String),
     #[error("writer submission queue is full; retry")]
     Backpressure,
+    #[error("access denied: {0}")]
+    AccessDenied(String),
+    #[error("security: {0}")]
+    Security(String),
 }
 
 fn label_filter(labels: &LabelSpec) -> LabelFilter<'_> {
@@ -456,6 +461,7 @@ pub struct Query {
     params: BTreeMap<String, Value>,
     basis: Option<BasisToken>,
     timeout: Duration,
+    principal: Option<String>,
 }
 
 impl Query {
@@ -474,12 +480,24 @@ impl Query {
         self
     }
 
+    /// Evaluates the query as `subject`: with `[security] enabled`, reads are
+    /// filtered to the subject's resolved grants (deny-by-default). Without a
+    /// principal the query runs as the process owner with full access
+    /// (SQLite-style embedded semantics). The server always sets this from
+    /// the authenticated principal.
+    pub fn as_principal(mut self, subject: impl Into<String>) -> Query {
+        self.principal = Some(subject.into());
+        self
+    }
+
     pub async fn stream(self) -> Result<SendableRecordBatchStream, EngineError> {
         self.db.require_role(NodeRole::Query)?;
         if let Some(basis) = self.basis {
             self.db.wait_for_basis(basis, self.timeout).await?;
         }
-        self.db.query_stream_impl(&self.gql, &self.params).await
+        self.db
+            .query_stream_impl(&self.gql, &self.params, self.principal.as_deref())
+            .await
     }
 }
 
@@ -613,6 +631,9 @@ struct DbInner {
     /// One `(tier name, stats)` pair per configured cache tier, in the same
     /// order as `[cache] tiers` (Task 12); read I/O-free for `Db::metrics`.
     cache_tiers: CacheTierList,
+    /// `[security]` enforcement state (config + per-subject context cache),
+    /// shared with the writer loop. Disabled by default — zero overhead.
+    security: Arc<SecurityEnforcer>,
 }
 
 /// One `(tier name, stats)` pair per configured cache tier (Task 12); see
@@ -709,6 +730,7 @@ pub(crate) async fn scan_inputs_for(
     query_limits: varve_plan::QueryLimits,
     fast_paths: Option<&[Option<FastPath>]>,
     overlay: Option<&Overlay>,
+    security: Option<&GraphGrants>,
 ) -> Result<Vec<Vec<varve_plan::ScanInput>>, EngineError> {
     scan_inputs_for_impl(
         state,
@@ -720,6 +742,7 @@ pub(crate) async fn scan_inputs_for(
         query_limits,
         fast_paths,
         overlay,
+        security,
     )
     .await
 }
@@ -735,6 +758,7 @@ async fn scan_inputs_for_impl(
     query_limits: varve_plan::QueryLimits,
     fast_paths: Option<&[Option<FastPath>]>,
     overlay: Option<&Overlay>,
+    security: Option<&GraphGrants>,
 ) -> Result<Vec<Vec<varve_plan::ScanInput>>, EngineError> {
     if clause_specs.len() != bounds_per_clause.len() {
         return Err(EngineError::Unsupported(
@@ -763,6 +787,7 @@ async fn scan_inputs_for_impl(
                 query_limits,
                 fast_path,
                 overlay,
+                security,
             )
             .await?,
         );
@@ -782,6 +807,7 @@ async fn scan_inputs_for_clause(
     query_limits: varve_plan::QueryLimits,
     fast_path: Option<&FastPath>,
     overlay: Option<&Overlay>,
+    security: Option<&GraphGrants>,
 ) -> Result<Vec<varve_plan::ScanInput>, EngineError> {
     let mut clause_inputs = Vec::with_capacity(
         clause_spec.specs.len()
@@ -803,6 +829,7 @@ async fn scan_inputs_for_clause(
                 query_limits,
                 fast_path,
                 overlay,
+                security,
             )
             .await?,
         );
@@ -820,6 +847,7 @@ async fn scan_inputs_for_clause(
                     query_limits,
                     None,
                     overlay,
+                    security,
                 )
                 .await?,
             );
@@ -828,7 +856,10 @@ async fn scan_inputs_for_clause(
     Ok(clause_inputs)
 }
 
-// One conversion point from planner scan specs to executable scan inputs.
+// One conversion point from planner scan specs to executable scan inputs —
+// and, when a `SecurityContext` is being enforced, the single choke point
+// where label/edge-type read grants filter every scan (plain MATCH, EXISTS
+// subqueries, and the writer's MATCH-driven DML all funnel through here).
 #[allow(clippy::too_many_arguments)]
 async fn scan_input_for(
     state: &Arc<RwLock<GraphsState>>,
@@ -840,6 +871,7 @@ async fn scan_input_for(
     query_limits: varve_plan::QueryLimits,
     fast_path: Option<&FastPath>,
     overlay: Option<&Overlay>,
+    security: Option<&GraphGrants>,
 ) -> Result<varve_plan::ScanInput, EngineError> {
     Ok(match &spec.kind {
         varve_plan::SpecKind::Node { labels, iid_point } => {
@@ -851,13 +883,25 @@ async fn scan_input_for(
                 (None, Some(fast_path)) => crate::scan::IidSel::Set(Arc::clone(fast_path.nodes())),
                 (None, None) => crate::scan::IidSel::All,
             };
+            let base = label_filter(labels);
+            let filter = match security {
+                // Conservative multi-label rule: EVERY label on a row must be
+                // granted, so even a fully-granted pattern label list still
+                // needs the per-row Visible check (a `:Person` scan must not
+                // surface a `:Person:Secret` node).
+                Some(sec) if !sec.read_nodes.wildcard => LabelFilter::Visible {
+                    base: &base,
+                    allowed: &sec.read_nodes.names,
+                },
+                _ => base,
+            };
             varve_plan::ScanInput::Batch(
                 merged_snapshot(
                     state,
                     store,
                     graph,
                     TableKind::Nodes,
-                    label_filter(labels),
+                    filter,
                     bounds,
                     &sel,
                     overlay,
@@ -867,19 +911,37 @@ async fn scan_input_for(
         }
         varve_plan::SpecKind::Edge { label, .. } => match fast_path {
             Some(FastPath::FixedEdges { batch, .. }) => varve_plan::ScanInput::Batch(batch.clone()),
-            _ => varve_plan::ScanInput::Batch(
-                merged_snapshot(
-                    state,
-                    store,
-                    graph,
-                    TableKind::Edges,
-                    LabelFilter::Single(label),
-                    bounds,
-                    &crate::scan::IidSel::All,
-                    overlay,
+            _ => {
+                if let Some(sec) = security {
+                    if !sec.read_edges.allows(label) {
+                        return Ok(varve_plan::ScanInput::Batch(None));
+                    }
+                }
+                // Endpoint visibility needs no extra work here: both endpoint
+                // node elements of the hop are Node specs in the same clause,
+                // filtered above, and the pattern joins on their iids.
+                let base = LabelFilter::Single(label);
+                let filter = match security {
+                    Some(sec) if !sec.read_edges.wildcard => LabelFilter::Visible {
+                        base: &base,
+                        allowed: &sec.read_edges.names,
+                    },
+                    _ => base,
+                };
+                varve_plan::ScanInput::Batch(
+                    merged_snapshot(
+                        state,
+                        store,
+                        graph,
+                        TableKind::Edges,
+                        filter,
+                        bounds,
+                        &crate::scan::IidSel::All,
+                        overlay,
+                    )
+                    .await?,
                 )
-                .await?,
-            ),
+            }
         },
         varve_plan::SpecKind::Expand {
             label,
@@ -891,11 +953,24 @@ async fn scan_input_for(
                 varve_plan::ScanInput::Adjacency(Arc::clone(adjacency))
             }
             _ => {
+                if let Some(sec) = security {
+                    if !sec.read_edges.allows(label) {
+                        return Ok(varve_plan::ScanInput::Adjacency(Arc::new(
+                            varve_plan::EdgeAdjacency::default(),
+                        )));
+                    }
+                }
                 let adj_direction = match direction {
                     varve_gql::ast::Direction::Out => crate::scan::AdjDirection::Out,
                     varve_gql::ast::Direction::In => crate::scan::AdjDirection::In,
                 };
-                let entries = crate::scan::edge_adjacency(
+                // Name-scoped edge grants filter the adjacency per edge
+                // (every label on the edge granted), keeping quantified
+                // traversal consistent with the fixed-hop `Visible` scan.
+                let edge_visible = security
+                    .filter(|sec| !sec.read_edges.wildcard)
+                    .map(|sec| &sec.read_edges.names);
+                let mut entries = crate::scan::edge_adjacency(
                     state,
                     store,
                     graph,
@@ -905,9 +980,39 @@ async fn scan_input_for(
                     None,
                     bounds,
                     Some(query_limits.traversal_adjacency_budget),
+                    edge_visible,
                     overlay,
                 )
                 .await?;
+                // Quantified expansion walks through intermediate nodes the
+                // pattern never scans, so endpoint visibility must be
+                // enforced on the adjacency itself: keep only hops whose
+                // BOTH endpoints are visible under the read grants. The
+                // visibility scan probes only the adjacency's own endpoints
+                // (bounded by the traversal budget), never the whole graph —
+                // the retain below can't ask about any other node.
+                if let Some(sec) = security {
+                    if !sec.read_nodes.wildcard && !entries.is_empty() {
+                        let mut endpoints = BTreeSet::new();
+                        for entry in &entries {
+                            endpoints.insert(entry.node);
+                            endpoints.insert(entry.neighbor);
+                        }
+                        let visible = visible_node_iids(
+                            state,
+                            store,
+                            graph,
+                            &sec.read_nodes.names,
+                            bounds,
+                            &crate::scan::IidSel::Set(Arc::new(endpoints)),
+                            overlay,
+                        )
+                        .await?;
+                        entries.retain(|entry| {
+                            visible.contains(&entry.node) && visible.contains(&entry.neighbor)
+                        });
+                    }
+                }
                 let adjacency =
                     varve_plan::EdgeAdjacency::from_entries(entries.into_iter().map(|e| {
                         (
@@ -922,6 +1027,60 @@ async fn scan_input_for(
             }
         },
     })
+}
+
+/// The iids of every node visible under `allowed` (each node's FULL label
+/// set granted) within `sel` — the endpoint-visibility set for
+/// security-filtered quantified expansion. Both callers pass a bounded
+/// [`IidSel::Set`]: the full-scan path passes the adjacency's own endpoints
+/// (bounded by the traversal budget) and the anchored fast path passes the
+/// anchor-reachable node set, so the cost is proportional to the traversal's
+/// neighborhood, never the graph. Wildcard read grants never reach here.
+async fn visible_node_iids(
+    state: &Arc<RwLock<GraphsState>>,
+    store: &Arc<dyn ObjectStore>,
+    graph: &str,
+    allowed: &BTreeSet<String>,
+    bounds: &TemporalBounds,
+    sel: &crate::scan::IidSel,
+    overlay: Option<&Overlay>,
+) -> Result<BTreeSet<Iid>, EngineError> {
+    let names: Vec<String> = allowed.iter().cloned().collect();
+    let base = LabelFilter::Any(&names);
+    let batch = merged_snapshot(
+        state,
+        store,
+        graph,
+        TableKind::Nodes,
+        LabelFilter::Visible {
+            base: &base,
+            allowed,
+        },
+        bounds,
+        sel,
+        overlay,
+    )
+    .await?;
+    let mut visible = BTreeSet::new();
+    let Some(batch) = batch else {
+        return Ok(visible);
+    };
+    let Some(column) = batch.column_by_name("_iid") else {
+        return Ok(visible);
+    };
+    use datafusion::arrow::array::Array as _;
+    let Some(iids) = column
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::FixedSizeBinaryArray>()
+    else {
+        return Ok(visible);
+    };
+    for i in 0..iids.len() {
+        if let Ok(bytes) = <[u8; 16]>::try_from(iids.value(i)) {
+            visible.insert(Iid::from_bytes(bytes));
+        }
+    }
+    Ok(visible)
 }
 
 impl Db {
@@ -952,6 +1111,7 @@ impl Db {
             },
             Duration::from_millis(5000),
             None,
+            SecurityTuning::default(),
         )
     }
 
@@ -973,10 +1133,12 @@ impl Db {
         follower_config: FollowerConfig,
         basis_timeout: Duration,
         coordinator: Option<Arc<dyn Coordinator>>,
+        security: SecurityTuning,
     ) -> Db {
         let state = Arc::new(RwLock::new(graphs_state));
         let functions = Arc::new(varve_plan::FunctionRegistry::with_builtins());
         let metrics = Arc::new(EngineMetrics::default());
+        let security = SecurityEnforcer::new(security);
         let (progress_tx, progress_rx) = watch::channel(ProgressState::running(
             next_tx_id,
             durable_watermark,
@@ -997,6 +1159,7 @@ impl Db {
             progress: progress_tx.clone(),
             lease: lease_rx,
             metrics: Arc::clone(&metrics),
+            security: Arc::clone(&security),
         };
         let is_writer = roles.contains(NodeRole::Writer);
         // Heartbeat only for a writer-role node with a coordinator whose
@@ -1042,6 +1205,7 @@ impl Db {
                 heartbeat,
                 metrics,
                 cache_tiers,
+                security,
             }),
         }
     }
@@ -1114,6 +1278,10 @@ impl Db {
         let query_tuning: QueryTuning = query_section.get()?;
         let gc_section = config.section("gc").unwrap_or_else(ConfigSection::empty);
         let gc_config = gc_section.get::<GcTuning>()?.into_config();
+        let security_section = config
+            .section("security")
+            .unwrap_or_else(ConfigSection::empty);
+        let security: SecurityTuning = security_section.get()?;
         let node_section = config.section("node").unwrap_or_else(ConfigSection::empty);
         let node_tuning: NodeTuning = node_section.get()?;
         let (roles, node_tuning) = node_tuning
@@ -1179,6 +1347,7 @@ impl Db {
             },
             Duration::from_millis(node_tuning.basis_timeout_ms),
             coordinator,
+            security,
         ))
     }
 
@@ -1213,6 +1382,7 @@ impl Db {
             },
             Duration::from_millis(5000),
             None,
+            SecurityTuning::default(),
         ))
     }
 
@@ -1433,6 +1603,7 @@ impl Db {
             params: BTreeMap::new(),
             basis: None,
             timeout: self.inner.basis_timeout,
+            principal: None,
         }
     }
 
@@ -1468,6 +1639,7 @@ impl Db {
         &self,
         gql: &str,
         params: &BTreeMap<String, Value>,
+        principal: Option<&str>,
     ) -> Result<SendableRecordBatchStream, EngineError> {
         // `varve.query.parse` (Task 13): fully synchronous — parsing,
         // graph-name validation/existence and the query-shape checks never
@@ -1475,7 +1647,11 @@ impl Db {
         // any `.await` below. Fields are deliberately omitted: the only
         // candidate (the GQL text itself) is exactly what "keep fields
         // cheap" rules out.
-        let (graph, q) = {
+        enum ParsedRead {
+            Query(String, Box<varve_gql::ast::QueryStmt>),
+            Show(varve_gql::ast::SecurityStmt),
+        }
+        let parsed = {
             let _g = tracing::info_span!("varve.query.parse").entered();
             let program = varve_gql::parse_program(gql)?;
             let graph = program
@@ -1496,12 +1672,36 @@ impl Db {
                 return Err(EngineError::NotAQuery);
             }
             let mut statements = program.statements;
-            let Statement::Query(q) = statements.remove(0) else {
-                return Err(EngineError::NotAQuery);
-            };
-            (graph, q)
+            match statements.remove(0) {
+                Statement::Query(q) => ParsedRead::Query(graph, q),
+                // `SHOW ROLES` / `SHOW GRANTS …`: admin-gated system reads
+                // over the policy graph, handled outside the planner.
+                Statement::Security(stmt) if stmt.is_show() => ParsedRead::Show(stmt),
+                _ => return Err(EngineError::NotAQuery),
+            }
+        };
+        let (graph, q) = match parsed {
+            ParsedRead::Show(stmt) => {
+                return self.security_show_stream(&stmt, principal).await;
+            }
+            ParsedRead::Query(graph, q) => (graph, q),
         };
         let now = self.inner.clock.watermark();
+        // Resolved grants to enforce, or None for unrestricted access
+        // (security off, no principal, or an admin). `None` leaves every
+        // code path below byte-identical to the pre-security engine.
+        let security = self
+            .inner
+            .security
+            .enforcement_for(
+                &self.inner.state,
+                &self.inner.store,
+                principal.unwrap_or(""),
+                &graph,
+                now,
+            )
+            .await?;
+        let security = security.as_ref();
         if !q.unions.is_empty() {
             // Union queries: mirror the single-body path below — `plan`
             // covers scan-spec/scan-input construction for every arm (first
@@ -1511,10 +1711,15 @@ impl Db {
             // `varve.query.execute` is the execution-dominant span, not
             // `varve.query.plan`.
             let (first_plan, union_plans) = async {
-                let first_plan = self.plan_body_inputs(&graph, &q.first, params, now).await?;
+                let first_plan = self
+                    .plan_body_inputs(&graph, &q.first, params, now, security)
+                    .await?;
                 let mut union_plans = Vec::with_capacity(q.unions.len());
                 for (_, body) in &q.unions {
-                    union_plans.push(self.plan_body_inputs(&graph, body, params, now).await?);
+                    union_plans.push(
+                        self.plan_body_inputs(&graph, body, params, now, security)
+                            .await?,
+                    );
                 }
                 Ok::<_, EngineError>((first_plan, union_plans))
             }
@@ -1558,6 +1763,12 @@ impl Db {
                 params,
             )?;
             let bounds = bounds_per_clause(&q.first, now);
+            // The anchored fast path applies under active enforcement too:
+            // `plan_fast_path` builds its pruned edge inputs under the same
+            // visibility filters the full scan applies (node visibility is
+            // compositional — pruned node sets still pass the `Visible`
+            // filter in `scan_input_for`), so filtered principals keep
+            // anchored pruning instead of degenerating to full scans.
             let fast_path = if q.first.clauses.len() == 1
                 && clause_specs.len() == 1
                 && matches!(
@@ -1568,7 +1779,7 @@ impl Db {
                         ..
                     } if paths.len() == 1
                 ) {
-                self.plan_fast_path(&graph, &q, &clause_specs[0].specs, params, &bounds[0])
+                self.plan_fast_path(&graph, &q, &clause_specs[0].specs, params, &bounds[0], security)
                     .await?
             } else {
                 None
@@ -1590,6 +1801,7 @@ impl Db {
                 self.inner.query_limits,
                 fast_paths.as_deref(),
                 None,
+                security,
             )
             .await?;
             Ok::<_, EngineError>((clause_specs, inputs))
@@ -1620,6 +1832,7 @@ impl Db {
         body: &QueryBody,
         params: &BTreeMap<String, Value>,
         now: Instant,
+        security: Option<&GraphGrants>,
     ) -> Result<
         (
             Vec<varve_plan::ClauseSpecs>,
@@ -1640,9 +1853,81 @@ impl Db {
             self.inner.query_limits,
             None,
             None,
+            security,
         )
         .await?;
         Ok((clause_specs, inputs))
+    }
+
+    /// `SHOW ROLES` / `SHOW GRANTS [FOR USER 's' | FOR ROLE r]`: admin-gated
+    /// system reads over the `__security` policy graph, returned as a
+    /// single-batch stream.
+    async fn security_show_stream(
+        &self,
+        stmt: &varve_gql::ast::SecurityStmt,
+        principal: Option<&str>,
+    ) -> Result<SendableRecordBatchStream, EngineError> {
+        use datafusion::arrow::array::StringArray;
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+
+        let user = principal.unwrap_or("");
+        let now = self.inner.clock.watermark();
+        if !self
+            .inner
+            .security
+            .is_admin(&self.inner.state, &self.inner.store, user, now)
+            .await?
+        {
+            return Err(EngineError::AccessDenied(format!(
+                "user '{user}' is not an administrator (SHOW requires ADMIN)"
+            )));
+        }
+        let policy =
+            crate::security::load_policy(&self.inner.state, &self.inner.store, now).await?;
+        let batch = match stmt {
+            varve_gql::ast::SecurityStmt::ShowRoles => {
+                let schema = Arc::new(Schema::new(vec![Field::new("role", DataType::Utf8, false)]));
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![Arc::new(StringArray::from(policy.role_names()))],
+                )
+                .map_err(|e| EngineError::Plan(varve_plan::PlanError::DataFusion(e.into())))?
+            }
+            varve_gql::ast::SecurityStmt::ShowGrants { target } => {
+                let rows = policy.grant_rows(target.as_ref());
+                let schema = Arc::new(Schema::new(vec![
+                    Field::new("role", DataType::Utf8, false),
+                    Field::new("action", DataType::Utf8, false),
+                    Field::new("graph", DataType::Utf8, false),
+                    Field::new("kind", DataType::Utf8, false),
+                    Field::new("name", DataType::Utf8, false),
+                ]));
+                let column = |get: fn(&crate::security::GrantRow) -> &String| {
+                    Arc::new(StringArray::from(
+                        rows.iter().map(|row| get(row).clone()).collect::<Vec<_>>(),
+                    )) as datafusion::arrow::array::ArrayRef
+                };
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        column(|row| &row.role),
+                        column(|row| &row.action),
+                        column(|row| &row.graph),
+                        column(|row| &row.kind),
+                        column(|row| &row.name),
+                    ],
+                )
+                .map_err(|e| EngineError::Plan(varve_plan::PlanError::DataFusion(e.into())))?
+            }
+            _ => return Err(EngineError::NotAQuery),
+        };
+        let schema = batch.schema();
+        Ok(Box::pin(
+            datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+                schema,
+                futures::stream::iter(vec![Ok(batch)]),
+            ),
+        ))
     }
 
     /// Task 12 fast-path selection: decide whether this query's shape is one
@@ -1654,6 +1939,16 @@ impl Db {
     /// element whose properties the query references, …). Correctness over
     /// speed: the fast path is a layer over the unchanged, already-correct
     /// scan, never a replacement, so an unsure verdict simply falls back.
+    ///
+    /// Under active (non-wildcard) enforcement the pruned inputs carry the
+    /// same security semantics as the filtered full scan: node visibility is
+    /// compositional (the pruned node sets still pass through the `Visible`
+    /// label filter in `scan_input_for`, and fixed-path joins drop paths
+    /// through non-visible intermediates), so only the shared edge inputs
+    /// need filtering here — the fixed-path batch is built under the same
+    /// `Visible` filter as the full edge scan, and the quantified adjacency
+    /// keeps only hops with both endpoints visible, computed over the
+    /// reachable set instead of the whole graph.
     async fn plan_fast_path(
         &self,
         graph: &str,
@@ -1661,6 +1956,7 @@ impl Db {
         specs: &[varve_plan::ScanSpec],
         params: &BTreeMap<String, Value>,
         bounds: &varve_types::TemporalBounds,
+        security: Option<&GraphGrants>,
     ) -> Result<Option<FastPath>, EngineError> {
         use varve_gql::ast::Direction;
         // Require a point-anchored start node and at least one hop.
@@ -1704,6 +2000,19 @@ impl Db {
                 ..
             } = &specs[1].kind
             {
+                // Non-granted edge label: the full path feeds `Expand` an
+                // empty adjacency without scanning, so short-circuit BEFORE
+                // the BFS (which could exhaust a traversal budget the full
+                // path never touches). `nodes` keeps the anchor so a
+                // min-0 quantifier can still bind end to start.
+                if let Some(sec) = security {
+                    if !sec.read_edges.allows(label) {
+                        return Ok(Some(FastPath::QuantifiedAdjacency {
+                            adjacency: Arc::new(varve_plan::EdgeAdjacency::default()),
+                            nodes: Arc::new(BTreeSet::from([anchor])),
+                        }));
+                    }
+                }
                 let props = const_props(props, params)?;
                 let hop = crate::scan::HopSpec {
                     label,
@@ -1711,6 +2020,11 @@ impl Db {
                     direction: dir_to_adj(*direction),
                 };
                 let hops = vec![hop; *max as usize];
+                // Same per-edge visibility as the full-path adjacency above,
+                // applied inside the BFS (its entries ARE the adjacency).
+                let edge_visible = security
+                    .filter(|sec| !sec.read_edges.wildcard)
+                    .map(|sec| &sec.read_edges.names);
                 let reachable = crate::scan::reachable_edges(
                     &self.inner.state,
                     &self.inner.store,
@@ -1718,6 +2032,7 @@ impl Db {
                     anchor,
                     &hops,
                     None,
+                    edge_visible,
                     bounds,
                     self.inner.query_limits.traversal_node_budget,
                     self.inner.query_limits.traversal_adjacency_budget,
@@ -1725,8 +2040,31 @@ impl Db {
                 )
                 .await?;
                 let nodes = Arc::new(reachable.nodes);
-                let adjacency = varve_plan::EdgeAdjacency::from_entries(
-                    reachable.entries.into_iter().map(|e| {
+                let mut entries = reachable.entries;
+                // Quantified expansion walks through intermediate nodes the
+                // pattern never scans (same reasoning as the full-scan
+                // `Expand` branch of `scan_input_for`), so endpoint
+                // visibility is enforced on the adjacency itself — but only
+                // over the anchor-reachable set, not the whole graph.
+                if let Some(sec) = security {
+                    if !sec.read_nodes.wildcard {
+                        let visible = visible_node_iids(
+                            &self.inner.state,
+                            &self.inner.store,
+                            graph,
+                            &sec.read_nodes.names,
+                            bounds,
+                            &crate::scan::IidSel::Set(Arc::clone(&nodes)),
+                            None,
+                        )
+                        .await?;
+                        entries.retain(|entry| {
+                            visible.contains(&entry.node) && visible.contains(&entry.neighbor)
+                        });
+                    }
+                }
+                let adjacency =
+                    varve_plan::EdgeAdjacency::from_entries(entries.into_iter().map(|e| {
                         (
                             e.node,
                             varve_plan::AdjEdge {
@@ -1734,8 +2072,7 @@ impl Db {
                                 edge: e.edge,
                             },
                         )
-                    }),
-                );
+                    }));
                 return Ok(Some(FastPath::QuantifiedAdjacency {
                     adjacency: Arc::new(adjacency),
                     nodes,
@@ -1763,6 +2100,18 @@ impl Db {
             .all(|(_, l, d)| *l == first_label && *d == first_dir)
         {
             return Ok(None);
+        }
+        // Non-granted edge label: the full path feeds every `Edge` spec an
+        // empty batch without scanning, so short-circuit BEFORE the BFS
+        // (which could exhaust a traversal budget the full path never
+        // touches).
+        if let Some(sec) = security {
+            if !sec.read_edges.allows(first_label) {
+                return Ok(Some(FastPath::FixedEdges {
+                    batch: None,
+                    nodes: Arc::new(BTreeSet::from([anchor])),
+                }));
+            }
         }
         // No inline edge props, and no edge element referenced by WHERE or
         // RETURN. Otherwise the reachable subset's (possibly narrower)
@@ -1820,6 +2169,12 @@ impl Db {
                 direction: dir_to_adj(*direction),
             })
             .collect();
+        // Name-scoped edge grants: build the batch under the same `Visible`
+        // filter the full edge scan applies, so a multi-label row with a
+        // non-granted label is excluded identically on both paths.
+        let edge_visible = security
+            .filter(|sec| !sec.read_edges.wildcard)
+            .map(|sec| &sec.read_edges.names);
         let reachable = crate::scan::reachable_edges(
             &self.inner.state,
             &self.inner.store,
@@ -1827,6 +2182,7 @@ impl Db {
             anchor,
             &hops,
             Some(first_label),
+            edge_visible,
             bounds,
             self.inner.query_limits.traversal_node_budget,
             self.inner.query_limits.traversal_adjacency_budget,
@@ -2362,6 +2718,7 @@ mod tests {
             },
             Duration::from_millis(5000),
             None,
+            SecurityTuning::default(),
         );
         let params = BTreeMap::new();
 
@@ -3258,6 +3615,7 @@ mod tests {
                 &bounds,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -3272,6 +3630,7 @@ mod tests {
                 AdjDirection::Out,
                 None,
                 &bounds,
+                None,
                 None,
                 None,
             )
@@ -3292,6 +3651,7 @@ mod tests {
                 AdjDirection::Out,
                 Some(cyd),
                 &bounds,
+                None,
                 None,
                 None,
             )
@@ -3319,6 +3679,7 @@ mod tests {
                 &bounds,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -3332,6 +3693,7 @@ mod tests {
                 AdjDirection::In,
                 None,
                 &bounds,
+                None,
                 None,
                 None,
             )
@@ -3380,6 +3742,7 @@ mod tests {
                 &bounds,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -3396,6 +3759,7 @@ mod tests {
                 AdjDirection::Out,
                 None,
                 &bounds,
+                None,
                 None,
                 None,
             )

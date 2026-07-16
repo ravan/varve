@@ -485,3 +485,106 @@ async fn health_does_not_depend_on_manifest_storage_reads() {
     assert_eq!(health.status(), StatusCode::OK);
     assert_eq!(json_body(health).await, json!({"status":"ok"}));
 }
+
+/// ReBAC over HTTP: the admin token drives security DDL through `/v1/tx`,
+/// the restricted token's `/v1/query` sees only granted labels, and its
+/// denied `/v1/tx` write maps to 403 `forbidden`.
+#[tokio::test]
+async fn security_enforcement_maps_to_403_and_filters_queries() {
+    let config = varve_config::Config::from_toml_str(
+        "[log]\ngroup_commit_window_ms = 0\n\
+         [security]\nenabled = true\nadmins = [\"root\"]\n",
+    )
+    .unwrap();
+    let db = varve::Db::open(config).await.unwrap();
+    let (readiness, _) = readiness_channel();
+    let app = http_router(HttpContext {
+        frontend: FrontendContext {
+            db,
+            authenticator: static_auth(&[("root", "roottok"), ("ada", "adatok")]).unwrap(),
+            metrics: Arc::new(PrometheusMetrics::new().unwrap()),
+            probe: ProbeReport {
+                verdict: ProbeVerdict::Supported,
+                probe_key: "test".into(),
+            },
+            readiness,
+        },
+        max_body_bytes: 1024 * 1024,
+    });
+    let call_as = |app: axum::Router, token: &'static str, uri: &'static str, body: Value| async move {
+        app.oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    };
+
+    for gql in [
+        "INSERT (:Person {_id: 'p', name: 'P'}), (:Secret {_id: 's', name: 'S'})",
+        "CREATE ROLE reader",
+        "GRANT READ ON GRAPH * NODES Person TO ROLE reader",
+        "GRANT ROLE reader TO USER 'ada'",
+    ] {
+        let response = call_as(app.clone(), "roottok", "/v1/tx", json!({ "gql": gql })).await;
+        assert_eq!(response.status(), StatusCode::OK, "admin: {gql}");
+    }
+
+    // Restricted read: only the granted label comes back.
+    let response = call_as(
+        app.clone(),
+        "adatok",
+        "/v1/query",
+        json!({ "gql": "MATCH (p:Person) RETURN p.name" }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["rows"].as_array().map(Vec::len), Some(1));
+    let response = call_as(
+        app.clone(),
+        "adatok",
+        "/v1/query",
+        json!({ "gql": "MATCH (s:Secret) RETURN s.name" }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["rows"].as_array().map(Vec::len), Some(0));
+
+    // Denied write and denied DDL: 403 forbidden.
+    for gql in [
+        "INSERT (:Person {_id: 'x', name: 'X'})",
+        "CREATE ROLE sneaky",
+    ] {
+        let response = call_as(app.clone(), "adatok", "/v1/tx", json!({ "gql": gql })).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{gql}");
+        let body = json_body(response).await;
+        assert_eq!(body["code"], "forbidden");
+    }
+
+    // Non-admin SHOW on the query path is 403 too; admin SHOW works.
+    let response = call_as(
+        app.clone(),
+        "adatok",
+        "/v1/query",
+        json!({ "gql": "SHOW GRANTS" }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = call_as(
+        app.clone(),
+        "roottok",
+        "/v1/query",
+        json!({ "gql": "SHOW ROLES" }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["rows"][0]["role"], "reader");
+}

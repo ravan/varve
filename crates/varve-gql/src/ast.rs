@@ -324,6 +324,64 @@ pub enum GraphStmt {
     Drop(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivilegeAction {
+    Read,
+    Write,
+    /// Surface `ALL` — expanded to READ + WRITE at lowering.
+    All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivilegeKind {
+    Nodes,
+    Edges,
+}
+
+/// The `TO`/`FROM`/`FOR` side of a role or grant statement: a user subject
+/// (quoted string, as issued by the authenticator) or another role.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoleTarget {
+    User(String),
+    Role(String),
+}
+
+/// `READ|WRITE|ALL ON GRAPH g|* NODES|EDGES l1,l2|*` — one privilege scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivilegeSpec {
+    pub action: PrivilegeAction,
+    /// `None` = `ON GRAPH *`.
+    pub graph: Option<String>,
+    pub kind: PrivilegeKind,
+    /// `None` = `*` (every label / edge type).
+    pub names: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecurityStmt {
+    CreateRole(String),
+    DropRole(String),
+    GrantRole { role: String, to: RoleTarget },
+    RevokeRole { role: String, from: RoleTarget },
+    GrantPrivilege { privilege: PrivilegeSpec, role: String },
+    RevokePrivilege { privilege: PrivilegeSpec, role: String },
+    GrantAdmin { role: String },
+    RevokeAdmin { role: String },
+    ShowRoles,
+    ShowGrants { target: Option<RoleTarget> },
+}
+
+impl SecurityStmt {
+    /// `SHOW …` statements are reads (served on the query path); every other
+    /// form is a mutation lowered onto the reserved `__security` graph.
+    pub fn is_show(&self) -> bool {
+        matches!(
+            self,
+            SecurityStmt::ShowRoles | SecurityStmt::ShowGrants { .. }
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub use_graph: Option<String>,
@@ -338,4 +396,5 @@ pub enum Statement {
     Set(SetStmt),
     Remove(RemoveStmt),
     Graph(GraphStmt),
+    Security(SecurityStmt),
 }

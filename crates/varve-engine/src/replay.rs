@@ -50,6 +50,12 @@ pub(crate) fn apply_decoded_log_record(
 ) -> Result<(), EngineError> {
     validate_decoded_log_record(state, &record)?;
     for effect in record.effects {
+        // Followers must invalidate their SecurityContext cache exactly like
+        // the writer does — a replicated grant becomes effective on a query
+        // node as soon as its record applies.
+        if effect.graph == crate::security::SECURITY_GRAPH && !effect.events.is_empty() {
+            state.security_epoch += 1;
+        }
         for event in effect.events {
             if effect.graph == META_GRAPH && effect.table == TableKind::Nodes {
                 apply_catalog_event(state, &event);
