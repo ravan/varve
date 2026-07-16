@@ -164,7 +164,7 @@ impl DiskCache {
                 }
             }
         }
-        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found.sort_by_key(|entry| entry.0);
         let mut inner = DiskInner::default();
         for (_, key, path, len) in found {
             inner.tick += 1;

@@ -58,6 +58,30 @@ region = "garage"
 Add `[coordinator] backend = "cas-failover"` only on backends with a `Supported` probe verdict
 — see [Failover](failover.md).
 
+## Bulk loads (load → compact → serve)
+
+For large initial loads, `Db::ingest(nodes, edges)` submits prebuilt data ops as one atomic
+transaction — no GQL parse, no planning, and no per-edge endpoint `MATCH` (endpoints are
+referenced by node `_id` and deliberately not verified; a dangling edge is durable but never
+matches a traversal). Chunk large loads into tens of thousands of puts per call to bound log
+record size. Measured on the reference laptop: 1M nodes + 6M edges in ~26 s (~266k entities/s),
+roughly 1000× the one-statement-per-edge GQL `MATCH … INSERT` surface.
+
+A freshly bulk-loaded store is all L0 tries, each spanning the full hashed-iid space, so
+anchored traversals cannot prune pages until compaction has run. After the load, loop
+`Db::compact_full_once()` until the report's `jobs` is 0: unlike the steady-state
+`compact_once` policy it also drains L0 groups below the standard `log_limit` gate, each job
+taking its whole group, leaving no full-iid-space L0 remnant behind. On the 1M/6M load this
+one-time sweep took ~50 s and cut the warm anchored 2-hop from ~640 ms to ~18 ms.
+
+**Memory limit (stated, not discovered):** a compaction job merges all of its input events in
+memory, and a full-sweep job's input is its *entire* L0 group — so peak memory during
+`compact_full_once` scales with the largest per-family slice of the bulk load (at 1M nodes/6M
+edges that is the ~6M-event edge family, comfortable on a 16 GB laptop). Do not point one
+uninterrupted bulk load of hundreds of millions of edges at a single full sweep; alternate
+ingest rounds with `compact_full_once()` loops (or interleave the steady-state `compact_once`)
+so no single L0 group grows beyond what one job can merge in RAM.
+
 ## Sizing knobs
 
 Defaults come straight from `crates/varve-engine/src/db.rs` and `crates/varve-storage/src/

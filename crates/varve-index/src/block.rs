@@ -131,7 +131,7 @@ pub fn encode_block_by(
         groups.push((sort_key, *iid, desc));
     }
     // Total order over (sort_key, iid) ⇒ deterministic file layout.
-    groups.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    groups.sort_by_key(|g| (g.0, g.1));
 
     let mut rows: Vec<Event> = Vec::with_capacity(live.event_count());
     let mut keys: Vec<Iid> = Vec::with_capacity(live.event_count()); // sort key per row
