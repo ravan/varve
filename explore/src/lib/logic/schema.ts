@@ -58,7 +58,13 @@ export function buildRelationshipStarterGql(type: string): string {
   return `MATCH (a)-[r:${escapeGqlIdentifier(type)}]->(b) RETURN a, r, b`;
 }
 
+const SAFE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+// Varve's lexer has no backtick-quoting, so a plain identifier must stay
+// plain or the query is a parse error. Backticks remain only as a marker for
+// names Varve could never parse anyway.
 export function escapeGqlIdentifier(identifier: string): string {
+  if (SAFE_IDENTIFIER.test(identifier)) return identifier;
   return `\`${identifier.replaceAll('`', '``')}\``;
 }
 

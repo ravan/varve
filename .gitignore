@@ -22,3 +22,4 @@ docs/book/book/
 .kata.local.toml
 /.agentenv
 /.kata.toml
+/explore/.playwright-cli

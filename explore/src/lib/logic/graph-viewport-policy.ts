@@ -1,5 +1,6 @@
 import type { ElementDefinition, LayoutOptions, StylesheetJson } from 'cytoscape';
 
+import type { GraphClustering } from './clustering';
 import type { GraphExtraction } from './graph';
 
 export type GraphTheme = 'light' | 'dark';
@@ -38,8 +39,18 @@ const NODE_COLORS = [
   '#0891b2',
 ] as const;
 
-export function createGraphElements(extraction: GraphExtraction): ElementDefinition[] {
+export function createGraphElements(
+  extraction: GraphExtraction,
+  clustering?: GraphClustering,
+): ElementDefinition[] {
   return [
+    ...(clustering?.clusters ?? []).map((cluster) => ({
+      group: 'nodes' as const,
+      data: { id: cluster.id, caption: cluster.label },
+      classes: 'cluster-parent',
+      selectable: false,
+      grabbable: false,
+    })),
     ...extraction.nodes.map((node) => ({
       group: 'nodes' as const,
       data: {
@@ -47,6 +58,9 @@ export function createGraphElements(extraction: GraphExtraction): ElementDefinit
         caption: node.caption ?? node.labels[0] ?? node.id,
         colorKey: node.labels[0] ?? node.id,
         labels: [...node.labels],
+        ...(clustering?.parentByNodeId[node.id] === undefined
+          ? {}
+          : { parent: clustering.parentByNodeId[node.id] }),
       },
     })),
     ...extraction.edges.map((edge) => ({
@@ -131,6 +145,27 @@ export function createGraphStyles(theme: GraphTheme): StylesheetJson {
         width: 3,
         'line-color': selection,
         'target-arrow-color': selection,
+      },
+    },
+    {
+      selector: '.cluster-parent',
+      style: {
+        shape: 'round-rectangle',
+        'background-color': dark ? '#1e293b' : '#f1f5f9',
+        'background-opacity': 0.55,
+        'border-color': relationship,
+        'border-width': 1,
+        'border-style': 'dashed',
+        label: 'data(caption)',
+        color: foreground,
+        'font-size': 12,
+        'font-weight': 700,
+        'text-valign': 'top',
+        'text-margin-y': -6,
+        'text-background-color': surface,
+        'text-background-opacity': 0.9,
+        'text-background-padding': '3px',
+        padding: '18px',
       },
     },
     {

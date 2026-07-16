@@ -1,4 +1,5 @@
 <script lang="ts">
+  import GqlEditor from '$lib/components/GqlEditor.svelte';
   import ParametersPanel from '$lib/components/ParametersPanel.svelte';
   import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert';
   import { Badge } from '$lib/components/ui/badge';
@@ -11,19 +12,6 @@
   import type { ConnectionStore, FetchLike } from '$lib/stores/connection.svelte';
   import type { WorkspaceStore } from '$lib/stores/workspace.svelte';
   import type { ExplorerErrorCode, QueryRequest } from '$lib/types';
-  import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
-  import { bracketMatching } from '@codemirror/language';
-  import { EditorState } from '@codemirror/state';
-  import {
-    Decoration,
-    EditorView,
-    keymap,
-    lineNumbers,
-    MatchDecorator,
-    type DecorationSet,
-    type ViewUpdate,
-    ViewPlugin,
-  } from '@codemirror/view';
   import Play from '@lucide/svelte/icons/play';
   import Square from '@lucide/svelte/icons/square';
   import { onMount, tick } from 'svelte';
@@ -40,9 +28,8 @@
     active?: boolean;
   } = $props();
 
-  let editorHost = $state<HTMLDivElement | null>(null);
-  let editor = $state<EditorView | null>(null);
   let parametersInput = $state('{}');
+  let gqlValid = $state(true);
   let basisInput = $state('');
   let timeoutInput = $state('30000');
   let activeController = $state<AbortController | null>(null);
@@ -60,70 +47,14 @@
   let mode = $derived(workspace.queryMode);
   let canRun = $derived(
     workspace.queryDraft.trim().length > 0 &&
+      gqlValid &&
       parametersValidation.ok &&
       (mode === 'write' || (basisValidation.ok && timeoutValidation.ok)) &&
       activeController === null,
   );
 
-  const keywordMatcher = new MatchDecorator({
-    regexp:
-      /\b(?:ALTER|AND|AS|BY|CALL|CASE|CREATE|DELETE|DENY|DETACH|DISTINCT|DROP|ELSE|END|EXISTS|FALSE|FINISH|GRANT|INSERT|LIMIT|MATCH|MERGE|NOT|NULL|OFFSET|OPTIONAL|OR|ORDER|REMOVE|REPLACE|RETURN|REVOKE|SET|SKIP|THEN|TRUE|UNION|UNWIND|WHEN|WHERE|WITH|YIELD)\b/gi,
-    decoration: Decoration.mark({ class: 'cm-gql-keyword' }),
-  });
-
-  class GqlKeywordHighlighter {
-    decorations: DecorationSet;
-
-    constructor(view: EditorView) {
-      this.decorations = keywordMatcher.createDeco(view);
-    }
-
-    update(update: ViewUpdate): void {
-      this.decorations = keywordMatcher.updateDeco(update, this.decorations);
-    }
-  }
-
-  const gqlKeywordHighlighting = ViewPlugin.fromClass(GqlKeywordHighlighter, {
-    decorations: (plugin) => plugin.decorations,
-  });
-
   onMount(() => {
-    if (editorHost === null) return;
     componentMounted = true;
-    editor = new EditorView({
-      parent: editorHost,
-      state: EditorState.create({
-        doc: workspace.queryDraft,
-        extensions: [
-          lineNumbers(),
-          bracketMatching(),
-          history(),
-          gqlKeywordHighlighting,
-          EditorView.lineWrapping,
-          EditorView.contentAttributes.of({
-            'aria-label': 'GQL query',
-            autocapitalize: 'off',
-            autocomplete: 'off',
-            spellcheck: 'false',
-          }),
-          EditorView.updateListener.of((update) => {
-            if (update.docChanged) workspace.setQueryDraft(update.state.doc.toString());
-          }),
-          keymap.of([
-            {
-              key: 'Mod-Enter',
-              preventDefault: true,
-              run: () => {
-                void runQuery();
-                return true;
-              },
-            },
-            ...defaultKeymap,
-            ...historyKeymap,
-          ]),
-        ],
-      }),
-    });
 
     return () => {
       const controller = activeController;
@@ -133,19 +64,8 @@
         componentMounted = false;
         controller?.abort();
         activeController = null;
-        editor?.destroy();
-        editor = null;
       }
     };
-  });
-
-  $effect(() => {
-    const draft = workspace.queryDraft;
-    if (editor !== null && editor.state.doc.toString() !== draft) {
-      editor.dispatch({
-        changes: { from: 0, to: editor.state.doc.length, insert: draft },
-      });
-    }
   });
 
   $effect(() => {
@@ -479,7 +399,14 @@
       <Label id="gql-query-label">GQL query</Label>
       <span class="text-muted-foreground font-mono text-xs">⌘/Ctrl + Enter</span>
     </div>
-    <div bind:this={editorHost} class="query-editor min-h-56"></div>
+    <GqlEditor
+      value={workspace.queryDraft}
+      onChange={(value) => workspace.setQueryDraft(value)}
+      onSubmit={() => void runQuery()}
+      schema={() => workspace.observedSchema}
+      lineNumbers={true}
+      onValidation={(valid) => (gqlValid = valid)}
+    />
   </div>
 
   <ParametersPanel

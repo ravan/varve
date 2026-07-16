@@ -141,4 +141,3 @@ playwright-cli close
 ```
 
 The console should have no unexpected errors, and requests, cookies, snapshots, and persistent storage must not expose the bearer token.
-

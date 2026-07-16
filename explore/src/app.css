@@ -141,11 +141,33 @@
   display: grid;
   grid-template-columns: 15rem minmax(0, 1fr) 20rem;
   min-height: 100vh;
+  transition: grid-template-columns 200ms ease;
+}
+
+.app-shell[data-inspector='collapsed'] {
+  grid-template-columns: 15rem minmax(0, 1fr) 3rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell {
+    transition: none;
+  }
 }
 
 .desktop-rail,
 .desktop-inspector {
   min-width: 0;
+}
+
+.app-workspace {
+  display: flex;
+  flex-direction: column;
+}
+
+.app-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
 }
 
 .desktop-inspector {
@@ -209,6 +231,11 @@
 .query-editor .cm-gql-keyword {
   color: var(--primary);
   font-weight: 650;
+}
+
+.query-editor-compact .cm-editor,
+.query-editor-compact .cm-scroller {
+  min-height: 3.5rem;
 }
 
 .result-frame {
