@@ -1266,6 +1266,13 @@ impl Db {
     /// are also drained, each job taking its WHOLE group. Loop until the
     /// report's `jobs` is 0 to leave no full-iid-space L0 trie behind —
     /// the shape anchored point/set lookups prune best against.
+    ///
+    /// Memory: a job merges all of its input events in memory, and a
+    /// full-sweep job's input is its entire L0 group — peak memory scales
+    /// with the largest per-family slice of the un-compacted load (fine at
+    /// 1M nodes/6M edges; not for hundreds of millions of edges in one
+    /// uninterrupted load). Alternate ingest rounds with full sweeps to
+    /// bound the group a single job must merge.
     pub async fn compact_full_once(&self) -> Result<CompactionReport, EngineError> {
         self.require_role(NodeRole::Compactor)?;
         self.writer_handle()?.compact_full_once().await

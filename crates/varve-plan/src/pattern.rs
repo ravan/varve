@@ -975,12 +975,7 @@ pub async fn binding_rows_with_limits(
                 );
             }
             if seen.insert(tuple.clone()) {
-                rows.push(
-                    vars.iter()
-                        .cloned()
-                        .zip(tuple.into_iter())
-                        .collect::<BTreeMap<_, _>>(),
-                );
+                rows.push(vars.iter().cloned().zip(tuple).collect::<BTreeMap<_, _>>());
             }
         }
     }

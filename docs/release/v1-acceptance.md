@@ -21,8 +21,10 @@ exceptions the release ships with. It is the gate for the user-decided `v1.0.0` 
 | 8 | Shippable artifacts | ✅ MET | Release workflow + container image (`.github/workflows/release.yml`, Task 16; host-triple tarball built + both binaries `--help`-verified this run); mdBook site (`just docs` → no stubs); benchmark report (`docs/benchmarks/v1.md`); all five fuzz targets build + survive 60 s. |
 
 **Overall:** all eight criteria met; criterion 4 ships with one explicit, acknowledged
-exception (AWS S3 not CI-verified). Two spec §13 performance targets are declared
-**not measured** on this loaded single box (below) rather than proxied.
+exception (AWS S3 not CI-verified). Two spec §13 performance targets were declared
+**not measured** on this loaded single box (below) rather than proxied — **both were
+subsequently measured and met on 2026-07-16** (see the strikethrough notes below and the
+update section in `docs/benchmarks/v1.md`).
 
 ## Explicit exceptions and non-measured targets
 
@@ -30,10 +32,13 @@ exception (AWS S3 not CI-verified). Two spec §13 performance targets are declar
   S3 API; the backend matrix covers Garage, SeaweedFS, MinIO (+ Ceph weekly).
 - **Adapted TCK, not full conformance** (criterion 2) — pass rate ≈ 0.871 with reasoned
   exclusions.
-- **1M-node 2-hop < 50 ms: NOT MEASURED** — only the 10k-node/60k-edge fixture was run
-  (warm 2-hop ≈ 17 ms); the 1M ingest was not performed and is explicitly not extrapolated.
-- **Server ≥ 5k tx/s on the object-store log: NOT MEASURED** — needs an unloaded /
-  distributed environment; see `docs/benchmarks/v1.md`.
+- ~~**1M-node 2-hop < 50 ms: NOT MEASURED**~~ — **MET 2026-07-16**: 17.85 ms warm avg at
+  1M nodes / 6M edges via the documented bulk-ingest → full-compaction procedure
+  (`Db::ingest` + `Db::compact_full_once`); uncompacted it is ~640 ms. See the 2026-07-16
+  update in `docs/benchmarks/v1.md` for the procedure caveat.
+- ~~**Server ≥ 5k tx/s on the object-store log: NOT MEASURED**~~ — **MET 2026-07-16**:
+  5,368 / 5,367 tx/s (two runs, 128 workers, 15 ms group commit) against loopback MinIO via
+  `object_store_tx_bench`; loopback/in-process caveats stated in `docs/benchmarks/v1.md`.
 - **Ingest throughput this session is load-bound** (~719 events/s in `social_bench` vs the
   ~40k events/s recorded on an unloaded box for the batched `block_bench` path) — the box
   was ~95% full with many concurrent worktrees; read-path latencies are unaffected and

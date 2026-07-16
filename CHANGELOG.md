@@ -50,6 +50,22 @@ read-scaling query nodes over any S3-compatible object store.
   Known limitations).
 - Tiered read cache (memory + restart-surviving disk tier).
 
+### Bulk ingest and traversal at scale
+
+- `Db::ingest(nodes, edges)`: xtdb-style bulk data ops as one atomic
+  transaction — no GQL parse or planning and no per-edge endpoint `MATCH`
+  (endpoints referenced by `_id`, deliberately unverified). ~266k entities/s
+  on the reference laptop, ~1000× the per-edge GQL surface, and
+  oracle-equivalent to GQL ingest.
+- `Db::compact_full_once()`: an opt-in full-compaction sweep for the
+  load→compact→serve procedure — drains the full-iid-space L0 tries a bulk
+  load leaves behind so anchored traversals can prune pages. A full-sweep job
+  merges its whole input group in memory; the limit is stated in the ops
+  guide's "Bulk loads" section.
+- Anchor-reachable node-scan pruning: anchored traversals prune non-anchor
+  node scans to the anchor-reachable set (provably result-identical). Warm
+  2-hop on a 1M-node/6M-edge graph: 17.85 ms after the one-time full sweep.
+
 ### Compaction, GC, and GDPR erase
 
 - Deterministic embedded compaction through manifest state; GC is a pure
@@ -101,13 +117,15 @@ read-scaling query nodes over any S3-compatible object store.
 - A single mutation program may contain catalog statements **or** data
   statements, not both (`USE g; MATCH …` in one transaction errors; run the
   `USE`/DDL and the DML as separate transactions).
-- The v1 write surface is one transaction per edge for `MATCH … INSERT` edge
-  creation (an ingest-throughput characteristic, not a correctness limit).
+- The v1 GQL write surface is one transaction per edge for `MATCH … INSERT`
+  edge creation (an ingest-throughput characteristic, not a correctness
+  limit); use `Db::ingest` for bulk loads.
 - Retroactive / as-of `DELETE` is deferred post-v1 (`DELETE` acts on current
   state; a `FOR` clause on `DELETE` is a parse error).
-- Spec §13 targets not measured this release: 1M-node 2-hop latency and the
-  ≥5k tx/s object-store-log server throughput (needs unloaded/distributed
-  hardware). See `docs/benchmarks/v1.md`.
+- Every spec §13 laptop target that has been measured is met; the object-store
+  tx/s and scale-out numbers are single-machine (loopback MinIO / shared-CPU
+  processes) and should be re-measured on distributed hardware before being
+  cited as datacenter claims. See `docs/benchmarks/v1.md`.
 
 ### Release checklist
 

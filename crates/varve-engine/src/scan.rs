@@ -36,13 +36,17 @@ impl IidSel {
     /// Page prune: the point variant keeps `PageMeta::selected`'s trie-path +
     /// stats rules; the set variant keeps a page whose `[min_iid, max_iid]`
     /// contains ANY selected iid (ordered-set range probe — no per-event
-    /// decode), on top of the temporal rules shared by every variant.
+    /// decode), on top of the temporal rules shared by every variant. An
+    /// inverted stats range (`min_iid > max_iid` — corrupt meta) selects
+    /// nothing, matching the point variant's comparisons; probing it with
+    /// `BTreeSet::range` would panic instead.
     fn selects_page(&self, page: &PageMeta, bounds: &TemporalBounds) -> bool {
         match self {
             IidSel::All => page.selected(bounds, None),
             IidSel::Point(point) => page.selected(bounds, Some(point)),
             IidSel::Set(set) => {
                 page.selected(bounds, None)
+                    && page.min_iid <= page.max_iid
                     && set.range(page.min_iid..=page.max_iid).next().is_some()
             }
         }
@@ -850,6 +854,31 @@ mod tests {
 
         assert_eq!(names(&batch), vec!["Ada", "Cyd"]);
         assert_eq!(range_reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn set_prune_treats_inverted_page_stats_as_unselected() {
+        // Corrupt meta with min_iid > max_iid: the point variant's plain
+        // comparisons never select such a page; the set variant's range
+        // probe must agree instead of panicking in BTreeSet::range.
+        let page = PageMeta {
+            path: Vec::new(),
+            offset: 0,
+            len: 1,
+            rows: 1,
+            min_iid: raw_iid(0x80),
+            max_iid: raw_iid(0x00),
+            min_system_from: us(1),
+            max_system_from: us(1),
+            min_valid_from: us(1),
+            max_valid_from: us(1),
+            min_valid_to: EOT,
+            max_valid_to: EOT,
+            has_erase: false,
+        };
+        let set = Arc::new(std::collections::BTreeSet::from([raw_iid(0x40)]));
+        assert!(!IidSel::Set(set).selects_page(&page, &at(10)));
+        assert!(!IidSel::Point(raw_iid(0x40)).selects_page(&page, &at(10)));
     }
 
     #[tokio::test]
