@@ -22,7 +22,7 @@ use crate::writer::{
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::TryStreamExt;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -40,7 +40,7 @@ use varve_plan::PlanError;
 use varve_storage::{
     memory_store, CacheStats, CachedStore, MemoryCache, ObjectStore, ProbeReport, StorageError,
 };
-use varve_types::{Instant, LogPosition, TemporalBounds, TypeError, Value};
+use varve_types::{Iid, Instant, LogPosition, TemporalBounds, TypeError, Value};
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -647,10 +647,30 @@ impl std::fmt::Debug for Db {
 pub(crate) enum FastPath {
     /// Fixed homogeneous path (all hops `Edge`, one label + direction, no
     /// inline edge props, no edge var referenced): the shared reachable-edge
-    /// batch (or `None` when nothing is reachable) fed to EVERY `Edge` spec.
-    FixedEdges(Option<RecordBatch>),
-    /// Single quantified hop: the reachable adjacency fed to the `Expand` spec.
-    QuantifiedAdjacency(Arc<varve_plan::EdgeAdjacency>),
+    /// batch (or `None` when nothing is reachable) fed to EVERY `Edge` spec,
+    /// plus the reachable node set pruning every non-anchor `Node` spec.
+    FixedEdges {
+        batch: Option<RecordBatch>,
+        nodes: Arc<BTreeSet<Iid>>,
+    },
+    /// Single quantified hop: the reachable adjacency fed to the `Expand`
+    /// spec, plus the reachable node set pruning the end `Node` spec.
+    QuantifiedAdjacency {
+        adjacency: Arc<varve_plan::EdgeAdjacency>,
+        nodes: Arc<BTreeSet<Iid>>,
+    },
+}
+
+impl FastPath {
+    /// The anchor-reachable node superset — every node a non-anchor node
+    /// element of the fast-pathed pattern can bind to.
+    fn nodes(&self) -> &Arc<BTreeSet<Iid>> {
+        match self {
+            FastPath::FixedEdges { nodes, .. } | FastPath::QuantifiedAdjacency { nodes, .. } => {
+                nodes
+            }
+        }
+    }
 }
 
 fn const_props(
@@ -822,21 +842,31 @@ async fn scan_input_for(
     overlay: Option<&Overlay>,
 ) -> Result<varve_plan::ScanInput, EngineError> {
     Ok(match &spec.kind {
-        varve_plan::SpecKind::Node { labels, iid_point } => varve_plan::ScanInput::Batch(
-            merged_snapshot(
-                state,
-                store,
-                graph,
-                TableKind::Nodes,
-                label_filter(labels),
-                bounds,
-                *iid_point,
-                overlay,
+        varve_plan::SpecKind::Node { labels, iid_point } => {
+            // Anchor keeps its point lookup; every other node element of a
+            // fast-pathed pattern only ever binds to an anchor-reachable
+            // node, so its scan prunes to that set instead of the label scan.
+            let sel = match (iid_point, fast_path) {
+                (Some(iid), _) => crate::scan::IidSel::Point(*iid),
+                (None, Some(fast_path)) => crate::scan::IidSel::Set(Arc::clone(fast_path.nodes())),
+                (None, None) => crate::scan::IidSel::All,
+            };
+            varve_plan::ScanInput::Batch(
+                merged_snapshot(
+                    state,
+                    store,
+                    graph,
+                    TableKind::Nodes,
+                    label_filter(labels),
+                    bounds,
+                    &sel,
+                    overlay,
+                )
+                .await?,
             )
-            .await?,
-        ),
+        }
         varve_plan::SpecKind::Edge { label, .. } => match fast_path {
-            Some(FastPath::FixedEdges(batch)) => varve_plan::ScanInput::Batch(batch.clone()),
+            Some(FastPath::FixedEdges { batch, .. }) => varve_plan::ScanInput::Batch(batch.clone()),
             _ => varve_plan::ScanInput::Batch(
                 merged_snapshot(
                     state,
@@ -845,7 +875,7 @@ async fn scan_input_for(
                     TableKind::Edges,
                     LabelFilter::Single(label),
                     bounds,
-                    None,
+                    &crate::scan::IidSel::All,
                     overlay,
                 )
                 .await?,
@@ -857,7 +887,7 @@ async fn scan_input_for(
             props,
             ..
         } => match fast_path {
-            Some(FastPath::QuantifiedAdjacency(adjacency)) => {
+            Some(FastPath::QuantifiedAdjacency { adjacency, .. }) => {
                 varve_plan::ScanInput::Adjacency(Arc::clone(adjacency))
             }
             _ => {
@@ -1229,6 +1259,16 @@ impl Db {
     pub async fn compact_once(&self) -> Result<CompactionReport, EngineError> {
         self.require_role(NodeRole::Compactor)?;
         self.writer_handle()?.compact_once().await
+    }
+
+    /// One full-sweep compaction job (bulk load → compact → serve): unlike
+    /// [`Db::compact_once`], L0 groups below the standard `log_limit` gate
+    /// are also drained, each job taking its WHOLE group. Loop until the
+    /// report's `jobs` is 0 to leave no full-iid-space L0 trie behind —
+    /// the shape anchored point/set lookups prune best against.
+    pub async fn compact_full_once(&self) -> Result<CompactionReport, EngineError> {
+        self.require_role(NodeRole::Compactor)?;
+        self.writer_handle()?.compact_full_once().await
     }
 
     pub async fn gc_once(&self) -> Result<GcReport, EngineError> {
@@ -1677,6 +1717,7 @@ impl Db {
                     None,
                 )
                 .await?;
+                let nodes = Arc::new(reachable.nodes);
                 let adjacency = varve_plan::EdgeAdjacency::from_entries(
                     reachable.entries.into_iter().map(|e| {
                         (
@@ -1688,7 +1729,10 @@ impl Db {
                         )
                     }),
                 );
-                return Ok(Some(FastPath::QuantifiedAdjacency(Arc::new(adjacency))));
+                return Ok(Some(FastPath::QuantifiedAdjacency {
+                    adjacency: Arc::new(adjacency),
+                    nodes,
+                }));
             }
         }
 
@@ -1782,7 +1826,10 @@ impl Db {
             None,
         )
         .await?;
-        Ok(Some(FastPath::FixedEdges(reachable.batch)))
+        Ok(Some(FastPath::FixedEdges {
+            batch: reachable.batch,
+            nodes: Arc::new(reachable.nodes),
+        }))
     }
 
     /// Report-only capability probe (spec §12, D5): classifies whether the

@@ -358,7 +358,7 @@ mod tests {
     use crate::db::{EngineError, TxReceipt};
     use crate::metrics::EngineMetrics;
     use crate::node::ProgressState;
-    use crate::scan::merged_snapshot;
+    use crate::scan::{merged_snapshot, IidSel};
     use crate::state::{GraphsState, TableKind, DEFAULT_GRAPH};
     use crate::writer::{spawn_writer, Submission, WriterConfig, WriterHandle, WriterState};
     use bytes::Bytes;
@@ -500,7 +500,7 @@ mod tests {
             TableKind::Nodes,
             LabelFilter::Single("P"),
             &now_bounds(),
-            None,
+            &IidSel::All,
             None,
         )
         .await
@@ -551,7 +551,7 @@ mod tests {
             TableKind::Nodes,
             LabelFilter::Single("P"),
             &now_bounds(),
-            None,
+            &IidSel::All,
             None,
         )
         .await
@@ -686,7 +686,7 @@ mod tests {
             TableKind::Nodes,
             LabelFilter::Single("P"),
             &now_bounds(),
-            None,
+            &IidSel::All,
             None,
         )
         .await

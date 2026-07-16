@@ -130,6 +130,31 @@ fn traversal_bulk_mode_reports_progress_in_entities_not_chunks() {
 }
 
 #[test]
+fn traversal_benchmark_supports_post_ingest_compaction() {
+    let source = fs::read_to_string(workspace_file("crates/varve/examples/traversal_bench.rs"))
+        .expect("read traversal benchmark source");
+
+    for required in [
+        // opt-in switch: default stays uncompacted so results remain
+        // comparable to the recorded baseline runs; the 1M evidence stage
+        // selects it explicitly (bulk load → compact → serve).
+        "VARVE_TRAVERSAL_COMPACT",
+        // compaction must drain to idle (jobs == 0) with the FULL sweep —
+        // standard compact_once leaves undersized L0 groups untouched…
+        "compact_full_once(",
+        "jobs == 0",
+        // …and the stage must be timed and reported like every other stage.
+        "compact jobs=",
+    ] {
+        assert!(
+            source.contains(required),
+            "post-ingest compaction stage missing {}",
+            required
+        );
+    }
+}
+
+#[test]
 fn object_store_transaction_benchmark_is_concurrent_and_s3_backed() {
     let source = fs::read_to_string(workspace_file(
         "crates/varve/examples/object_store_tx_bench.rs",
@@ -180,6 +205,7 @@ fn evidence_runner_preserves_raw_outputs_and_reproducibility_metadata() {
         "target/criterion",
         "object_store_tx_bench",
         "VARVE_TRAVERSAL_PEOPLE=1000000",
+        "VARVE_TRAVERSAL_COMPACT=1",
     ] {
         assert!(source.contains(required), "runner missing {required}");
     }
