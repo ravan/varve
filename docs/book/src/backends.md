@@ -1,8 +1,8 @@
 # Backends
 
-Varve speaks to **any S3-API object store** through `object_store::aws` (`crates/varve-storage/
-src/s3.rs`), adapted to Varve's own sovereign `ObjectStore` trait — the engine only ever sees
-`put`/`get`/`get_range`/`list`. Conditional-write (CAS) support is *probed*, never assumed (spec
+Varve speaks to any S3-API object store through `object_store::aws` (`crates/varve-storage/
+src/s3.rs`), adapted to Varve's own `ObjectStore` trait, so the engine only ever sees
+`put`/`get`/`get_range`/`list`. Conditional-write (CAS) support is probed, never assumed (spec
 D5): a 4-step startup probe (`Db::probe_capabilities`) classifies a backend as `Supported`,
 `Unsupported`, or `Inconsistent`, and only a `Supported` verdict is allowed to run the opt-in
 `cas-failover` coordinator mode. See [Failover](ops/failover.md) for what that mode buys you and
@@ -26,13 +26,13 @@ cadence matches `.github/workflows/ci.yml`'s `backend-matrix` (push/PR) and
 | Local FS | n/a | Supported (blanket impl) | n/a (single node) | every push/PR |
 
 Garage and SeaweedFS both fail the probe the same way: a create-if-absent `PUT` against an
-*existing* key succeeds instead of being refused — the precondition is silently ignored rather
+existing key succeeds instead of being refused. The precondition is silently ignored rather
 than enforced, which the probe's four steps (create → create-again-must-refuse →
-swap-current-etag → swap-STALE-must-refuse) are specifically designed to catch. Both assert
-`NotSupported` (the load-bearing negation `cas-failover`'s gate actually checks), not a pinned
+swap-current-etag → swap-STALE-must-refuse) are designed to catch. Both assert
+`NotSupported` (the negation `cas-failover`'s gate actually checks), not a pinned
 `Inconsistent{reason}` string, since backend-specific wording could legitimately change.
 
-The image pins above are the **single source of truth** in `backends.rs`, reproduced here
+The image pins above are the single source of truth in `backends.rs`, reproduced here
 verbatim for reference (do not duplicate the version strings anywhere else):
 
 ```rust
@@ -51,7 +51,7 @@ specific backend names); it skips silently without Docker, so `just check` never
 All five S3-API backends share one config section (`crates/varve-storage/src/s3.rs`); only
 `bucket` is required. The builder starts from `AmazonS3Builder::from_env()` (standard `AWS_*`
 environment variables and the AWS provider chain), so explicit config keys are overrides, not
-requirements — an AWS deployment using ambient credentials needs only `bucket`.
+requirements. An AWS deployment using ambient credentials needs only `bucket`.
 
 ```toml
 [storage]
@@ -79,12 +79,12 @@ for AWS proper, though AWS still accepts path-style requests for backward compat
 
 ## Sovereignty
 
-Plain, unconditional `PUT`/`GET`/`LIST` is **always sufficient** to run Varve in its default
-`designated-writer` mode — no backend capability beyond basic S3-API object storage is ever
+Plain, unconditional `PUT`/`GET`/`LIST` is always sufficient to run Varve in its default
+`designated-writer` mode: no backend capability beyond basic S3-API object storage is
 required, which is why Varve runs identically on a fully sovereign, self-hosted, open-source
 backend (Garage, SeaweedFS, Ceph RGW) as it does on AWS. Conditional-write (CAS) support is
-**strictly optional**: it unlocks the opt-in `cas-failover` coordinator mode, is detected by a
-startup probe rather than assumed, and its absence is never an error for normal operation — a
+strictly optional. It unlocks the opt-in `cas-failover` coordinator mode, is detected by a
+startup probe rather than assumed, and its absence is never an error for normal operation. A
 backend that fails the probe simply cannot run `cas-failover`, and falls back to (or stays on)
 `designated-writer`, enforced by the deployment orchestrator instead of the object store. Varve
 will never make CAS a hard requirement for shipping v1 functionality.

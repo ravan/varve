@@ -1,7 +1,6 @@
 # Getting started (laptop, 5 minutes)
 
-Every example on this page was actually run against this repository to produce the pasted
-output — nothing here is invented.
+Every example on this page was run against this repository to produce the pasted output.
 
 ## Path 1: embedded, from source (works today)
 
@@ -14,8 +13,8 @@ cargo build --release -p varve-cli
 ```
 
 Start an interactive shell against a brand-new local database directory. `--dir` (and `--url`)
-are **global** flags: they must come *before* the subcommand, e.g. `varve --dir ./mydb shell`
-— `varve shell --dir ./mydb` is rejected by the argument parser.
+are global flags: they must come before the subcommand, e.g. `varve --dir ./mydb shell`. The
+form `varve shell --dir ./mydb` is rejected by the argument parser.
 
 ```bash
 cargo run --release -p varve-cli -- --dir ./mydb shell
@@ -42,11 +41,11 @@ varve> MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name;
 +--------+--------+
 ```
 
-Every write echoes `tx <id> @ <system_time>` — that `system_time` is the writer's monotonic
+Every write echoes `tx <id> @ <system_time>`. That `system_time` is the writer's monotonic
 clock, and you'll use it below to demonstrate system-time travel. (Your own timestamps will
 differ; substitute whatever your shell actually prints.)
 
-**Now add a third person with a *retro-dated* valid time** (she was valid starting 2020, even
+**Now add a third person with a retro-dated valid time** (she was valid starting 2020, even
 though we're only recording her now), **look at current state, travel back to a system time
 before she existed, and erase her** (Varve's GDPR hard-delete extension):
 
@@ -79,18 +78,17 @@ tx 3 @ 2026-07-12T12:20:34.576884Z
 varve> :quit
 ```
 
-Notice the `FOR SYSTEM_TIME AS OF` query — timestamped *before* Cleo's `INSERT` — shows only
-Ada and Bob, even though Cleo's *valid* time (2020-01-01) is far earlier still. That's the
-bitemporal distinction in one query: `VALID FROM` controls when a fact was true in the world;
-`FOR SYSTEM_TIME AS OF` controls what Varve *knew* at a given instant. The final
-`DETACH ERASE` is Varve's GDPR extension — it hides the entity immediately and physically
-removes it at the next compaction, unlike a normal `DELETE` which is itself just another
-timestamped layer.
+The `FOR SYSTEM_TIME AS OF` query, timestamped before Cleo's `INSERT`, shows only Ada and Bob,
+even though Cleo's valid time (2020-01-01) is far earlier still. That is the bitemporal
+distinction in one query: `VALID FROM` controls when a fact was true in the world;
+`FOR SYSTEM_TIME AS OF` controls what Varve knew at a given instant. The final `DETACH ERASE`
+is Varve's GDPR extension: it hides the entity immediately and physically removes it at the next
+compaction, unlike a normal `DELETE`, which is itself just another timestamped layer.
 
 ## Path 2: server + CLI in three commands
 
 This spins up a real `varved` server (writer + query + compactor roles, local log and storage
-directories — no object store needed for this walkthrough) and connects to it with the same
+directories, no object store needed for this walkthrough) and connects to it with the same
 `varve` CLI, over HTTP.
 
 **1. Write a minimal `varve.toml`:**
