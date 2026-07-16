@@ -1,6 +1,6 @@
 # Varve Explorer
 
-Varve Explorer is an independently authored, MIT-licensed SvelteKit application for running GQL against Varve. The browser talks only to Explorer's same-origin backend-for-frontend (BFF); the BFF talks to the single Varve target selected by the operator.
+Varve Explorer is a SvelteKit application for running GQL against Varve. The browser talks only to Explorer's same-origin backend-for-frontend (BFF); the BFF talks to the single Varve target selected by the operator.
 
 ## Prerequisites
 
@@ -12,7 +12,7 @@ Varve Explorer is an independently authored, MIT-licensed SvelteKit application 
 Run commands below from the repository root. Install the locked JavaScript dependencies with:
 
 ```bash
-rtk pnpm --dir explore install --frozen-lockfile
+pnpm --dir explore install --frozen-lockfile
 ```
 
 ## Local development with real Varve
@@ -20,7 +20,7 @@ rtk pnpm --dir explore install --frozen-lockfile
 Start the real `varved` binary in one terminal:
 
 ```bash
-rtk pnpm --dir explore run dev:varve
+pnpm --dir explore run dev:varve
 ```
 
 The development configuration runs one node with the writer, query, and compactor roles. It listens on `127.0.0.1:8080`, advertises `http://127.0.0.1:8080`, exports Prometheus metrics, and writes its local log and store beneath `explore/.varve-explorer-dev/`. Stop the process before deleting that directory.
@@ -28,8 +28,8 @@ The development configuration runs one node with the writer, query, and compacto
 In a second terminal, copy the non-secret environment template and start Explorer:
 
 ```bash
-rtk cp explore/.env.example explore/.env
-rtk pnpm --dir explore run dev
+cp explore/.env.example explore/.env
+pnpm --dir explore run dev
 ```
 
 Open the URL printed by Vite. Connect with the development token `varve-explorer-dev-token`. The token belongs in Explorer's connection form, not in `.env`.
@@ -51,13 +51,13 @@ The first statement is a write and is sent to `/v1/tx`; the second is a read and
 Build the deployable SvelteKit Node application:
 
 ```bash
-rtk pnpm --dir explore run build
+pnpm --dir explore run build
 ```
 
 Supply `VARVE_URL` to the running Node process; production startup does not load `explore/.env.example` automatically. For example:
 
 ```bash
-rtk env NODE_ENV=production VARVE_URL=https://varve.internal.example HOST=127.0.0.1 PORT=3000 pnpm --dir explore run start
+env NODE_ENV=production VARVE_URL=https://varve.internal.example HOST=127.0.0.1 PORT=3000 pnpm --dir explore run start
 ```
 
 Put Explorer behind a trusted reverse proxy that terminates browser-facing TLS. Do not expose an HTTP-only production listener to browsers: production session cookies are `Secure`. Restrict direct access to the Node listener and protect the proxy-to-Explorer and Explorer-to-Varve network paths according to the deployment's trust boundary.
@@ -94,19 +94,19 @@ RETURN path, a.name AS from_name, b.name AS to_name
 Run individual checks with:
 
 ```bash
-rtk pnpm --dir explore test
-rtk pnpm --dir explore run check
-rtk pnpm --dir explore run lint
-rtk pnpm --dir explore run format:check
-rtk pnpm --dir explore run build
-rtk pnpm --dir explore run licenses
-rtk pnpm --dir explore licenses list --prod
+pnpm --dir explore test
+pnpm --dir explore run check
+pnpm --dir explore run lint
+pnpm --dir explore run format:check
+pnpm --dir explore run build
+pnpm --dir explore run licenses
+pnpm --dir explore licenses list --prod
 ```
 
 `licenses` is also a pnpm 11 built-in command, so `run licenses` is required to invoke this package's strict license-gate script. `licenses list --prod` is the separate pnpm inventory command. Run the complete package gate with:
 
 ```bash
-rtk pnpm --dir explore run verify
+pnpm --dir explore run verify
 ```
 
 The gate rejects GPL, AGPL, LGPL, SSPL, BUSL, unknown, and any other license outside its explicit allowlist. The sole MPL-2.0 exception is version-pinned indirect Lightning CSS build tooling; it is not a direct runtime dependency. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
@@ -116,11 +116,11 @@ The gate rejects GPL, AGPL, LGPL, SSPL, BUSL, unknown, and any other license out
 Run this flow against the real server and Explorer processes started above, never mocked API routes. Playwright refs such as `<token-ref>` come from the preceding snapshot and vary by page state.
 
 ```bash
-rtk playwright-cli open http://127.0.0.1:5173
-rtk playwright-cli snapshot
-rtk playwright-cli fill <token-ref> "varve-explorer-dev-token"
-rtk playwright-cli click <connect-ref>
-rtk playwright-cli snapshot
+playwright-cli open http://127.0.0.1:5173
+playwright-cli snapshot
+playwright-cli fill <token-ref> "varve-explorer-dev-token"
+playwright-cli click <connect-ref>
+playwright-cli snapshot
 ```
 
 Using fresh refs after each snapshot:
@@ -134,14 +134,11 @@ Using fresh refs after each snapshot:
 7. Inspect diagnostics and close the CLI session:
 
 ```bash
-rtk playwright-cli console
-rtk playwright-cli requests
-rtk playwright-cli cookie-list
-rtk playwright-cli close
+playwright-cli console
+playwright-cli requests
+playwright-cli cookie-list
+playwright-cli close
 ```
 
 The console should have no unexpected errors, and requests, cookies, snapshots, and persistent storage must not expose the bearer token.
 
-## Original work and licensing
-
-Explorer is original work licensed under the MIT License in [LICENSE](LICENSE). The repository path `refs/neo4j-browser` contributed no code, assets, styles, prose, tests, snapshots, names, or algorithms to Explorer. Direct runtime dependency notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -54,7 +54,7 @@ Rust stable (`rust-toolchain.toml`). Common gates:
 
 ```sh
 just check          # cargo fmt --all --check + clippy -D warnings + cargo test --workspace
-just compose-demo   # Slice 9 exit demo: Garage + 1 writer + 2 query nodes over Compose
+just compose-demo   # demo: Garage + 1 writer + 2 query nodes over Compose
 ```
 
 ## Embedded quick start
@@ -214,10 +214,15 @@ curl -sX POST http://127.0.0.1:8081/v1/query \
 ## Compose scale-out demo
 
 `just compose-demo` (`rtk proxy sh scripts/compose_demo.sh`) builds the distroless image,
-brings up pinned Garage + one writer + two query nodes, loads the reduced Slice 6 fixture
+brings up pinned Garage + one writer + two query nodes, loads the reduced fixture
 over HTTP, verifies both query nodes agree under a basis read, decodes an Arrow stream,
 round-trips the `varve` shell and admin surface, and always tears the stack (and volumes)
 down. It prints `=== compose-demo: PASSED ===` on success.
+
+## Acknowledgements
+
+Varve is inspired by [XTDB](https://github.com/xtdb/xtdb), whose bitemporal,
+immutable-log design shaped how Varve models time, transactions, and read bases.
 
 ## License
 
