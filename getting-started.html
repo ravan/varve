@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-e97f12ed.js";
+            window.path_to_searchindex_js = "searchindex-b7ef6f64.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-47ba109b.js"></script>
@@ -175,8 +175,7 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="getting-started-laptop-5-minutes"><a class="header" href="#getting-started-laptop-5-minutes">Getting started (laptop, 5 minutes)</a></h1>
-<p>Every example on this page was actually run against this repository to produce the pasted
-output — nothing here is invented.</p>
+<p>Every example on this page was run against this repository to produce the pasted output.</p>
 <h2 id="path-1-embedded-from-source-works-today"><a class="header" href="#path-1-embedded-from-source-works-today">Path 1: embedded, from source (works today)</a></h2>
 <p>Clone the repository and build the CLI:</p>
 <pre><code class="language-bash">git clone &lt;this-repo-url&gt; varve
@@ -184,8 +183,8 @@ cd varve
 cargo build --release -p varve-cli
 </code></pre>
 <p>Start an interactive shell against a brand-new local database directory. <code>--dir</code> (and <code>--url</code>)
-are <strong>global</strong> flags: they must come <em>before</em> the subcommand, e.g. <code>varve --dir ./mydb shell</code>
-— <code>varve shell --dir ./mydb</code> is rejected by the argument parser.</p>
+are global flags: they must come before the subcommand, e.g. <code>varve --dir ./mydb shell</code>. The
+form <code>varve shell --dir ./mydb</code> is rejected by the argument parser.</p>
 <pre><code class="language-bash">cargo run --release -p varve-cli -- --dir ./mydb shell
 </code></pre>
 <p>You now have a <code>varve&gt;</code> prompt. Statements are buffered until they end with <code>;</code>; type or paste
@@ -205,10 +204,10 @@ varve&gt; MATCH (a:Person)-[:KNOWS]-&gt;(b:Person) RETURN a.name, b.name;
 | Ada    | Bob    |
 +--------+--------+
 </code></pre>
-<p>Every write echoes <code>tx &lt;id&gt; @ &lt;system_time&gt;</code> — that <code>system_time</code> is the writer’s monotonic
+<p>Every write echoes <code>tx &lt;id&gt; @ &lt;system_time&gt;</code>. That <code>system_time</code> is the writer’s monotonic
 clock, and you’ll use it below to demonstrate system-time travel. (Your own timestamps will
 differ; substitute whatever your shell actually prints.)</p>
-<p><strong>Now add a third person with a <em>retro-dated</em> valid time</strong> (she was valid starting 2020, even
+<p><strong>Now add a third person with a retro-dated valid time</strong> (she was valid starting 2020, even
 though we’re only recording her now), <strong>look at current state, travel back to a system time
 before she existed, and erase her</strong> (Varve’s GDPR hard-delete extension):</p>
 <pre><code>varve&gt; INSERT (:Person {_id: 3, name: 'Cleo'}) VALID FROM DATE '2020-01-01';
@@ -238,16 +237,15 @@ tx 3 @ 2026-07-12T12:20:34.576884Z
   labels removed: 1
 varve&gt; :quit
 </code></pre>
-<p>Notice the <code>FOR SYSTEM_TIME AS OF</code> query — timestamped <em>before</em> Cleo’s <code>INSERT</code> — shows only
-Ada and Bob, even though Cleo’s <em>valid</em> time (2020-01-01) is far earlier still. That’s the
-bitemporal distinction in one query: <code>VALID FROM</code> controls when a fact was true in the world;
-<code>FOR SYSTEM_TIME AS OF</code> controls what Varve <em>knew</em> at a given instant. The final
-<code>DETACH ERASE</code> is Varve’s GDPR extension — it hides the entity immediately and physically
-removes it at the next compaction, unlike a normal <code>DELETE</code> which is itself just another
-timestamped layer.</p>
+<p>The <code>FOR SYSTEM_TIME AS OF</code> query, timestamped before Cleo’s <code>INSERT</code>, shows only Ada and Bob,
+even though Cleo’s valid time (2020-01-01) is far earlier still. That is the bitemporal
+distinction in one query: <code>VALID FROM</code> controls when a fact was true in the world;
+<code>FOR SYSTEM_TIME AS OF</code> controls what Varve knew at a given instant. The final <code>DETACH ERASE</code>
+is Varve’s GDPR extension: it hides the entity immediately and physically removes it at the next
+compaction, unlike a normal <code>DELETE</code>, which is itself just another timestamped layer.</p>
 <h2 id="path-2-server--cli-in-three-commands"><a class="header" href="#path-2-server--cli-in-three-commands">Path 2: server + CLI in three commands</a></h2>
 <p>This spins up a real <code>varved</code> server (writer + query + compactor roles, local log and storage
-directories — no object store needed for this walkthrough) and connects to it with the same
+directories, no object store needed for this walkthrough) and connects to it with the same
 <code>varve</code> CLI, over HTTP.</p>
 <p><strong>1. Write a minimal <code>varve.toml</code>:</strong></p>
 <pre><code class="language-toml">[node]

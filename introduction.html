@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-e97f12ed.js";
+            window.path_to_searchindex_js = "searchindex-b7ef6f64.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-47ba109b.js"></script>
@@ -175,46 +175,46 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="introduction"><a class="header" href="#introduction">Introduction</a></h1>
-<p>VarveDB is a <strong>bitemporal property-graph database</strong> written in Rust that speaks <strong>GQL</strong>
-(ISO/IEC 39075), the new ISO graph query language. It runs <em>embedded</em> in a Rust process on a
-laptop with minimal resources, and scales out to a storage/compute-separated deployment —
-one designated writer plus any number of stateless query nodes — over any S3-API-compatible
-object store.</p>
+<p>VarveDB is a bitemporal property-graph database written in Rust that speaks GQL
+(ISO/IEC 39075), the ISO graph query language. It runs embedded in a Rust process on a laptop
+with minimal resources, and it scales out to a storage/compute-separated deployment (one
+designated writer plus any number of stateless query nodes) over any S3-API-compatible object
+store.</p>
 <p>The library crate is <code>varve</code>, the server binary is <code>varved</code>, and the CLI is <code>varve</code>.</p>
-<h2 id="the-sovereignty-stance"><a class="header" href="#the-sovereignty-stance">The sovereignty stance</a></h2>
-<p>Digital sovereignty is a design requirement for Varve, not an afterthought. Varve depends on
-nothing but a filesystem or an S3-API-compatible object store, and is validated against fully
+<h2 id="sovereignty"><a class="header" href="#sovereignty">Sovereignty</a></h2>
+<p>Digital sovereignty is a design requirement for Varve. Varve depends on nothing but a
+filesystem or an S3-API-compatible object store, and it is validated against fully
 open-source, self-hostable backends: <a href="https://garagehq.deuxfleurs.fr/">Garage</a> (AGPLv3),
 <a href="https://docs.ceph.com/en/latest/radosgw/">Ceph RGW</a> (LGPL-2.1), and
 <a href="https://github.com/seaweedfs/seaweedfs">SeaweedFS</a> (Apache-2.0). AWS S3 works too, but it is
-never assumed, and no proprietary cloud service is ever required to run Varve at any scale.</p>
-<p>Concretely, this means Varve’s storage layer speaks only the plain-S3 verbs every
-implementation supports — <code>PUT</code>, <code>GET</code>, <code>LIST</code> — and treats conditional writes
-(compare-and-swap) as an <em>optional</em>, capability-probed accelerator for automated writer
-failover, never a requirement. A designated-writer deployment with no CAS at all works
-identically on every backend; see <a href="architecture.html">Architecture overview</a> and
-<a href="ops/failover.html">Failover</a> for how that split works.</p>
+never assumed, and no proprietary cloud service is required to run Varve at any scale.</p>
+<p>In practice this means Varve’s storage layer speaks only the plain-S3 verbs every
+implementation supports (<code>PUT</code>, <code>GET</code>, <code>LIST</code>) and treats conditional writes (compare-and-swap)
+as an optional, capability-probed accelerator for automated writer failover rather than a
+requirement. A designated-writer deployment with no CAS at all works identically on every
+backend. See <a href="architecture.html">Architecture overview</a> and <a href="ops/failover.html">Failover</a> for how
+that split works.</p>
 <h2 id="why-varve"><a class="header" href="#why-varve">Why “varve”</a></h2>
-<p>A <em>varve</em> is an annual layer of sediment deposited in a lake bed — geologists read time out of
-these layered deposits the way tree rings read a forest’s history, one deposit at a time,
-never disturbing the layers beneath. That is exactly how this database reads history: every
-write is an immutable, timestamped layer; nothing is ever overwritten or rewritten in place;
-and the whole history of the graph is recoverable by reading back through the strata. The
-bitemporal model formalizes two independent time axes — <em>valid time</em> (when a fact was true in
-the world) and <em>system time</em> (when Varve learned about it) — so you can travel along either
-axis independently, correct the past without losing the correction’s own history, and answer
-“what did we believe on this date” as easily as “what do we believe now.”</p>
+<p>A varve is an annual layer of sediment deposited in a lake bed. Geologists read time out of
+these layered deposits much as tree rings record a forest’s history, one deposit at a time,
+without disturbing the layers beneath. This database reads history the same way: every write
+is an immutable, timestamped layer, nothing is overwritten or rewritten in place, and the whole
+history of the graph is recoverable by reading back through the strata. The bitemporal model
+tracks two independent time axes, valid time (when a fact was true in the world) and system
+time (when Varve learned about it), so you can travel along either axis independently, correct
+the past without losing the correction’s own history, and answer “what did we believe on this
+date” as easily as “what do we believe now”.</p>
 <h2 id="where-to-go-next"><a class="header" href="#where-to-go-next">Where to go next</a></h2>
 <ul>
-<li><strong><a href="getting-started.html">Getting started</a></strong> — running Varve embedded from source in five
-minutes, plus a minimal server + CLI setup.</li>
-<li><strong><a href="architecture.html">Architecture overview</a></strong> — the roles, the event model, and the
+<li><a href="getting-started.html">Getting started</a>: running Varve embedded from source in five minutes,
+plus a minimal server and CLI setup.</li>
+<li><a href="architecture.html">Architecture overview</a>: the roles, the event model, and the
 storage/compaction pipeline, condensed from the design spec.</li>
-<li><strong><a href="../../design/2026-07-04-varve-design.html">Design specification</a></strong> — the full, authoritative
-design document this book is derived from.</li>
-<li><strong><a href="../../plans/varve-v1-roadmap.html">v1 implementation roadmap</a></strong> — the slice-by-slice plan
-that built Varve v1.</li>
-<li><strong><a href="../../benchmarks/v1.html">v1 benchmark report</a></strong> — measured performance against the design
+<li><a href="../../design/2026-07-04-varve-design.html">Design specification</a>: the full design document
+this book is derived from.</li>
+<li><a href="../../plans/varve-v1-roadmap.html">v1 implementation roadmap</a>: the slice-by-slice plan that
+built Varve v1.</li>
+<li><a href="../../benchmarks/v1.html">v1 benchmark report</a>: measured performance against the design
 spec’s §13 targets, with reproduction commands for every number.</li>
 </ul>
 

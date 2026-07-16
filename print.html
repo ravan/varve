@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-e97f12ed.js";
+            window.path_to_searchindex_js = "searchindex-b7ef6f64.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-47ba109b.js"></script>
@@ -176,52 +176,51 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="introduction"><a class="header" href="#introduction">Introduction</a></h1>
-<p>VarveDB is a <strong>bitemporal property-graph database</strong> written in Rust that speaks <strong>GQL</strong>
-(ISO/IEC 39075), the new ISO graph query language. It runs <em>embedded</em> in a Rust process on a
-laptop with minimal resources, and scales out to a storage/compute-separated deployment —
-one designated writer plus any number of stateless query nodes — over any S3-API-compatible
-object store.</p>
+<p>VarveDB is a bitemporal property-graph database written in Rust that speaks GQL
+(ISO/IEC 39075), the ISO graph query language. It runs embedded in a Rust process on a laptop
+with minimal resources, and it scales out to a storage/compute-separated deployment (one
+designated writer plus any number of stateless query nodes) over any S3-API-compatible object
+store.</p>
 <p>The library crate is <code>varve</code>, the server binary is <code>varved</code>, and the CLI is <code>varve</code>.</p>
-<h2 id="the-sovereignty-stance"><a class="header" href="#the-sovereignty-stance">The sovereignty stance</a></h2>
-<p>Digital sovereignty is a design requirement for Varve, not an afterthought. Varve depends on
-nothing but a filesystem or an S3-API-compatible object store, and is validated against fully
+<h2 id="sovereignty"><a class="header" href="#sovereignty">Sovereignty</a></h2>
+<p>Digital sovereignty is a design requirement for Varve. Varve depends on nothing but a
+filesystem or an S3-API-compatible object store, and it is validated against fully
 open-source, self-hostable backends: <a href="https://garagehq.deuxfleurs.fr/">Garage</a> (AGPLv3),
 <a href="https://docs.ceph.com/en/latest/radosgw/">Ceph RGW</a> (LGPL-2.1), and
 <a href="https://github.com/seaweedfs/seaweedfs">SeaweedFS</a> (Apache-2.0). AWS S3 works too, but it is
-never assumed, and no proprietary cloud service is ever required to run Varve at any scale.</p>
-<p>Concretely, this means Varve’s storage layer speaks only the plain-S3 verbs every
-implementation supports — <code>PUT</code>, <code>GET</code>, <code>LIST</code> — and treats conditional writes
-(compare-and-swap) as an <em>optional</em>, capability-probed accelerator for automated writer
-failover, never a requirement. A designated-writer deployment with no CAS at all works
-identically on every backend; see <a href="#architecture-overview">Architecture overview</a> and
-<a href="#failover">Failover</a> for how that split works.</p>
+never assumed, and no proprietary cloud service is required to run Varve at any scale.</p>
+<p>In practice this means Varve’s storage layer speaks only the plain-S3 verbs every
+implementation supports (<code>PUT</code>, <code>GET</code>, <code>LIST</code>) and treats conditional writes (compare-and-swap)
+as an optional, capability-probed accelerator for automated writer failover rather than a
+requirement. A designated-writer deployment with no CAS at all works identically on every
+backend. See <a href="#architecture-overview">Architecture overview</a> and <a href="#failover">Failover</a> for how
+that split works.</p>
 <h2 id="why-varve"><a class="header" href="#why-varve">Why “varve”</a></h2>
-<p>A <em>varve</em> is an annual layer of sediment deposited in a lake bed — geologists read time out of
-these layered deposits the way tree rings read a forest’s history, one deposit at a time,
-never disturbing the layers beneath. That is exactly how this database reads history: every
-write is an immutable, timestamped layer; nothing is ever overwritten or rewritten in place;
-and the whole history of the graph is recoverable by reading back through the strata. The
-bitemporal model formalizes two independent time axes — <em>valid time</em> (when a fact was true in
-the world) and <em>system time</em> (when Varve learned about it) — so you can travel along either
-axis independently, correct the past without losing the correction’s own history, and answer
-“what did we believe on this date” as easily as “what do we believe now.”</p>
+<p>A varve is an annual layer of sediment deposited in a lake bed. Geologists read time out of
+these layered deposits much as tree rings record a forest’s history, one deposit at a time,
+without disturbing the layers beneath. This database reads history the same way: every write
+is an immutable, timestamped layer, nothing is overwritten or rewritten in place, and the whole
+history of the graph is recoverable by reading back through the strata. The bitemporal model
+tracks two independent time axes, valid time (when a fact was true in the world) and system
+time (when Varve learned about it), so you can travel along either axis independently, correct
+the past without losing the correction’s own history, and answer “what did we believe on this
+date” as easily as “what do we believe now”.</p>
 <h2 id="where-to-go-next"><a class="header" href="#where-to-go-next">Where to go next</a></h2>
 <ul>
-<li><strong><a href="#getting-started-laptop-5-minutes">Getting started</a></strong> — running Varve embedded from source in five
-minutes, plus a minimal server + CLI setup.</li>
-<li><strong><a href="#architecture-overview">Architecture overview</a></strong> — the roles, the event model, and the
+<li><a href="#getting-started-laptop-5-minutes">Getting started</a>: running Varve embedded from source in five minutes,
+plus a minimal server and CLI setup.</li>
+<li><a href="#architecture-overview">Architecture overview</a>: the roles, the event model, and the
 storage/compaction pipeline, condensed from the design spec.</li>
-<li><strong><a href="../../design/2026-07-04-varve-design.html">Design specification</a></strong> — the full, authoritative
-design document this book is derived from.</li>
-<li><strong><a href="../../plans/varve-v1-roadmap.html">v1 implementation roadmap</a></strong> — the slice-by-slice plan
-that built Varve v1.</li>
-<li><strong><a href="../../benchmarks/v1.html">v1 benchmark report</a></strong> — measured performance against the design
+<li><a href="../../design/2026-07-04-varve-design.html">Design specification</a>: the full design document
+this book is derived from.</li>
+<li><a href="../../plans/varve-v1-roadmap.html">v1 implementation roadmap</a>: the slice-by-slice plan that
+built Varve v1.</li>
+<li><a href="../../benchmarks/v1.html">v1 benchmark report</a>: measured performance against the design
 spec’s §13 targets, with reproduction commands for every number.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="getting-started-laptop-5-minutes"><a class="header" href="#getting-started-laptop-5-minutes">Getting started (laptop, 5 minutes)</a></h1>
-<p>Every example on this page was actually run against this repository to produce the pasted
-output — nothing here is invented.</p>
+<p>Every example on this page was run against this repository to produce the pasted output.</p>
 <h2 id="path-1-embedded-from-source-works-today"><a class="header" href="#path-1-embedded-from-source-works-today">Path 1: embedded, from source (works today)</a></h2>
 <p>Clone the repository and build the CLI:</p>
 <pre><code class="language-bash">git clone &lt;this-repo-url&gt; varve
@@ -229,8 +228,8 @@ cd varve
 cargo build --release -p varve-cli
 </code></pre>
 <p>Start an interactive shell against a brand-new local database directory. <code>--dir</code> (and <code>--url</code>)
-are <strong>global</strong> flags: they must come <em>before</em> the subcommand, e.g. <code>varve --dir ./mydb shell</code>
-— <code>varve shell --dir ./mydb</code> is rejected by the argument parser.</p>
+are global flags: they must come before the subcommand, e.g. <code>varve --dir ./mydb shell</code>. The
+form <code>varve shell --dir ./mydb</code> is rejected by the argument parser.</p>
 <pre><code class="language-bash">cargo run --release -p varve-cli -- --dir ./mydb shell
 </code></pre>
 <p>You now have a <code>varve&gt;</code> prompt. Statements are buffered until they end with <code>;</code>; type or paste
@@ -250,10 +249,10 @@ varve&gt; MATCH (a:Person)-[:KNOWS]-&gt;(b:Person) RETURN a.name, b.name;
 | Ada    | Bob    |
 +--------+--------+
 </code></pre>
-<p>Every write echoes <code>tx &lt;id&gt; @ &lt;system_time&gt;</code> — that <code>system_time</code> is the writer’s monotonic
+<p>Every write echoes <code>tx &lt;id&gt; @ &lt;system_time&gt;</code>. That <code>system_time</code> is the writer’s monotonic
 clock, and you’ll use it below to demonstrate system-time travel. (Your own timestamps will
 differ; substitute whatever your shell actually prints.)</p>
-<p><strong>Now add a third person with a <em>retro-dated</em> valid time</strong> (she was valid starting 2020, even
+<p><strong>Now add a third person with a retro-dated valid time</strong> (she was valid starting 2020, even
 though we’re only recording her now), <strong>look at current state, travel back to a system time
 before she existed, and erase her</strong> (Varve’s GDPR hard-delete extension):</p>
 <pre><code>varve&gt; INSERT (:Person {_id: 3, name: 'Cleo'}) VALID FROM DATE '2020-01-01';
@@ -283,16 +282,15 @@ tx 3 @ 2026-07-12T12:20:34.576884Z
   labels removed: 1
 varve&gt; :quit
 </code></pre>
-<p>Notice the <code>FOR SYSTEM_TIME AS OF</code> query — timestamped <em>before</em> Cleo’s <code>INSERT</code> — shows only
-Ada and Bob, even though Cleo’s <em>valid</em> time (2020-01-01) is far earlier still. That’s the
-bitemporal distinction in one query: <code>VALID FROM</code> controls when a fact was true in the world;
-<code>FOR SYSTEM_TIME AS OF</code> controls what Varve <em>knew</em> at a given instant. The final
-<code>DETACH ERASE</code> is Varve’s GDPR extension — it hides the entity immediately and physically
-removes it at the next compaction, unlike a normal <code>DELETE</code> which is itself just another
-timestamped layer.</p>
+<p>The <code>FOR SYSTEM_TIME AS OF</code> query, timestamped before Cleo’s <code>INSERT</code>, shows only Ada and Bob,
+even though Cleo’s valid time (2020-01-01) is far earlier still. That is the bitemporal
+distinction in one query: <code>VALID FROM</code> controls when a fact was true in the world;
+<code>FOR SYSTEM_TIME AS OF</code> controls what Varve knew at a given instant. The final <code>DETACH ERASE</code>
+is Varve’s GDPR extension: it hides the entity immediately and physically removes it at the next
+compaction, unlike a normal <code>DELETE</code>, which is itself just another timestamped layer.</p>
 <h2 id="path-2-server--cli-in-three-commands"><a class="header" href="#path-2-server--cli-in-three-commands">Path 2: server + CLI in three commands</a></h2>
 <p>This spins up a real <code>varved</code> server (writer + query + compactor roles, local log and storage
-directories — no object store needed for this walkthrough) and connects to it with the same
+directories, no object store needed for this walkthrough) and connects to it with the same
 <code>varve</code> CLI, over HTTP.</p>
 <p><strong>1. Write a minimal <code>varve.toml</code>:</strong></p>
 <pre><code class="language-toml">[node]
@@ -371,64 +369,63 @@ tar xzf varve-1.0.0-&lt;target-triple&gt;.tar.gz
 <h1 id="architecture-overview"><a class="header" href="#architecture-overview">Architecture overview</a></h1>
 <p>This chapter condenses the <a href="../../design/2026-07-04-varve-design.html">design specification</a>
 (§3, §5, §7, §9, §12) into an operational sketch. Read the spec for the full rationale and
-algorithmic detail; this page is a map, not the territory.</p>
+algorithmic detail; this page is a map.</p>
 <h2 id="two-golden-stores-three-roles"><a class="header" href="#two-golden-stores-three-roles">Two golden stores, three roles</a></h2>
 <p>Varve keeps all durable state in exactly two places, and every process is otherwise stateless
 and disposable:</p>
 <ol>
-<li><strong>Transaction log</strong> — an ordered stream of <em>resolved</em> transaction effects.</li>
-<li><strong>Object store</strong> — immutable Arrow files: blocks, tries, and manifests.</li>
+<li><strong>Transaction log</strong>: an ordered stream of resolved transaction effects.</li>
+<li><strong>Object store</strong>: immutable Arrow files (blocks, tries, and manifests).</li>
 </ol>
 <p>Three composable roles run over that shared state:</p>
 <ul>
-<li><strong>Writer</strong> (designated, exactly one) — parses and plans incoming GQL, executes DML against
+<li><strong>Writer</strong> (designated, exactly one): parses and plans incoming GQL, executes DML against
 its own snapshot, resolves the result into effect events, group-commits them to the log,
 applies them to its live in-memory index, and periodically flushes full blocks to the object
 store.</li>
-<li><strong>Query nodes</strong> (zero or more, stateless) — tail the log, apply the same resolved effects to
+<li><strong>Query nodes</strong> (zero or more, stateless): tail the log, apply the same resolved effects to
 their own live index, and serve reads from a combination of that live index and cached
 object-store blocks. Because they apply already-resolved effects rather than re-executing
-GQL, query nodes need no write-side query engine, and replay is deterministic by
-construction.</li>
-<li><strong>Compactor</strong> (any node) — a deterministic, coordination-free background job that merges
+GQL, query nodes need no write-side query engine, and replay is deterministic.</li>
+<li><strong>Compactor</strong> (any node): a deterministic, coordination-free background job that merges
 raw blocks into a compacted trie hierarchy (see below). Any node can run it, and duplicate
-work is merely wasted CPU, never corruption, because compaction output is byte-identical
+work is wasted CPU rather than corruption, because compaction output is byte-identical
 regardless of which node produced it.</li>
 </ul>
 <p>A laptop deployment runs all three roles in one process, with the log as a local file and
-storage as a local directory — zero external dependencies. A server deployment runs one
+storage as a local directory, and no external dependencies. A server deployment runs one
 writer process (its uniqueness enforced by the deployment orchestrator, e.g. a systemd unit or
 a Kubernetes <code>StatefulSet</code> of size 1), N query processes, and a compactor embedded in the
 writer or run standalone.</p>
-<p>Varve needs only <strong>one</strong> log, not the source+replica pair XTDB requires: clients submit GQL to
+<p>Varve needs only one log, not the source+replica pair XTDB requires: clients submit GQL to
 the writer’s own API, and the writer resolves DML against its snapshot at the current log head
-before appending only the <em>resolved</em> effects. Multi-writer log submission (unresolved
+before appending only the resolved effects. Multi-writer log submission (unresolved
 transactions queued by multiple writers) is an explicit v1 non-goal, kept open behind the
 <code>Log</code> interface for a future slice.</p>
 <h2 id="the-event-model"><a class="header" href="#the-event-model">The event model</a></h2>
 <p>Every mutation becomes an immutable <strong>event</strong> with five fields: an internal id <code>_iid</code>
 (<code>xxh3_128(graph, table, _id)</code>, giving uniform key distribution regardless of user id
 patterns), a writer-assigned monotonic <code>_system_from</code>, a user-controllable <code>_valid_from</code> /
-<code>_valid_to</code> pair (defaulting to “now” and “forever” respectively), and an operation —
+<code>_valid_to</code> pair (defaulting to “now” and “forever” respectively), and an operation:
 <code>put(doc)</code>, <code>delete</code>, or <code>erase</code> (Varve’s GDPR hard-delete extension).</p>
-<p>The crucial design choice: <strong><code>_system_to</code> and effective valid ranges are never stored</strong> — they
-are <em>derived</em> at read time by bitemporal resolution (the spec’s Ceiling/Polygon algorithms,
-ported from XTDB). This is what keeps the store append-only: correcting or superseding a fact
-never rewrites an existing event, it only appends a new one, and resolution reconstructs “what
-was true, and when we believed it” by scanning events for one <code>_iid</code> newest-system-time-first.
-Resolution happens in exactly two places — query-time scan and compaction — never at write
-time.</p>
+<p>One design choice does most of the work here: <code>_system_to</code> and effective valid ranges are
+never stored. They are derived at read time by bitemporal resolution (the spec’s
+Ceiling/Polygon algorithms, ported from XTDB). This is what keeps the store append-only.
+Correcting or superseding a fact never rewrites an existing event, it only appends a new one,
+and resolution reconstructs “what was true, and when we believed it” by scanning events for one
+<code>_iid</code> newest-system-time-first. Resolution happens in exactly two places, query-time scan and
+compaction, never at write time.</p>
 <p>Edges carry the same event shape plus <code>_src_iid</code> / <code>_dst_iid</code>, and are persisted under three
 tries (primary <code>_iid</code>, plus forward and reverse adjacency) so both directions of traversal are
 served without a join.</p>
 <h2 id="blocks-tries-and-the-manifest-as-commit-point"><a class="header" href="#blocks-tries-and-the-manifest-as-commit-point">Blocks, tries, and the manifest as commit point</a></h2>
 <p>Each table’s live index is an in-memory hash trie (branch factor 4 over <code>_iid</code> bits) built on
 Arrow array builders. At a configured row threshold or flush timeout, the writer serializes
-that trie’s data to the object store as a new <strong>block</strong>, then writes a <strong>block manifest</strong> —
-and the manifest write is the atomic commit point: a data file that exists without a
-corresponding manifest entry is invisible garbage, safely cleaned up later. Manifests are
-database-wide, recording the log-position watermark up to which their blocks are complete, so
-recovery is just “find the latest manifest, replay the log from its watermark, resume.”</p>
+that trie’s data to the object store as a new <strong>block</strong>, then writes a <strong>block manifest</strong>.
+The manifest write is the atomic commit point: a data file that exists without a corresponding
+manifest entry is invisible garbage, cleaned up later. Manifests are database-wide, recording
+the log-position watermark up to which their blocks are complete, so recovery is just “find the
+latest manifest, replay the log from its watermark, resume”.</p>
 <p>Compaction is a deterministic, coordination-free function of the current trie inventory: raw
 blocks split by recency (current vs. weekly historical buckets), then merge upward through
 levels (four same-partition files at level <em>n</em> become one file at level <em>n+1</em>, partitioned by
@@ -440,48 +437,46 @@ compaction job without coordination.</p>
 byte threshold, writes them to the log as a single append or object, and then acknowledges all
 of them together. This amortizes log-backend latency (a PUT to an object-store log, an fsync
 to a local log) across a batch, so commit latency is roughly “backend write latency plus
-window,” while throughput scales with batch size rather than per-transaction overhead.</p>
+window”, while throughput scales with batch size rather than per-transaction overhead.</p>
 <h2 id="epoch-fencing-and-coordination"><a class="header" href="#epoch-fencing-and-coordination">Epoch fencing and coordination</a></h2>
 <p>Log positions are <code>(epoch, offset)</code> pairs, with the epoch in the high bits so packed positions
 still sort correctly. In the default <strong>designated-writer</strong> mode, exactly one writer per
 database is enforced by the deployment itself, and its identity is published in the object
-store as a plain, unconditional <code>PUT</code> — no conditional-write semantics required anywhere in
-this mode, which is why it works identically on every S3-API backend, sovereign or not.
+store as a plain, unconditional <code>PUT</code>, with no conditional-write semantics required anywhere in
+this mode. That is why it works identically on every S3-API backend, sovereign or not.
 <strong>CAS failover</strong> is an opt-in mode, gated by a startup capability probe against the backend:
 only backends that pass the probe (verified conditional-PUT semantics, including the
 versioned-bucket edge case) are allowed to run it. Standby writers race a lease object; the
 winner increments the log epoch, which fences the old writer’s appends by making them visible
 as stale. If a backend fails the probe, Varve refuses <code>cas-failover</code> mode outright with an
-error naming the missing capability, rather than silently degrading — see
+error naming the missing capability, rather than silently degrading. See
 <a href="#failover">Failover</a> for the operational detail and <a href="#backends">Backends</a> for the
 per-backend probe results.</p>
 <h2 id="determinism-end-to-end"><a class="header" href="#determinism-end-to-end">Determinism, end to end</a></h2>
-<p>Determinism is a load-bearing property, not an incidental nicety: query nodes apply the
-writer’s resolved effects rather than re-executing GQL, so every node reaches byte-identical
-state from the same log prefix; compaction output is byte-identical regardless of which node
-produced it, so duplicate compaction work is wasted CPU rather than a correctness hazard. This
-is what lets Varve scale reads horizontally and run compaction opportunistically on any node
+<p>Determinism is what lets Varve scale reads and run compaction opportunistically. Query nodes
+apply the writer’s resolved effects rather than re-executing GQL, so every node reaches
+byte-identical state from the same log prefix. Compaction output is byte-identical regardless
+of which node produced it, so duplicate compaction work is wasted CPU rather than a correctness
+hazard. Together these let Varve scale reads horizontally and run compaction on any node
 without a coordination protocol.</p>
 <h2 id="where-the-numbers-live"><a class="header" href="#where-the-numbers-live">Where the numbers live</a></h2>
-<p>This page deliberately carries no performance figures. See the
+<p>This page carries no performance figures. See the
 <a href="../../benchmarks/v1.html">v1 benchmark report</a> for measured throughput and latency against the
 design spec’s §13 targets, with the exact command that reproduces each number.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="gql-reference"><a class="header" href="#gql-reference">GQL reference</a></h1>
-<p>Varve implements the <strong>practical core</strong> of GQL (ISO/IEC 39075:2024) described in the
+<p>Varve implements the practical core of GQL (ISO/IEC 39075:2024) described in the
 <a href="../../design/2026-07-04-varve-design.html">design specification</a> §8: an openCypher-flavored
 subset covering pattern matching, mutation, temporal travel, and the usual read-query pipeline
 (<code>FILTER</code>/<code>LET</code>/<code>FOR</code>/<code>ORDER BY</code>/<code>UNION</code>/aggregation). See <a href="#conformance-and-deviations">Deviations</a> for what
-is deliberately out of scope, and <a href="#bitemporal-queries">Bitemporal queries</a> for <code>FOR VALID_TIME</code> /
-<code>FOR SYSTEM_TIME</code>.</p>
-<p>Every example below is copied <strong>verbatim</strong> from one of two verified sources — never invented —
-and is confirmed to parse on this exact commit:</p>
+is out of scope, and <a href="#bitemporal-queries">Bitemporal queries</a> for <code>FOR VALID_TIME</code> / <code>FOR SYSTEM_TIME</code>.</p>
+<p>Every example below is copied verbatim from one of two verified sources and parses on this exact
+commit:</p>
 <ul>
-<li><code>crates/varve-gql/src/parser.rs</code>’s own test suite (<code>cargo test -p varve-gql --lib</code>: <strong>65
-passed, 0 failed</strong>), for examples marked “parser test”.</li>
-<li><code>crates/varve/examples/gql_tour.rs</code>, freshly executed end to end (<code>cargo run --release --example gql_tour -p varve</code>) against a real in-memory <code>Db</code> while writing this page, for
-examples marked “gql_tour”. Its full source and captured output are both worth reading start
-to end for a single coherent walkthrough.</li>
+<li><code>crates/varve-gql/src/parser.rs</code>’s own test suite (<code>cargo test -p varve-gql --lib</code>: 65
+passed, 0 failed), for examples marked “parser test”.</li>
+<li><code>crates/varve/examples/gql_tour.rs</code>, run end to end (<code>cargo run --release --example gql_tour -p varve</code>) against a real in-memory <code>Db</code>, for examples marked “gql_tour”. Its full source and
+captured output read start to end as a single coherent walkthrough.</li>
 </ul>
 <h2 id="insert"><a class="header" href="#insert">INSERT</a></h2>
 <p>Create nodes and edges. A bare node needs at least a label, a property, or an outgoing/incoming
@@ -490,15 +485,15 @@ hop; edges always require a label (see <a href="#conformance-and-deviations">Dev
        (:Person {_id: 2, name: 'Bob', age: 41, city: 'Paris'}),
        (:Person {_id: 3, name: 'Cy', age: 36, city: 'London'})
 </code></pre>
-<p><em>(gql_tour — seeds the tour’s three people)</em></p>
+<p><em>(gql_tour: seeds the tour’s three people)</em></p>
 <p><code>MATCH … INSERT</code> binds existing nodes and inserts an edge between them:</p>
 <pre><code class="language-gql">MATCH (a:Person {_id: 1}), (b:Person {_id: 2}) INSERT (a)-[:KNOWS]-&gt;(b)
 </code></pre>
 <p><em>(gql_tour)</em></p>
-<p><code>INSERT</code> also accepts <code>VALID FROM</code>/<code>VALID TO</code> to backdate or bound a fact’s valid-time range —
-see <a href="#bitemporal-queries">Bitemporal queries</a>.</p>
+<p><code>INSERT</code> also accepts <code>VALID FROM</code>/<code>VALID TO</code> to backdate or bound a fact’s valid-time range.
+See <a href="#bitemporal-queries">Bitemporal queries</a>.</p>
 <h2 id="match"><a class="header" href="#match">MATCH</a></h2>
-<p>Binds one or more comma-separated <strong>linear</strong> paths (see <a href="#conformance-and-deviations">Deviations</a> for what
+<p>Binds one or more comma-separated linear paths (see <a href="#conformance-and-deviations">Deviations</a> for what
 “linear” excludes) and an optional <code>WHERE</code>:</p>
 <pre><code class="language-gql">MATCH (a:Person)-[:KNOWS]-&gt;(b:Person) RETURN a.name, b.name
 </code></pre>
@@ -510,7 +505,7 @@ OPTIONAL MATCH (p)-[:MENTORS]-&gt;(mentor:Person)
 RETURN p.name AS person, mentor.name AS mentor
 ORDER BY person ASC
 </code></pre>
-<p><em>(gql_tour — Ada/Bob/Cy all have no mentor yet, so <code>mentor</code> is <code>NULL</code> for every row, and every
+<p><em>(gql_tour: Ada/Bob/Cy all have no mentor yet, so <code>mentor</code> is <code>NULL</code> for every row, and every
 row still appears)</em></p>
 <h2 id="where"><a class="header" href="#where">WHERE</a></h2>
 <p>Filters a <code>MATCH</code>’s bindings by a boolean expression; supports parameters (<code>$name</code>):</p>
@@ -527,7 +522,7 @@ LET name = b.name
 FOR friend IN [b]
 RETURN name AS n, friend
 </code></pre>
-<p><em>(parser test — exercises FILTER, LET, and pipeline FOR together)</em></p>
+<p><em>(parser test: exercises FILTER, LET, and pipeline FOR together)</em></p>
 <p><code>RETURN</code> itself supports <code>DISTINCT</code>, <code>ORDER BY &lt;expr&gt; [ASC|DESC]</code> (comma-separated, mixed
 directions), and <code>SKIP</code>/<code>LIMIT</code>:</p>
 <pre><code class="language-gql">MATCH (n:Person)
@@ -565,7 +560,7 @@ call is a plain projection.</p>
 RETURN p.city AS city, count(*) AS people
 ORDER BY city ASC
 </code></pre>
-<p><em>(gql_tour — output: <code>London | 2</code>, <code>Paris | 1</code>)</em></p>
+<p><em>(gql_tour: output <code>London | 2</code>, <code>Paris | 1</code>)</em></p>
 <h2 id="set"><a class="header" href="#set">SET</a></h2>
 <p>Assigns a property or adds a label to an already-bound variable (both forms may appear in one
 comma-separated <code>SET</code>):</p>
@@ -578,7 +573,7 @@ comma-separated <code>SET</code>):</p>
 </code></pre>
 <p><em>(gql_tour)</em></p>
 <h2 id="delete-detach"><a class="header" href="#delete-detach">DELETE [DETACH]</a></h2>
-<p>Soft-deletes matched nodes/edges — a normal bitemporal tombstone, current-state-only (no <code>FOR</code>
+<p>Soft-deletes matched nodes/edges: a normal bitemporal tombstone, current-state-only (no <code>FOR</code>
 clause is accepted on a <code>DELETE</code>; see <a href="#bitemporal-queries">Bitemporal queries</a>):</p>
 <pre><code class="language-gql">MATCH (p:Person) WHERE p.name = 'Ada' DELETE p
 </code></pre>
@@ -589,20 +584,20 @@ clause is accepted on a <code>DELETE</code>; see <a href="#bitemporal-queries">B
 <p><em>(parser test)</em></p>
 <h2 id="erase-detach"><a class="header" href="#erase-detach">ERASE [DETACH]</a></h2>
 <p>Varve’s GDPR hard-delete extension (not part of standard GQL): erases a node’s history at
-<em>every</em> system-time and valid-time instant, not just from now on. See
+every system-time and valid-time instant, not just from now on. See
 <a href="#bitemporal-queries">Bitemporal queries</a> for the full DELETE-vs-ERASE contrast and the tests that prove
 bytes are physically gone after compaction + GC.</p>
 <pre><code class="language-gql">MATCH (n:Person) ERASE n
 </code></pre>
-<p><em>(parser test — fails with <code>StillConnected</code> if <code>n</code> still has incident edges; use <code>DETACH ERASE</code>)</em></p>
+<p><em>(parser test: fails with <code>StillConnected</code> if <code>n</code> still has incident edges; use <code>DETACH ERASE</code>)</em></p>
 <pre><code class="language-gql">MATCH (p:Person {_id: 1}) DETACH ERASE p
 </code></pre>
-<p><em>(gql_tour — after this, even a <code>FOR SYSTEM_TIME AS OF</code> query timestamped before the erase
+<p><em>(gql_tour: after this, even a <code>FOR SYSTEM_TIME AS OF</code> query timestamped before the erase
 returns zero rows for this entity, confirmed by the tour’s own printed
 <code>history after erase visible rows: 0</code>)</em></p>
 <h2 id="create-graph--drop-graph"><a class="header" href="#create-graph--drop-graph">CREATE GRAPH / DROP GRAPH</a></h2>
 <p>Catalog statements; a program may not mix catalog statements with data statements (<code>INSERT</code>,
-<code>MATCH</code>, mutations) in the same transaction — see <a href="#conformance-and-deviations">Deviations</a>.</p>
+<code>MATCH</code>, mutations) in the same transaction (see <a href="#conformance-and-deviations">Deviations</a>).</p>
 <pre><code class="language-gql">CREATE GRAPH people
 </code></pre>
 <p><em>(parser test; also <code>gql_tour</code>’s first statement: <code>CREATE GRAPH tour</code>)</em></p>
@@ -614,17 +609,17 @@ returns zero rows for this entity, confirmed by the tour’s own printed
 program:</p>
 <pre><code class="language-gql">CREATE GRAPH g; USE g; MATCH (n) RETURN n; DROP GRAPH g;
 </code></pre>
-<p><em>(parser test, <code>parse_program</code> — this parses as shown, but catalog and data statements cannot
+<p><em>(parser test, <code>parse_program</code>: this parses as shown, but catalog and data statements cannot
 share one transaction at execute time (see <a href="#conformance-and-deviations">Deviations</a>), so in practice this
 must be run as three separate transactions: <code>CREATE GRAPH g;</code>, then <code>USE g; MATCH (n) RETURN n;</code>, then <code>DROP GRAPH g;</code>)</em></p>
 <h2 id="parameters"><a class="header" href="#parameters">Parameters</a></h2>
 <p><code>$name</code> placeholders bind to a caller-supplied parameter map (see <code>WHERE</code>, above, for a live
-example) — this is how the HTTP API’s <code>params</code> field and the CLI’s JSONL import both pass
+example). This is how the HTTP API’s <code>params</code> field and the CLI’s JSONL import both pass
 values without string-building GQL.</p>
 <h2 id="case"><a class="header" href="#case">CASE</a></h2>
 <pre><code class="language-gql">CASE x.kind WHEN 'a' THEN 1 ELSE 2 END
 </code></pre>
-<p><em>(parser test, as one expression inside a <code>RETURN</code> list — see <code>CAST</code>, below, for the full line)</em></p>
+<p><em>(parser test, as one expression inside a <code>RETURN</code> list; see <code>CAST</code> below for the full line)</em></p>
 <h2 id="exists"><a class="header" href="#exists">EXISTS</a></h2>
 <p>A boolean subquery: true iff the nested pattern has at least one match for the outer row’s
 bindings.</p>
@@ -651,18 +646,18 @@ RETURN $param, [1, x.y],
 <a href="../../design/2026-07-04-varve-design.html">design specification</a> §3/§8 (Ceiling/Polygon
 resolution, ported from XTDB):</p>
 <ul>
-<li><strong>Valid time</strong> — when a fact was true <em>in the world</em>. User-controlled via <code>VALID FROM</code>/
+<li><strong>Valid time</strong>: when a fact was true in the world. User-controlled via <code>VALID FROM</code>/
 <code>VALID TO</code> on <code>INSERT</code>; defaults to “now” through “forever” (open-ended) if omitted.</li>
-<li><strong>System time</strong> — when Varve <em>learned</em> the fact. Writer-assigned, monotonic, never
+<li><strong>System time</strong>: when Varve learned the fact. Writer-assigned, monotonic, never
 user-settable; every mutation gets the writer’s current system time as its <code>_system_from</code>.</li>
 </ul>
 <p>A query’s temporal position on each axis is set independently with <code>FOR VALID_TIME …</code> and
-<code>FOR SYSTEM_TIME …</code>, each accepted <strong>at most once</strong> per query (a duplicate axis is a parse
-error: <code>"duplicate ..."</code>). Omitting a <code>FOR</code> clause defaults to <code>AS OF now</code> on both axes — i.e.
-plain <code>MATCH</code> without any <code>FOR</code> clause is exactly <code>FOR VALID_TIME AS OF now FOR SYSTEM_TIME AS OF now</code>, current state as currently known.</p>
+<code>FOR SYSTEM_TIME …</code>, each accepted at most once per query (a duplicate axis is a parse
+error: <code>"duplicate ..."</code>). Omitting a <code>FOR</code> clause defaults to <code>AS OF now</code> on both axes: plain
+<code>MATCH</code> without any <code>FOR</code> clause is exactly <code>FOR VALID_TIME AS OF now FOR SYSTEM_TIME AS OF now</code>, current state as currently known.</p>
 <h2 id="forms"><a class="header" href="#forms">Forms</a></h2>
 <p>Each axis independently accepts one of four forms (all four verified against
-<code>crates/varve-gql/src/parser.rs</code>’s own passing test suite — <code>cargo test -p varve-gql --lib</code>:
+<code>crates/varve-gql/src/parser.rs</code>’s passing test suite, <code>cargo test -p varve-gql --lib</code>:
 65 passed):</p>
 <div class="table-wrapper">
 <table>
@@ -689,25 +684,25 @@ MATCH (p:Person) RETURN p.name
 MATCH (p:Person) RETURN p.name
 </code></pre>
 <p><em>(parser test)</em></p>
-<p>System-time travel — “what did we believe at this instant” — freshly exercised end to end by
-<code>cargo run --release --example gql_tour -p varve</code> while writing this page:</p>
+<p>System-time travel (“what did we believe at this instant”), exercised end to end by
+<code>cargo run --release --example gql_tour -p varve</code>:</p>
 <pre><code class="language-gql">FOR SYSTEM_TIME AS OF TIMESTAMP '2026-07-12T12:20:28.657968Z'
 MATCH (p:Person) RETURN p._id, p.name ORDER BY p._id
 </code></pre>
-<p><em>(getting-started.md’s live transcript — a person inserted after this timestamp is correctly
+<p><em>(getting-started.md’s live transcript: a person inserted after this timestamp is correctly
 absent from the result, while an earlier-valid-time-but-later-inserted person is also absent,
 because system time governs “what Varve knew then”, independent of valid time)</em></p>
-<p><code>DELETE</code>/<code>MATCH … INSERT</code>/<code>DETACH DELETE</code> all read <strong>current state only</strong> — a <code>FOR</code> clause on
+<p><code>DELETE</code>/<code>MATCH … INSERT</code>/<code>DETACH DELETE</code> all read current state only; a <code>FOR</code> clause on
 any of them is a parse error (“DELETE reads current state - temporal clauses not supported” /
 “MATCH … INSERT reads current state - temporal clauses not supported”). Retroactive/as-of
 mutation is out of scope for v1.</p>
 <h2 id="insert--valid-from--valid-to"><a class="header" href="#insert--valid-from--valid-to"><code>INSERT … VALID FROM</code> / <code>VALID TO</code></a></h2>
 <pre><code class="language-gql">INSERT (:P {_id: 1}) VALID FROM DATE '2020-01-01' TO DATE '2021-01-01'
 </code></pre>
-<p><em>(parser test — <code>VALID FROM</code> must be strictly earlier than <code>VALID TO</code> when both are given)</em></p>
+<p><em>(parser test: <code>VALID FROM</code> must be strictly earlier than <code>VALID TO</code> when both are given)</em></p>
 <pre><code class="language-gql">INSERT (:P {_id: 1}) VALID TO DATE '2021-01-01'
 </code></pre>
-<p><em>(parser test — <code>VALID FROM</code> defaults to “now” when omitted)</em></p>
+<p><em>(parser test: <code>VALID FROM</code> defaults to “now” when omitted)</em></p>
 <p>A retro-dated insert with no upper bound (defaults to “forever”), exercised live in
 <a href="#getting-started-laptop-5-minutes">Getting started</a>:</p>
 <pre><code class="language-gql">INSERT (:Person {_id: 3, name: 'Cleo'}) VALID FROM DATE '2020-01-01'
@@ -719,62 +714,61 @@ mutation is out of scope for v1.</p>
 <h2 id="temporal-functions"><a class="header" href="#temporal-functions">Temporal functions</a></h2>
 <p><code>valid_from(var)</code>, <code>valid_to(var)</code>, and <code>system_from(var)</code> project the bound-in-time fields of
 a matched variable in a <code>RETURN</code> (backed by DataFusion columns <code>_valid_from</code>/<code>_valid_to</code>/
-<code>_system_from</code> — <code>crates/varve-plan/src/functions.rs</code>):</p>
+<code>_system_from</code>, <code>crates/varve-plan/src/functions.rs</code>):</p>
 <pre><code class="language-gql">MATCH (p:Person) RETURN valid_from(p) AS since, valid_to(p), system_from(p)
 </code></pre>
 <p><em>(parser test)</em></p>
 <p>There is no <code>system_to()</code>: per the <a href="#architecture-overview">architecture overview</a>, effective
-system-time upper bounds are never stored — they are derived at read time by scanning newer
+system-time upper bounds are never stored; they are derived at read time by scanning newer
 events for the same internal id, never persisted as their own field.</p>
 <h2 id="erase-vs-delete-gdpr-semantics"><a class="header" href="#erase-vs-delete-gdpr-semantics"><code>ERASE</code> vs <code>DELETE</code>: GDPR semantics</a></h2>
 <p><code>DELETE</code> (and <code>DETACH DELETE</code>) is an ordinary bitemporal tombstone: the entity disappears from
-<em>current</em> state, but every historical <code>FOR SYSTEM_TIME AS OF &lt;before-the-delete&gt;</code> query still
-sees it, exactly as any other superseded fact. Nothing is ever physically removed by <code>DELETE</code>
+current state, but every historical <code>FOR SYSTEM_TIME AS OF &lt;before-the-delete&gt;</code> query still
+sees it, exactly as any other superseded fact. Nothing is physically removed by <code>DELETE</code>
 alone.</p>
-<p><code>ERASE</code> (and <code>DETACH ERASE</code>) is Varve’s GDPR <strong>hard-delete extension</strong> — not part of standard
-GQL — and is fundamentally different: it hides the entity’s entire history at <em>every</em> system-time
-instant, not just from now on, and its underlying property/label bytes are physically removed
-from every stored object once compaction and garbage collection have run. The following tests
-(all currently green — <code>cargo test -p varve --test erase</code> and <code>cargo test -p varve --test gdpr_gc</code>, run while writing this page) are the load-bearing proof, cited here <strong>by exact test
-name</strong> so the claims can be checked directly against the source:</p>
+<p><code>ERASE</code> (and <code>DETACH ERASE</code>) is Varve’s GDPR hard-delete extension, not part of standard GQL,
+and behaves differently: it hides the entity’s entire history at every system-time instant, not
+just from now on, and its underlying property/label bytes are physically removed from every
+stored object once compaction and garbage collection have run. The following tests
+(<code>cargo test -p varve --test erase</code> and <code>cargo test -p varve --test gdpr_gc</code>) back these claims,
+cited by exact test name so they can be checked directly against the source:</p>
 <div class="table-wrapper">
 <table>
 <thead>
 <tr><th>Test (file)</th><th>Proves</th></tr>
 </thead>
 <tbody>
-<tr><td><code>erase_hides_history_at_every_system_time</code> (<code>erase.rs</code>)</td><td>An erased entity is invisible even to a <code>FOR SYSTEM_TIME AS OF</code> query timestamped <em>before</em> the erase — a deliberate GDPR choice, not a time-travel bug.</td></tr>
+<tr><td><code>erase_hides_history_at_every_system_time</code> (<code>erase.rs</code>)</td><td>An erased entity is invisible even to a <code>FOR SYSTEM_TIME AS OF</code> query timestamped before the erase, a deliberate GDPR choice rather than a time-travel bug.</td></tr>
 <tr><td><code>erase_connected_requires_detach</code> (<code>erase.rs</code>)</td><td>A plain <code>ERASE</code> on a node with incident edges fails with <code>EngineError::StillConnected</code> rather than silently orphaning edges; <code>DETACH ERASE</code> is required.</td></tr>
 <tr><td><code>detach_erase_erases_incident_edges</code> (<code>erase.rs</code>)</td><td><code>DETACH ERASE</code> also erases the node’s incident edges, not just the node itself.</td></tr>
 <tr><td><code>erase_then_reinsert_same_id_is_fresh_entity</code> (<code>erase.rs</code>)</td><td>Re-inserting the same <code>_id</code> after an erase starts a genuinely fresh entity, uncontaminated by the erased history.</td></tr>
 <tr><td><code>erased_property_bytes_absent_after_compaction_and_gc</code> (<code>gdpr_gc.rs</code>, Task 2)</td><td>After compaction + GC, an erased entity’s property bytes are absent from the compacted store, not merely hidden by a filter.</td></tr>
 <tr><td><code>post_erase_reinsert_survives_compaction</code> (<code>gdpr_gc.rs</code>, Task 2)</td><td>A re-inserted-after-erase entity survives a subsequent compaction pass correctly (the erase doesn’t corrupt later history for the same id).</td></tr>
-<tr><td><code>erased_bytes_absent_from_every_stored_object_and_log_segment</code> (<code>gdpr_gc.rs</code>, Task 2)</td><td>LOCAL-profile whole-disk proof: scans <strong>every</strong> stored byte — every log segment and every store object on disk — and asserts the erased entity’s property values appear in none of them.</td></tr>
+<tr><td><code>erased_bytes_absent_from_every_stored_object_and_log_segment</code> (<code>gdpr_gc.rs</code>, Task 2)</td><td>LOCAL-profile whole-disk proof: scans every stored byte (every log segment and every store object on disk) and asserts the erased entity’s property values appear in none of them.</td></tr>
 <tr><td><code>erased_bytes_absent_from_every_raw_object_on_the_object_store_log_profile</code> (<code>gdpr_gc.rs</code>, Task 3)</td><td>Same proof against the object-store-log profile: lists and GETs every raw <code>v1/</code> key in the object store directly (not through the engine’s own read path), so the check cannot be fooled by a caching or indexing bug.</td></tr>
-<tr><td><code>detach_erase_scrubs_edge_property_bytes_too</code> (<code>gdpr_gc.rs</code>, Task 2)</td><td><code>DETACH ERASE</code> scrubs edge/adjacency property bytes as thoroughly as node bytes — the edge-side GDPR proof.</td></tr>
+<tr><td><code>detach_erase_scrubs_edge_property_bytes_too</code> (<code>gdpr_gc.rs</code>, Task 2)</td><td><code>DETACH ERASE</code> scrubs edge/adjacency property bytes as thoroughly as node bytes; the edge-side GDPR proof.</td></tr>
 </tbody>
 </table>
 </div>
-<p>In short: reach for <code>DELETE</code> for ordinary “this is no longer true” business logic (history stays
-auditable); reach for <code>ERASE</code>/<code>DETACH ERASE</code> only when a legal erasure obligation requires the
-data to become genuinely unrecoverable after the next compaction + GC cycle.</p>
+<p>Reach for <code>DELETE</code> for ordinary “this is no longer true” business logic (history stays
+auditable). Reach for <code>ERASE</code>/<code>DETACH ERASE</code> only when a legal erasure obligation requires the
+data to become unrecoverable after the next compaction + GC cycle.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="conformance-and-deviations"><a class="header" href="#conformance-and-deviations">Conformance and deviations</a></h1>
-<p>Varve implements a <strong>practical core</strong> of GQL/openCypher (design spec §8), not the full ISO
-standard. This page is an honest accounting of where v1 deviates, sourced directly from the
-parser and engine (never from memory), plus the current standing of the two conformance oracles
-the project runs against: an adapted openCypher TCK, and a differential check against the
-official GQL ANTLR grammar.</p>
+<p>Varve implements a practical core of GQL/openCypher (design spec §8), not the full ISO
+standard. This page records where v1 deviates, sourced from the parser and engine, plus the
+current standing of the two conformance oracles the project runs against: an adapted openCypher
+TCK, and a differential check against the official GQL ANTLR grammar.</p>
 <h2 id="v1-deviations"><a class="header" href="#v1-deviations">v1 deviations</a></h2>
 <ul>
 <li><strong>Edge labels are required.</strong> <code>crates/varve-gql/src/parser.rs</code>’s edge-pattern parser calls
-<code>self.ident("edge label")</code> unconditionally — <code>-[]-&gt;</code>  with no label is a parse error. Cypher
+<code>self.ident("edge label")</code> unconditionally, so <code>-[]-&gt;</code> with no label is a parse error. Cypher
 allows unlabeled edges; Varve does not.</li>
-<li><strong>Each path pattern in a <code>MATCH</code> must be a single linear chain</strong> — a start node followed by
+<li><strong>Each path pattern in a <code>MATCH</code> must be a single linear chain</strong>: a start node followed by
 zero or more <code>(edge, node)</code> hops, never a branching or star-shaped pattern within one path.
 Multiple such linear paths, comma-separated, are supported in one <code>MATCH</code> and share variables
 across them (e.g. <code>MATCH (a:Person {_id: 1}), (b:Person {_id: 2})</code> from
-<a href="#insert">the GQL reference</a>) — the restriction is on the <em>shape</em> of one path, not
+<a href="#insert">the GQL reference</a>). The restriction is on the shape of one path, not
 on how many paths a <code>MATCH</code> may hold.</li>
 <li><strong>Quantified edges cannot carry a group variable.</strong> <code>(a)-[r*1..3]-&gt;(b)</code> is rejected: “edge
 variables on quantified edges (group variables) are not supported” (<code>parser.rs</code>). Bare
@@ -783,32 +777,32 @@ quantifiers without a variable (<code>(a)-[*1..3]-&gt;(b)</code>) are fine.</li>
 <code>CREATE GRAPH</code>/<code>DROP GRAPH</code> statement and any data statement (<code>INSERT</code>, <code>MATCH</code>, a mutation)
 is rejected at resolve time: <code>EngineError::Unsupported("mixing catalog and data statements in one transaction")</code> (<code>crates/varve-engine/src/writer.rs</code>). Issue catalog and data changes as
 separate transactions.</li>
-<li><strong>Multi-label <code>MATCH</code> limits.</strong> <code>(n:A:B)</code> (AND — match all labels) and <code>(n:A|B)</code> (OR — match
+<li><strong>Multi-label <code>MATCH</code> limits.</strong> <code>(n:A:B)</code> (AND, match all labels) and <code>(n:A|B)</code> (OR, match
 any label) are both supported, but they cannot be mixed in one label expression, and label
 negation (<code>!A</code>) is not supported at all: any of these hits <code>"label expression nesting post-v1"</code> (<code>parser.rs</code>).</li>
 <li><strong><code>max_path_depth</code> caps unbounded quantifiers.</strong> An unbounded quantifier (<code>*</code> or <code>{m,}</code>) on a
-path hop is lowered to this configured cap rather than truly unbounded traversal — default
+path hop is lowered to this configured cap rather than truly unbounded traversal; default
 <strong>10</strong>, tunable via <code>[query] max_path_depth</code> (<code>crates/varve-engine/src/db.rs</code>).</li>
 <li><strong>The full 59-keyword reserved-word list</strong> (<code>crates/varve-gql/src/token.rs</code>) can never be used
 as a bare identifier (property/label/variable name) without becoming a keyword token: <code>INSERT, MATCH, WHERE, RETURN, AS, TRUE, FALSE, NULL, FOR, VALID_TIME, SYSTEM_TIME, OF, ALL, FROM, TO, BETWEEN, AND, VALID, DELETE, TIMESTAMP, DATE, DETACH, NOT, OR, XOR, IS, CASE, WHEN, THEN, ELSE, END, EXISTS, CAST, IN, STARTS, ENDS, WITH, CONTAINS, OPTIONAL, FILTER, LET, SET, REMOVE, ERASE, UNION, DISTINCT, ORDER, BY, ASC, ASCENDING, DESC, DESCENDING, SKIP, LIMIT, OFFSET, CREATE, DROP, GRAPH, USE</code>. (Keywords are case-insensitive; matching is done on the uppercased token.)</li>
-<li><strong><code>DELETE</code>/<code>DETACH DELETE</code>/<code>MATCH … INSERT</code> read current state only</strong> — a <code>FOR VALID_TIME</code>/
+<li><strong><code>DELETE</code>/<code>DETACH DELETE</code>/<code>MATCH … INSERT</code> read current state only</strong>: a <code>FOR VALID_TIME</code>/
 <code>FOR SYSTEM_TIME</code> clause on any of them is a parse error (see
 <a href="#bitemporal-queries">Bitemporal queries</a>). Retroactive/as-of mutation is out of scope for v1.</li>
-<li><strong><code>ERASE</code>/<code>DETACH ERASE</code> are Varve extensions</strong>, not part of standard GQL — see
+<li><strong><code>ERASE</code>/<code>DETACH ERASE</code> are Varve extensions</strong>, not part of standard GQL. See
 <a href="#bitemporal-queries">Bitemporal queries</a> for their semantics and proofs.</li>
 </ul>
 <h2 id="opencypher-tck-standing"><a class="header" href="#opencypher-tck-standing">openCypher TCK standing</a></h2>
 <p>Varve runs an adapted subset of the openCypher Technology Compatibility Kit
 (<code>crates/varve-testkit/tests/tck.rs</code>, feature files + scenario translation in
 <code>crates/varve-testkit/src/tck/</code>) as a CI gate. Scenarios are drawn from the vendored TCK feature
-corpus, translated from Cypher into Varve GQL, and run against a real in-memory <code>Db</code>; every
-excluded scenario carries a <strong>reasoned</strong> entry in
-<code>resources/tck/exclusions.toml</code> (13,546 lines — one section per excluded scenario, each with a
-<code>reason</code> explaining <em>why</em>, e.g. “TCK uses multi-CREATE Cypher clauses in one query; the v1
+corpus, translated from Cypher into Varve GQL, and run against a real in-memory <code>Db</code>. Every
+excluded scenario carries a reasoned entry in
+<code>resources/tck/exclusions.toml</code> (13,546 lines, one section per excluded scenario, each with a
+<code>reason</code> explaining why, e.g. “TCK uses multi-CREATE Cypher clauses in one query; the v1
 adapter does not rewrite that form into Varve multi-statement INSERT safely”), and the
 <code>exclusions_do_not_hide_current_failures</code> test independently asserts no exclusion reason is
 phrased as a live failure in disguise.</p>
-<p><strong>Current standing, captured live while writing this page:</strong></p>
+<p><strong>Current standing:</strong></p>
 <pre><code>$ cargo test -p varve-testkit --test tck -- --nocapture
 ...
 TCK summary
@@ -820,23 +814,23 @@ failed   66
 rate     0.871
 test open_cypher_tck_gate ... ok
 </code></pre>
-<p><strong>445 of 511 adapted scenarios pass (87.1%)</strong>, gated at a minimum 85% pass rate
+<p>445 of 511 adapted scenarios pass (87.1%), gated at a minimum 85% pass rate
 (<code>PASS_RATE_GATE</code> in <code>tck.rs</code>) plus a fixed core-scenario allowlist
 (<code>resources/tck/core.txt</code>) that must always fully pass. The 66 remaining failures are within the
 adapted set’s known gaps (see the exclusions file for the reasoned non-adapted 3,386).</p>
 <h2 id="antlr-differential-oracle"><a class="header" href="#antlr-differential-oracle">ANTLR differential oracle</a></h2>
 <p>Beyond the TCK, <code>scripts/gql_diff/</code> cross-checks Varve’s hand-written parser against a
-generated parser for the <strong>official GQL grammar</strong> (<code>resources/gql-grammar/GQL.g4</code>, vendored
-from <code>opengql/grammar</code>, ISO/IEC 39075:2024). The check is intentionally one-directional: it only
-fails when Varve <em>accepts</em> a non-extension <code>.gql</code> corpus file that the official grammar
-<em>rejects</em>; Varve rejecting valid GQL (this is a practical-core subset parser, by design) is
+generated parser for the official GQL grammar (<code>resources/gql-grammar/GQL.g4</code>, vendored
+from <code>opengql/grammar</code>, ISO/IEC 39075:2024). The check is one-directional: it only
+fails when Varve accepts a non-extension <code>.gql</code> corpus file that the official grammar
+rejects. Varve rejecting valid GQL (it is a practical-core subset parser by design) is
 reported as <code>VARVE_SUBSET</code> without failing the check. Corpus files under
 <code>resources/gql-corpus/*.ext.gql</code> (temporal clauses, <code>ERASE</code>, Varve’s semicolon-delimited
 program/catalog shorthand) are Varve extensions the official grammar is expected to reject.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="backends"><a class="header" href="#backends">Backends</a></h1>
-<p>Varve speaks to <strong>any S3-API object store</strong> through <code>object_store::aws</code> (<code>crates/varve-storage/ src/s3.rs</code>), adapted to Varve’s own sovereign <code>ObjectStore</code> trait — the engine only ever sees
-<code>put</code>/<code>get</code>/<code>get_range</code>/<code>list</code>. Conditional-write (CAS) support is <em>probed</em>, never assumed (spec
+<p>Varve speaks to any S3-API object store through <code>object_store::aws</code> (<code>crates/varve-storage/ src/s3.rs</code>), adapted to Varve’s own <code>ObjectStore</code> trait, so the engine only ever sees
+<code>put</code>/<code>get</code>/<code>get_range</code>/<code>list</code>. Conditional-write (CAS) support is probed, never assumed (spec
 D5): a 4-step startup probe (<code>Db::probe_capabilities</code>) classifies a backend as <code>Supported</code>,
 <code>Unsupported</code>, or <code>Inconsistent</code>, and only a <code>Supported</code> verdict is allowed to run the opt-in
 <code>cas-failover</code> coordinator mode. See <a href="#failover">Failover</a> for what that mode buys you and
@@ -863,12 +857,12 @@ cadence matches <code>.github/workflows/ci.yml</code>’s <code>backend-matrix</
 </table>
 </div>
 <p>Garage and SeaweedFS both fail the probe the same way: a create-if-absent <code>PUT</code> against an
-<em>existing</em> key succeeds instead of being refused — the precondition is silently ignored rather
+existing key succeeds instead of being refused. The precondition is silently ignored rather
 than enforced, which the probe’s four steps (create → create-again-must-refuse →
-swap-current-etag → swap-STALE-must-refuse) are specifically designed to catch. Both assert
-<code>NotSupported</code> (the load-bearing negation <code>cas-failover</code>’s gate actually checks), not a pinned
+swap-current-etag → swap-STALE-must-refuse) are designed to catch. Both assert
+<code>NotSupported</code> (the negation <code>cas-failover</code>’s gate actually checks), not a pinned
 <code>Inconsistent{reason}</code> string, since backend-specific wording could legitimately change.</p>
-<p>The image pins above are the <strong>single source of truth</strong> in <code>backends.rs</code>, reproduced here
+<p>The image pins above are the single source of truth in <code>backends.rs</code>, reproduced here
 verbatim for reference (do not duplicate the version strings anywhere else):</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
@@ -884,7 +878,7 @@ specific backend names); it skips silently without Docker, so <code>just check</
 <p>All five S3-API backends share one config section (<code>crates/varve-storage/src/s3.rs</code>); only
 <code>bucket</code> is required. The builder starts from <code>AmazonS3Builder::from_env()</code> (standard <code>AWS_*</code>
 environment variables and the AWS provider chain), so explicit config keys are overrides, not
-requirements — an AWS deployment using ambient credentials needs only <code>bucket</code>.</p>
+requirements. An AWS deployment using ambient credentials needs only <code>bucket</code>.</p>
 <pre><code class="language-toml">[storage]
 backend = "s3"
 
@@ -905,39 +899,39 @@ if the backend enforces one (Garage does, conventionally <code>"garage"</code>).
 <code>region</code> to your bucket’s actual region, and either supply <code>access_key_id</code>/<code>secret_access_key</code> or
 rely on the ambient environment/instance-role credential chain. <code>path_style</code> should be <code>false</code>
 for AWS proper, though AWS still accepts path-style requests for backward compatibility.</p>
-<h2 id="sovereignty"><a class="header" href="#sovereignty">Sovereignty</a></h2>
-<p>Plain, unconditional <code>PUT</code>/<code>GET</code>/<code>LIST</code> is <strong>always sufficient</strong> to run Varve in its default
-<code>designated-writer</code> mode — no backend capability beyond basic S3-API object storage is ever
+<h2 id="sovereignty-1"><a class="header" href="#sovereignty-1">Sovereignty</a></h2>
+<p>Plain, unconditional <code>PUT</code>/<code>GET</code>/<code>LIST</code> is always sufficient to run Varve in its default
+<code>designated-writer</code> mode: no backend capability beyond basic S3-API object storage is
 required, which is why Varve runs identically on a fully sovereign, self-hosted, open-source
 backend (Garage, SeaweedFS, Ceph RGW) as it does on AWS. Conditional-write (CAS) support is
-<strong>strictly optional</strong>: it unlocks the opt-in <code>cas-failover</code> coordinator mode, is detected by a
-startup probe rather than assumed, and its absence is never an error for normal operation — a
+strictly optional. It unlocks the opt-in <code>cas-failover</code> coordinator mode, is detected by a
+startup probe rather than assumed, and its absence is never an error for normal operation. A
 backend that fails the probe simply cannot run <code>cas-failover</code>, and falls back to (or stays on)
 <code>designated-writer</code>, enforced by the deployment orchestrator instead of the object store. Varve
 will never make CAS a hard requirement for shipping v1 functionality.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="operations-guide"><a class="header" href="#operations-guide">Operations guide</a></h1>
-<p>This section is for running Varve in production, not for writing GQL against it. Start with
-<a href="#deployment-profiles--sizing">Deployment profiles &amp; sizing</a> to pick a topology and the handful of tuning knobs
-that actually matter at your scale; consult the <a href="#configuration-reference">configuration reference</a> for
-every <code>[section]</code> key <code>varve.toml</code> accepts; read <a href="#failover">Failover</a> before choosing between
-the default <code>designated-writer</code> mode and the opt-in, probe-gated <code>cas-failover</code> mode; and wire
-<a href="#varve-operations-reference-metrics-tracing-and-failover">Metrics &amp; observability</a> into Prometheus/Grafana and, optionally, an OpenTelemetry
-collector before you need them at 2am. <a href="#backends">Backends &amp; capability matrix</a> covers
-which S3-API object stores are CI-verified and how to configure each.</p>
+<p>This section covers running Varve in production rather than writing GQL against it. Start with
+<a href="#deployment-profiles--sizing">Deployment profiles &amp; sizing</a> to pick a topology and the tuning knobs that matter
+at your scale. Consult the <a href="#configuration-reference">configuration reference</a> for every <code>[section]</code>
+key <code>varve.toml</code> accepts. Read <a href="#failover">Failover</a> before choosing between the default
+<code>designated-writer</code> mode and the opt-in, probe-gated <code>cas-failover</code> mode. Wire
+<a href="#varve-operations-reference-metrics-tracing-and-failover">Metrics &amp; observability</a> into Prometheus/Grafana, and optionally an OpenTelemetry
+collector, before you need it. <a href="#backends">Backends &amp; capability matrix</a> covers which
+S3-API object stores are CI-verified and how to configure each.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="deployment-profiles--sizing"><a class="header" href="#deployment-profiles--sizing">Deployment profiles &amp; sizing</a></h1>
-<p>Every profile below runs the same binary and the same wire format — only <code>varve.toml</code> changes.
+<p>Every profile below runs the same binary and the same wire format; only <code>varve.toml</code> changes.
 See the <a href="#configuration-reference">configuration reference</a> for the full key list.</p>
 <h2 id="laptop-memory-or-embedded-zero-external-dependencies"><a class="header" href="#laptop-memory-or-embedded-zero-external-dependencies">Laptop (memory or embedded, zero external dependencies)</a></h2>
-<p><code>Db::memory()</code> or <code>Db::local(dir)</code> — everything in one process, no <code>varved</code>/HTTP layer at all.
+<p><code>Db::memory()</code> or <code>Db::local(dir)</code>: everything in one process, no <code>varved</code>/HTTP layer at all.
 This is <a href="#getting-started-laptop-5-minutes">Getting started</a> Path 1. Good for development, tests, one-off
 scripts, and the CLI’s <code>--dir</code> mode. The in-process <code>Db::memory()</code> also uses a group-commit
-window of <strong>0 ms</strong> (commit immediately, no batching) rather than the on-disk default of 15 ms,
+window of 0 ms (commit immediately, no batching) rather than the on-disk default of 15 ms,
 since there is no backend write latency to amortize.</p>
 <h2 id="durable-single-node"><a class="header" href="#durable-single-node">Durable single node</a></h2>
-<p>One process, all three roles (<code>writer</code>, <code>query</code>, <code>compactor</code>), a <strong>local</strong> log file and a
-<strong>local</strong> storage directory — no object store, no network. This is
+<p>One process, all three roles (<code>writer</code>, <code>query</code>, <code>compactor</code>), a local log file and a
+local storage directory, no object store, no network. This is
 <a href="#getting-started-laptop-5-minutes">Getting started</a> Path 2’s <code>varve.toml</code> shape:</p>
 <pre><code class="language-toml">[node]
 roles = ["writer", "query", "compactor"]
@@ -954,11 +948,11 @@ dir = "./data/store"
 read scale-out or multi-writer failover.</p>
 <h2 id="sovereign-scale-out"><a class="header" href="#sovereign-scale-out">Sovereign scale-out</a></h2>
 <p>Object-store log + object-store block storage (any backend from the
-<a href="#backends">backend matrix</a>), <strong>one writer</strong> plus <strong>N query nodes</strong>, all reading and
+<a href="#backends">backend matrix</a>), one writer plus N query nodes, all reading and
 writing the same bucket. This is how you get horizontal read scaling and (optionally) automatic
 writer failover. <code>just compose-demo</code> (<code>scripts/compose_demo.sh</code>) is a runnable reference
-topology: pinned Garage + a distroless writer + 2 query nodes, driven over HTTP, verifying both
-query nodes agree on a basis read before tearing everything down.</p>
+topology: pinned Garage plus a distroless writer plus 2 query nodes, driven over HTTP, verifying
+both query nodes agree on a basis read before tearing everything down.</p>
 <pre><code class="language-toml">[node]
 roles = ["query"]              # a query-only node; the writer uses ["writer", "compactor"]
 [log]
@@ -970,12 +964,12 @@ bucket = "varve"
 endpoint = "http://garage:3900"
 region = "garage"
 </code></pre>
-<p>Add <code>[coordinator] backend = "cas-failover"</code> only on backends with a <code>Supported</code> probe verdict
-— see <a href="#failover">Failover</a>.</p>
+<p>Add <code>[coordinator] backend = "cas-failover"</code> only on backends with a <code>Supported</code> probe verdict;
+see <a href="#failover">Failover</a>.</p>
 <h2 id="bulk-loads-load--compact--serve"><a class="header" href="#bulk-loads-load--compact--serve">Bulk loads (load → compact → serve)</a></h2>
 <p>For large initial loads, <code>Db::ingest(nodes, edges)</code> submits prebuilt data ops as one atomic
-transaction — no GQL parse, no planning, and no per-edge endpoint <code>MATCH</code> (endpoints are
-referenced by node <code>_id</code> and deliberately not verified; a dangling edge is durable but never
+transaction: no GQL parse, no planning, and no per-edge endpoint <code>MATCH</code> (endpoints are
+referenced by node <code>_id</code> and not verified; a dangling edge is durable but never
 matches a traversal). Chunk large loads into tens of thousands of puts per call to bound log
 record size. Measured on the reference laptop: 1M nodes + 6M edges in ~26 s (~266k entities/s),
 roughly 1000× the one-statement-per-edge GQL <code>MATCH … INSERT</code> surface.</p>
@@ -985,39 +979,38 @@ anchored traversals cannot prune pages until compaction has run. After the load,
 <code>compact_once</code> policy it also drains L0 groups below the standard <code>log_limit</code> gate, each job
 taking its whole group, leaving no full-iid-space L0 remnant behind. On the 1M/6M load this
 one-time sweep took ~50 s and cut the warm anchored 2-hop from ~640 ms to ~18 ms.</p>
-<p><strong>Memory limit (stated, not discovered):</strong> a compaction job merges all of its input events in
-memory, and a full-sweep job’s input is its <em>entire</em> L0 group — so peak memory during
+<p><strong>Memory limit:</strong> a compaction job merges all of its input events in
+memory, and a full-sweep job’s input is its entire L0 group, so peak memory during
 <code>compact_full_once</code> scales with the largest per-family slice of the bulk load (at 1M nodes/6M
 edges that is the ~6M-event edge family, comfortable on a 16 GB laptop). Do not point one
 uninterrupted bulk load of hundreds of millions of edges at a single full sweep; alternate
 ingest rounds with <code>compact_full_once()</code> loops (or interleave the steady-state <code>compact_once</code>)
 so no single L0 group grows beyond what one job can merge in RAM.</p>
 <h2 id="sizing-knobs"><a class="header" href="#sizing-knobs">Sizing knobs</a></h2>
-<p>Defaults come straight from <code>crates/varve-engine/src/db.rs</code> and <code>crates/varve-storage/src/ {cache,disk}.rs</code>; every one is overridable in <code>varve.toml</code> and every default is chosen to be
-reasonable, not merely “small enough to demo.”</p>
+<p>Defaults come from <code>crates/varve-engine/src/db.rs</code> and <code>crates/varve-storage/src/ {cache,disk}.rs</code>; every one is overridable in <code>varve.toml</code>.</p>
 <div class="table-wrapper">
 <table>
 <thead>
 <tr><th>Knob</th><th>Section</th><th>Default</th><th>Turn it when…</th></tr>
 </thead>
 <tbody>
-<tr><td><code>[cache] tiers</code> (<code>memory</code>, <code>disk</code>)</td><td><code>[cache]</code></td><td>a 512 MiB memory tier only (<code>Db::memory()</code>/<code>Db::local()</code>)</td><td>Add a <code>disk</code> tier under <code>[cache.disk] dir</code> (default 50 GiB) whenever cold reads from the object store dominate latency — the disk tier survives restarts (self-describing files keyed by <code>xxh3_128(path, range)</code>), so a warm restart doesn’t re-pay the network round trip.</td></tr>
+<tr><td><code>[cache] tiers</code> (<code>memory</code>, <code>disk</code>)</td><td><code>[cache]</code></td><td>a 512 MiB memory tier only (<code>Db::memory()</code>/<code>Db::local()</code>)</td><td>Add a <code>disk</code> tier under <code>[cache.disk] dir</code> (default 50 GiB) whenever cold reads from the object store dominate latency; the disk tier survives restarts (self-describing files keyed by <code>xxh3_128(path, range)</code>), so a warm restart doesn’t re-pay the network round trip.</td></tr>
 <tr><td><code>[cache.memory] max_bytes</code></td><td><code>[cache.memory]</code></td><td>512 MiB</td><td>Raise it if your working set of hot blocks exceeds 512 MiB and you have spare RAM; lower it on memory-constrained nodes (a query-only node with many concurrent readers is the usual candidate).</td></tr>
 <tr><td><code>[cache.disk] max_bytes</code></td><td><code>[cache.disk]</code></td><td>50 GiB</td><td>Size to your actual object-store round-trip cost and available local disk; this is a pure LRU budget, not a correctness knob.</td></tr>
-<tr><td><code>[storage] max_live_bytes</code></td><td><code>[storage]</code></td><td>512 MiB</td><td>Forces an early block flush once the writer’s in-memory live-table footprint reaches this, independent of row count — lower it on memory-constrained writers or workloads with unusually large property values per row.</td></tr>
+<tr><td><code>[storage] max_live_bytes</code></td><td><code>[storage]</code></td><td>512 MiB</td><td>Forces an early block flush once the writer’s in-memory live-table footprint reaches this, independent of row count; lower it on memory-constrained writers or workloads with unusually large property values per row.</td></tr>
 <tr><td><code>[storage] max_block_rows</code></td><td><code>[storage]</code></td><td>100,000</td><td>Raise it to produce fewer, larger blocks (less compaction overhead, more per-flush memory); lower it for tighter flush latency or memory-constrained writers.</td></tr>
 <tr><td><code>[storage] flush_interval_ms</code></td><td><code>[storage]</code></td><td>300,000 (5 min); <code>0</code> disables the timer</td><td>Lower it if you need a tighter bound on “how stale can the object store be relative to the log” independent of row/byte thresholds; disable it only if <code>max_block_rows</code>/<code>max_live_bytes</code> alone are enough for your write rate.</td></tr>
 <tr><td><code>[log] group_commit_window_ms</code></td><td><code>[log]</code></td><td>15 ms (<code>Db::memory()</code> uses 0)</td><td>Raise it to amortize backend write latency across a bigger batch under high concurrent write load (throughput over latency); lower it (toward 0) when per-transaction commit latency matters more than batch efficiency.</td></tr>
-<tr><td><code>[log] group_commit_max_bytes</code></td><td><code>[log]</code></td><td>8 MiB</td><td>The other half of the group-commit trigger (window elapses <strong>or</strong> this size is reached, whichever first) — raise it alongside the window for very high-throughput writers; lower it if a single batch object is bumping into backend size limits or latency cliffs.</td></tr>
-<tr><td><code>[gc] blocks_to_keep</code></td><td><code>[gc]</code></td><td>10 (GC itself is <code>enabled = false</code> by default)</td><td>Raise it if you run long-lived query followers or basis reads that may lag the writer by more than 10 flushed blocks — GC never deletes a log object a retained manifest’s watermark still needs, but a follower that falls behind <em>that</em> retention window terminates fail-stop with <code>LogGap</code> (see <a href="#failover">Failover</a>) rather than silently serving stale data, so size this to your slowest follower’s realistic lag, not just your fastest.</td></tr>
+<tr><td><code>[log] group_commit_max_bytes</code></td><td><code>[log]</code></td><td>8 MiB</td><td>The other half of the group-commit trigger (window elapses <strong>or</strong> this size is reached, whichever first); raise it alongside the window for very high-throughput writers; lower it if a single batch object is bumping into backend size limits or latency cliffs.</td></tr>
+<tr><td><code>[gc] blocks_to_keep</code></td><td><code>[gc]</code></td><td>10 (GC itself is <code>enabled = false</code> by default)</td><td>Raise it if you run long-lived query followers or basis reads that may lag the writer by more than 10 flushed blocks. GC never deletes a log object a retained manifest’s watermark still needs, but a follower that falls behind that retention window terminates fail-stop with <code>LogGap</code> (see <a href="#failover">Failover</a>) rather than silently serving stale data, so size this to your slowest follower’s realistic lag, not just your fastest.</td></tr>
 <tr><td><code>[gc] garbage_lifetime_hours</code></td><td><code>[gc]</code></td><td>24</td><td>Raise it for extra recovery margin against in-flight readers/backups before superseded objects become GC-eligible; lower it to reclaim object-store space faster once you’re confident nothing still needs the older generation.</td></tr>
 </tbody>
 </table>
 </div>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="configuration-reference"><a class="header" href="#configuration-reference">Configuration reference</a></h1>
-<!-- GENERATED — do not hand-edit. Produced by `cargo run -p varve-testkit --bin config_reference` (`just docs-gen`); `crates/varve-testkit/tests/config_reference_doc.rs` pins this file to that output. -->
-<p>Every <code>[section]</code> key a <code>varve.toml</code> file accepts (spec §4/§11), one table per section, generated from the same <code>#[serde(default = ...)]</code> code paths the engine, log, storage, and server crates use to parse it — see <a href="#deployment-profiles--sizing">Deployment profiles &amp; sizing</a> for worked topologies and <a href="#varve-operations-reference-metrics-tracing-and-failover">Metrics &amp; observability</a> for the <code>[coordinator]</code> and <code>[metrics.otlp]</code> runbooks. Any key here can also be set via a <code>VARVE__SECTION__KEY</code> environment variable at process startup (e.g. <code>VARVE__LOG__LOCAL__DIR=/data/log</code> sets <code>[log.local] dir</code>); nested sections use an extra <code>__</code>, e.g. <code>VARVE__STORAGE__S3__ENDPOINT</code>.</p>
+<!-- GENERATED FILE. Do not hand-edit. Produced by `cargo run -p varve-testkit --bin config_reference` (`just docs-gen`); `crates/varve-testkit/tests/config_reference_doc.rs` pins this file to that output. -->
+<p>Every <code>[section]</code> key a <code>varve.toml</code> file accepts (spec §4/§11), one table per section, generated from the same <code>#[serde(default = ...)]</code> code paths the engine, log, storage, and server crates use to parse it. See <a href="#deployment-profiles--sizing">Deployment profiles &amp; sizing</a> for worked topologies and <a href="#varve-operations-reference-metrics-tracing-and-failover">Metrics &amp; observability</a> for the <code>[coordinator]</code> and <code>[metrics.otlp]</code> runbooks. Any key here can also be set via a <code>VARVE__SECTION__KEY</code> environment variable at process startup (e.g. <code>VARVE__LOG__LOCAL__DIR=/data/log</code> sets <code>[log.local] dir</code>); nested sections use an extra <code>__</code>, e.g. <code>VARVE__STORAGE__S3__ENDPOINT</code>.</p>
 <h2 id="node"><a class="header" href="#node"><code>[node]</code></a></h2>
 <p>Node role selection and query/follower tuning (spec §4, §12).</p>
 <div class="table-wrapper">
@@ -1268,43 +1261,43 @@ reasonable, not merely “small enough to demo.”</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="failover"><a class="header" href="#failover">Failover</a></h1>
 <p>Varve supports two writer-coordination modes, selected by <code>[coordinator] backend</code>. Exactly one
-is active per deployment; neither requires more than one <strong>log</strong> for the database (see the
+is active per deployment, and neither requires more than one <strong>log</strong> for the database (see the
 <a href="#architecture-overview">architecture overview</a> for why Varve needs no source/replica log pair).</p>
 <h2 id="designated-writer-default"><a class="header" href="#designated-writer-default"><code>designated-writer</code> (default)</a></h2>
 <p>Exactly one writer process runs per database, and its uniqueness is enforced entirely by the
-<strong>deployment orchestrator</strong> — a systemd unit, a Kubernetes <code>StatefulSet</code> of size 1, or simply
-“only one process was started.” The writer publishes its identity as a plain, unconditional
-<code>PUT</code> object; no conditional-write semantics are required anywhere in this mode. This is why
-<code>designated-writer</code> works identically on <strong>every</strong> S3-API backend, sovereign or not — see the
-<a href="#backends">backend matrix</a>. If the writer process dies, recovery is manual (or orchestrator
--driven restart): there is no automatic standby takeover in this mode.</p>
+<strong>deployment orchestrator</strong>: a systemd unit, a Kubernetes <code>StatefulSet</code> of size 1, or simply
+“only one process was started”. The writer publishes its identity as a plain, unconditional
+<code>PUT</code> object, and no conditional-write semantics are required anywhere in this mode. This is why
+<code>designated-writer</code> works identically on every S3-API backend, sovereign or not (see the
+<a href="#backends">backend matrix</a>). If the writer process dies, recovery is manual (or
+orchestrator-driven restart); there is no automatic standby takeover in this mode.</p>
 <h2 id="cas-failover-opt-in-probe-gated"><a class="header" href="#cas-failover-opt-in-probe-gated"><code>cas-failover</code> (opt-in, probe-gated)</a></h2>
 <p><code>cas-failover</code> lets a standby writer automatically take over from a dead one, using the object
 store’s conditional-write (CAS) support to arbitrate. Because that support cannot be assumed on
 every S3-API backend, Varve gates this mode behind a startup capability probe
-(<code>Db::probe_capabilities</code>, <a href="#backends">backend matrix</a>): <strong>only a <code>Supported</code> verdict is
-allowed to enable it.</strong> A backend that fails the probe refuses <code>cas-failover</code> outright, naming
+(<code>Db::probe_capabilities</code>, <a href="#backends">backend matrix</a>): only a <code>Supported</code> verdict is
+allowed to enable it. A backend that fails the probe refuses <code>cas-failover</code> outright, naming
 the missing capability, rather than silently degrading to something unsafe.</p>
 <p>Mechanics: standby writers race a lease object; the winner <strong>increments the log epoch</strong>, which
 fences the old writer’s future appends by making them provably stale, then recovers from the
 latest committed manifest and resumes serving writes. Log positions are <code>(epoch, offset)</code> pairs
 with the epoch in the high bits, so packed positions still sort correctly across an epoch bump.</p>
-<p><strong>Live proof:</strong> <code>cargo run --release --example failover -p varve</code>
-(<code>crates/varve/examples/failover.rs</code>) runs two writer handles sharing one in-memory object
-store, kills the first (drops it without releasing its lease — a true crash, not a graceful
-handoff), and asserts the standby takes over in under 10 seconds with <strong>zero acked-transaction
-loss</strong>, then proves the dead writer’s late append is durable-but-dead: a real object lands in
-the store, but is invisible to the new writer, to a fresh query-only node, and to <code>verify()</code>. A
-run captured while writing this page:</p>
+<p>The <code>failover</code> example (<code>crates/varve/examples/failover.rs</code>) exercises this end to end.
+<code>cargo run --release --example failover -p varve</code> runs two writer handles sharing one in-memory
+object store, kills the first (drops it without releasing its lease, a true crash rather than a
+graceful handoff), and asserts the standby takes over in under 10 seconds with zero
+acked-transaction loss. It then confirms the dead writer’s late append is durable but dead: a
+real object lands in the store, but is invisible to the new writer, to a fresh query-only node,
+and to <code>verify()</code>. A run captured while writing this page:</p>
 <pre><code>writer A acquired lease (epoch 0), committed 3 txs
 writer A crashed (heartbeats stopped)
 writer B took over in 303ms: epoch 1, fence 0@3
-zombie append landed at (0,3) — IGNORED by B, query node, and verify
+zombie append landed at (0,3), IGNORED by B, query node, and verify
 final row count everywhere: 4
 </code></pre>
-<p>(Run-to-run timing varies with machine load — STATUS.md’s slice-10 close recorded 304 ms on a
-separate run — but the example’s own assertion is <code>takeover &lt; Duration::from_secs(10)</code>, so any
-passing run is comfortably under the 10-second bound; a 30-minute chaos soak,
+<p>(Run-to-run timing varies with machine load; STATUS.md’s slice-10 close recorded 304 ms on a
+separate run. The example’s own assertion is <code>takeover &lt; Duration::from_secs(10)</code>, so any
+passing run is comfortably under the 10-second bound. A 30-minute chaos soak,
 <code>VARVE_CHAOS_SECS=1800</code>, survived 64 kills with 2,463 acked transactions all present and
 <code>verify()</code> clean.)</p>
 <p><code>[coordinator]</code> config:</p>
@@ -1315,49 +1308,49 @@ takeover_after_ms = 300
 </code></pre>
 <h2 id="manifest-selection-hardening-task-4"><a class="header" href="#manifest-selection-hardening-task-4">Manifest selection hardening (Task 4)</a></h2>
 <p><code>latest_manifest</code> selects the newest committed manifest by <strong><code>(watermark, block_id)</code></strong>,
-watermark-first — <code>block_id</code> only breaks ties between manifests at equal watermark (a
-flush-vs-compaction race). This closed a known limitation from slice 10: because a compaction or
+watermark-first: <code>block_id</code> only breaks ties between manifests at equal watermark (a
+flush-vs-compaction race). This closed a known limitation from slice 10. Because a compaction or
 flush manifest <code>PUT</code> is the commit point for the object store and has <strong>no epoch-fence
-equivalent</strong> (only the log is epoch-fenced), a fenced writer’s stray manifest — one with a
-higher <code>block_id</code> but a <strong>stale</strong> watermark — could previously have won recovery/verify/follower
-reads by block_id alone. Selecting by watermark first makes that permanently impossible: a stale
+equivalent</strong> (only the log is epoch-fenced), a fenced writer’s stray manifest, one with a
+higher <code>block_id</code> but a stale watermark, could previously have won recovery/verify/follower
+reads by block_id alone. Selecting by watermark first makes that impossible: a stale
 watermark can never win regardless of block_id. The before/after lease ack-gate (a fenced writer
 never acks a compaction <code>Ok</code> and instead goes fatal) remains the liveness guard that stops a
 zombie from completing a stray manifest <code>PUT</code> in the first place; watermark-first selection is
 the correctness backstop if it somehow did.</p>
 <h2 id="gc-followers-and-loggap-task-1"><a class="header" href="#gc-followers-and-loggap-task-1">GC, followers, and <code>LogGap</code> (Task 1)</a></h2>
-<p>Garbage collection sweeps superseded <code>v1/log/**.vlog</code> objects — but only those <strong>wholly below
+<p>Garbage collection sweeps superseded <code>v1/log/**.vlog</code> objects, but only those <strong>wholly below
 the minimum retained manifest watermark</strong> (the minimum <code>watermark</code> across the manifest set
-<code>blocks_to_keep</code> protects), making the object-store log’s <code>trim</code> a real no-op-safe operation
-rather than an aspirational one. This has a direct operational consequence: <strong>a query follower
-that has lagged behind the writer by more than the retained watermark window loses its log tail
-and terminates fail-stop with <code>LogGap</code></strong>, rather than silently serving a gap in history. This is
-the correct, intentional behavior — a genuine, fence-unexplained gap in a follower’s or
-<code>verify()</code>’s log read is a correctness hazard, not something to paper over — and the follower
-recovers cleanly by restarting from the latest manifest. Size <code>[gc] blocks_to_keep</code> (default 10)
-to comfortably exceed your slowest follower’s realistic lag; see
-<a href="#sizing-knobs">sizing knobs</a> for the tuning table. A legitimate epoch bump during
-<code>cas-failover</code> recovery is not mistaken for a gap (the same fence-aware contiguity check
-<code>follower</code> and <code>verify</code> both use recognizes it as an intentional jump, not a hole).</p>
+<code>blocks_to_keep</code> protects), which makes the object-store log’s <code>trim</code> a real no-op-safe
+operation rather than an aspirational one. This has a direct operational consequence: a query
+follower that has lagged behind the writer by more than the retained watermark window loses its
+log tail and terminates fail-stop with <code>LogGap</code>, rather than silently serving a gap in history.
+This is intentional. A genuine, fence-unexplained gap in a follower’s or <code>verify()</code>’s log read
+is a correctness hazard, and the follower recovers cleanly by restarting from the latest
+manifest. Size <code>[gc] blocks_to_keep</code> (default 10) to comfortably exceed your slowest follower’s
+realistic lag; see <a href="#sizing-knobs">sizing knobs</a> for the tuning table. A legitimate
+epoch bump during <code>cas-failover</code> recovery is not mistaken for a gap (the same fence-aware
+contiguity check <code>follower</code> and <code>verify</code> both use recognizes it as an intentional jump, not a
+hole).</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="varve-operations-reference-metrics-tracing-and-failover"><a class="header" href="#varve-operations-reference-metrics-tracing-and-failover">Varve operations reference: metrics, tracing, and failover</a></h1>
-<p>Grafana-ready reference for everything Varve exposes at <code>GET /metrics</code>
+<p>Reference for everything Varve exposes at <code>GET /metrics</code>
 (Prometheus text format, <code>PrometheusMetrics</code> in
 <code>crates/varve-server/src/metrics/mod.rs</code>), the stable <code>tracing</code> span names
-emitted across the write/read/follower paths, and the coordination objects +
+emitted across the write/read/follower paths, and the coordination objects and
 failover runbook for the <code>[coordinator]</code> subsystem (spec §12). Every name
-below is copied verbatim from source — nothing here is invented.</p>
+below is copied verbatim from source.</p>
 <h2 id="1-metrics"><a class="header" href="#1-metrics">1. Metrics</a></h2>
 <p>All metrics are served on the writer/query-node HTTP surface at <code>/metrics</code>.
-Metric names ending in <code>_total</code> that are implemented as a Prometheus
-<code>IntGauge</code>/<code>IntGaugeVec</code> rather than a <code>Counter</code> are noted explicitly below —
-<strong>they are monotone by construction</strong> (mirrors of engine <code>AtomicU64</code>
+Some metric names ending in <code>_total</code> are implemented as a Prometheus
+<code>IntGauge</code>/<code>IntGaugeVec</code> rather than a <code>Counter</code>, noted explicitly below.
+They are monotone by construction (mirrors of engine <code>AtomicU64</code>
 counters that only ever increase within a process lifetime), so
-<code>rate()</code>/<code>increase()</code> behave correctly, but a Prometheus counter-type
-<code>reset()</code> detection (e.g. after a process restart, the gauge drops to 0 and
-<code>rate()</code> briefly reads negative-then-corrects) is a <code>Gauge</code>, not <code>Counter</code>,
-concern operators should be aware of. Only <code>varve_http_requests_total</code> is a
-true <code>IntCounterVec</code>.</p>
+<code>rate()</code>/<code>increase()</code> behave correctly. One caveat: because they are a
+<code>Gauge</code> type rather than <code>Counter</code>, Prometheus counter-reset detection does
+not apply, so after a process restart the gauge drops to 0 and <code>rate()</code>
+briefly reads negative before it corrects. Only <code>varve_http_requests_total</code>
+is a true <code>IntCounterVec</code>.</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -1365,24 +1358,24 @@ true <code>IntCounterVec</code>.</p>
 </thead>
 <tbody>
 <tr><td><code>varve_http_requests_total</code></td><td>counter</td><td><code>method</code>, <code>route</code>, <code>status</code></td><td>HTTP requests served</td><td><code>rate(varve_http_requests_total[5m])</code> by <code>route</code>/<code>status</code></td></tr>
-<tr><td><code>varve_http_request_duration_seconds</code></td><td>histogram</td><td><code>method</code>, <code>route</code></td><td>HTTP request latency</td><td><code>histogram_quantile(0.99, rate(varve_http_request_duration_seconds_bucket[5m]))</code> — query-latency p99</td></tr>
-<tr><td><code>varve_applied_tx_id</code></td><td>gauge</td><td>—</td><td>Latest applied transaction id on this node</td><td><code>varve_applied_tx_id</code></td></tr>
-<tr><td><code>varve_applied_log_position</code></td><td>gauge</td><td>—</td><td>Latest applied log position on this node</td><td><code>varve_applied_log_position</code></td></tr>
-<tr><td><code>varve_manifest_watermark</code></td><td>gauge</td><td>—</td><td>Current manifest watermark</td><td><code>varve_manifest_watermark</code></td></tr>
-<tr><td><code>varve_follower_healthy</code></td><td>gauge (0/1)</td><td>—</td><td>1 while the follower loop has no error; 0 once <code>follower_error</code> is set</td><td><code>min_over_time(varve_follower_healthy[5m]) == 0</code> — alert on follower stalls</td></tr>
-<tr><td><code>varve_log_head_position</code></td><td>gauge</td><td>—</td><td>Latest known log head (writer publishes its own durable position, lag 0 by construction; a follower/query node publishes <code>max(last-read+1, watermark seen in gap check)</code>, or the jumped cursor on a fence jump)</td><td><code>varve_log_head_position</code></td></tr>
-<tr><td><code>varve_log_lag_records</code></td><td>gauge</td><td>—</td><td><strong>Follower lag</strong>: records between this node’s applied position and the (locally known) log head</td><td><code>varve_log_lag_records</code> per node — alert if sustained &gt; 0 on a query node</td></tr>
-<tr><td><code>varve_txs_committed_total</code></td><td>gauge, monotone-by-construction (mirrors an engine <code>AtomicU64</code>, <code>_total</code>-named but not a <code>Counter</code> type)</td><td>—</td><td>Committed transactions</td><td><strong>ingest rate</strong>: <code>rate(varve_txs_committed_total[1m])</code></td></tr>
-<tr><td><code>varve_events_committed_total</code></td><td>gauge, monotone-by-construction</td><td>—</td><td>Committed events (finer-grained than tx count)</td><td><code>rate(varve_events_committed_total[1m])</code></td></tr>
-<tr><td><code>varve_commit_failures_total</code></td><td>gauge, monotone-by-construction</td><td>—</td><td>Pre-durability append failures</td><td><code>increase(varve_commit_failures_total[15m]) &gt; 0</code> — alert</td></tr>
-<tr><td><code>varve_flush_blocks_total</code></td><td>gauge, monotone-by-construction</td><td>—</td><td>Successful block flushes</td><td><code>rate(varve_flush_blocks_total[5m])</code></td></tr>
-<tr><td><code>varve_flush_failures_total</code></td><td>gauge, monotone-by-construction</td><td>—</td><td>Failed block flushes</td><td><code>increase(varve_flush_failures_total[15m]) &gt; 0</code> — alert</td></tr>
-<tr><td><code>varve_compaction_runs_total</code></td><td>gauge, monotone-by-construction</td><td>—</td><td>Compaction runs</td><td><code>rate(varve_compaction_runs_total[1h])</code></td></tr>
-<tr><td><code>varve_backpressure_rejections_total</code></td><td>gauge, monotone-by-construction</td><td>—</td><td><code>try_execute_as</code> rejections under backpressure (429s)</td><td><code>rate(varve_backpressure_rejections_total[1m])</code> — sustained &gt; 0 means writers are saturated</td></tr>
-<tr><td><code>varve_live_rows</code></td><td>gauge</td><td>—</td><td>Unflushed rows across all graphs</td><td><code>varve_live_rows</code></td></tr>
-<tr><td><code>varve_live_bytes</code></td><td>gauge</td><td>—</td><td>Unflushed approximate bytes across all graphs (drives the memory-watermark early flush)</td><td><code>varve_live_bytes</code> — compare against the configured watermark</td></tr>
-<tr><td><code>varve_persisted_tries</code></td><td>gauge</td><td>—</td><td>Persisted tries across all scopes</td><td><code>varve_persisted_tries</code></td></tr>
-<tr><td><code>varve_compaction_debt_tries</code></td><td>gauge</td><td>—</td><td>I/O-free compaction-debt proxy: Σ over scopes of <code>max(0, tries(scope) − 1)</code> (each scope with more than one persisted trie has debt equal to all but its newest)</td><td><code>varve_compaction_debt_tries</code> — <strong>caveat: this is a count of extra tries, computed without any I/O; it approximates compaction debt but does not measure bytes-to-rewrite or read amplification directly</strong></td></tr>
+<tr><td><code>varve_http_request_duration_seconds</code></td><td>histogram</td><td><code>method</code>, <code>route</code></td><td>HTTP request latency</td><td><code>histogram_quantile(0.99, rate(varve_http_request_duration_seconds_bucket[5m]))</code>, query-latency p99</td></tr>
+<tr><td><code>varve_applied_tx_id</code></td><td>gauge</td><td>(none)</td><td>Latest applied transaction id on this node</td><td><code>varve_applied_tx_id</code></td></tr>
+<tr><td><code>varve_applied_log_position</code></td><td>gauge</td><td>(none)</td><td>Latest applied log position on this node</td><td><code>varve_applied_log_position</code></td></tr>
+<tr><td><code>varve_manifest_watermark</code></td><td>gauge</td><td>(none)</td><td>Current manifest watermark</td><td><code>varve_manifest_watermark</code></td></tr>
+<tr><td><code>varve_follower_healthy</code></td><td>gauge (0/1)</td><td>(none)</td><td>1 while the follower loop has no error; 0 once <code>follower_error</code> is set</td><td><code>min_over_time(varve_follower_healthy[5m]) == 0</code>, alert on follower stalls</td></tr>
+<tr><td><code>varve_log_head_position</code></td><td>gauge</td><td>(none)</td><td>Latest known log head (writer publishes its own durable position, lag 0 by construction; a follower/query node publishes <code>max(last-read+1, watermark seen in gap check)</code>, or the jumped cursor on a fence jump)</td><td><code>varve_log_head_position</code></td></tr>
+<tr><td><code>varve_log_lag_records</code></td><td>gauge</td><td>(none)</td><td><strong>Follower lag</strong>: records between this node’s applied position and the (locally known) log head</td><td><code>varve_log_lag_records</code> per node, alert if sustained &gt; 0 on a query node</td></tr>
+<tr><td><code>varve_txs_committed_total</code></td><td>gauge, monotone-by-construction (mirrors an engine <code>AtomicU64</code>, <code>_total</code>-named but not a <code>Counter</code> type)</td><td>(none)</td><td>Committed transactions</td><td><strong>ingest rate</strong>: <code>rate(varve_txs_committed_total[1m])</code></td></tr>
+<tr><td><code>varve_events_committed_total</code></td><td>gauge, monotone-by-construction</td><td>(none)</td><td>Committed events (finer-grained than tx count)</td><td><code>rate(varve_events_committed_total[1m])</code></td></tr>
+<tr><td><code>varve_commit_failures_total</code></td><td>gauge, monotone-by-construction</td><td>(none)</td><td>Pre-durability append failures</td><td><code>increase(varve_commit_failures_total[15m]) &gt; 0</code>, alert</td></tr>
+<tr><td><code>varve_flush_blocks_total</code></td><td>gauge, monotone-by-construction</td><td>(none)</td><td>Successful block flushes</td><td><code>rate(varve_flush_blocks_total[5m])</code></td></tr>
+<tr><td><code>varve_flush_failures_total</code></td><td>gauge, monotone-by-construction</td><td>(none)</td><td>Failed block flushes</td><td><code>increase(varve_flush_failures_total[15m]) &gt; 0</code>, alert</td></tr>
+<tr><td><code>varve_compaction_runs_total</code></td><td>gauge, monotone-by-construction</td><td>(none)</td><td>Compaction runs</td><td><code>rate(varve_compaction_runs_total[1h])</code></td></tr>
+<tr><td><code>varve_backpressure_rejections_total</code></td><td>gauge, monotone-by-construction</td><td>(none)</td><td><code>try_execute_as</code> rejections under backpressure (429s)</td><td><code>rate(varve_backpressure_rejections_total[1m])</code>, sustained &gt; 0 means writers are saturated</td></tr>
+<tr><td><code>varve_live_rows</code></td><td>gauge</td><td>(none)</td><td>Unflushed rows across all graphs</td><td><code>varve_live_rows</code></td></tr>
+<tr><td><code>varve_live_bytes</code></td><td>gauge</td><td>(none)</td><td>Unflushed approximate bytes across all graphs (drives the memory-watermark early flush)</td><td><code>varve_live_bytes</code>, compare against the configured watermark</td></tr>
+<tr><td><code>varve_persisted_tries</code></td><td>gauge</td><td>(none)</td><td>Persisted tries across all scopes</td><td><code>varve_persisted_tries</code></td></tr>
+<tr><td><code>varve_compaction_debt_tries</code></td><td>gauge</td><td>(none)</td><td>I/O-free compaction-debt proxy: Σ over scopes of <code>max(0, tries(scope) − 1)</code> (each scope with more than one persisted trie has debt equal to all but its newest)</td><td><code>varve_compaction_debt_tries</code>; caveat: this is a count of extra tries, computed without any I/O, and approximates compaction debt but does not measure bytes-to-rewrite or read amplification directly</td></tr>
 <tr><td><code>varve_cache_hits_total</code></td><td>gauge vec, monotone-by-construction</td><td><code>tier</code></td><td>Cache-tier hits</td><td>see cache hit ratio below</td></tr>
 <tr><td><code>varve_cache_misses_total</code></td><td>gauge vec, monotone-by-construction</td><td><code>tier</code></td><td>Cache-tier misses</td><td>see cache hit ratio below</td></tr>
 </tbody>
@@ -1410,10 +1403,10 @@ downstream of <code>tracing-opentelemetry</code>).</p>
 <tr><td><code>varve.commit</code></td><td><code>flush</code>/<code>flush_impl</code> (<code>writer.rs</code>)</td><td><code>batch</code> (known up front), <code>first_position</code> (recorded once <code>log.append</code> succeeds)</td><td>Log append of a staged batch</td></tr>
 <tr><td><code>varve.apply</code></td><td>writer loop (<code>writer.rs</code>)</td><td><code>batch</code></td><td>Applying an appended batch to the live index; a plain sync-entered span, never held across an <code>.await</code></td></tr>
 <tr><td><code>varve.flush_block</code></td><td><code>flush.rs</code></td><td><code>block_id</code></td><td>A single block flush to storage</td></tr>
-<tr><td><code>varve.compact</code></td><td><code>compact</code> (<code>writer.rs</code>)</td><td>—</td><td>Wraps an entire compaction run</td></tr>
+<tr><td><code>varve.compact</code></td><td><code>compact</code> (<code>writer.rs</code>)</td><td>(none)</td><td>Wraps an entire compaction run</td></tr>
 <tr><td><code>varve.follower.apply</code></td><td><code>apply_next_range</code> (<code>follower.rs</code>)</td><td><code>from</code> (known at entry), <code>applied</code> (recorded before returning)</td><td>Follower catch-up application of a log range</td></tr>
-<tr><td><code>varve.query.parse</code></td><td>query entrypoint (<code>db.rs</code>)</td><td>—</td><td>Synchronous GQL parse (entered span, no async work)</td></tr>
-<tr><td><code>varve.query.plan</code></td><td>query entrypoint (<code>db.rs</code>)</td><td>—</td><td>Query planning, including each leg of a UNION</td></tr>
+<tr><td><code>varve.query.parse</code></td><td>query entrypoint (<code>db.rs</code>)</td><td>(none)</td><td>Synchronous GQL parse (entered span, no async work)</td></tr>
+<tr><td><code>varve.query.plan</code></td><td>query entrypoint (<code>db.rs</code>)</td><td>(none)</td><td>Query planning, including each leg of a UNION</td></tr>
 <tr><td><code>varve.query.execute</code></td><td>query entrypoint (<code>db.rs</code>)</td><td><code>graph</code></td><td>Query execution against a named graph, including each leg of a UNION</td></tr>
 </tbody>
 </table>
@@ -1421,7 +1414,7 @@ downstream of <code>tracing-opentelemetry</code>).</p>
 <h3 id="metricsotlp-configuration"><a class="header" href="#metricsotlp-configuration"><code>[metrics.otlp]</code> configuration</a></h3>
 <p>The <code>otlp</code> <code>MetricsSink</code> (feature <code>otel</code>) wraps <code>PrometheusMetrics</code> and adds a
 background task that gathers the same Prometheus registry on an interval and
-POSTs it as OTLP/HTTP JSON metrics (hand-rolled converter — no OpenTelemetry
+POSTs it as OTLP/HTTP JSON metrics (hand-rolled converter, no OpenTelemetry
 SDK dependency). Counters convert to OTLP <code>sum</code> (<code>isMonotonic: true</code>,
 cumulative temporality); gauges to OTLP <code>gauge</code>; histograms to OTLP
 <code>histogram</code> with per-interval delta bucket counts derived from Prometheus’s
@@ -1434,18 +1427,18 @@ endpoint = "http://otel-collector:4318/v1/metrics"   # required, no default
 push_interval_ms = 10000                              # default; how often the registry is gathered and pushed
 </code></pre>
 <ul>
-<li><code>endpoint</code> is required — <code>PrometheusMetricsFactory</code>/<code>OtlpMetricsFactory</code>
+<li><code>endpoint</code> is required; the <code>PrometheusMetricsFactory</code>/<code>OtlpMetricsFactory</code>
 build error is <code>"[metrics.otlp] endpoint is required"</code> if omitted.</li>
 <li><code>push_interval_ms</code> defaults to <code>10000</code> (10s).</li>
 <li>Push failures are logged via <code>tracing::warn!("otlp metrics push failed", ...)</code>
-and are never fatal — a collector outage degrades observability, not the
+and are never fatal; a collector outage degrades observability, not the
 write/read path.</li>
 </ul>
 <p><strong>OTLP-over-HTTPS certificate caveat:</strong> the OTLP pusher’s HTTP client is built
-with <code>tls_built_in_native_certs(false)</code> — TLS certificate validation checks
-<strong>only</strong> the bundled webpki/Mozilla root set, <strong>never the OS trust store</strong>.
+with <code>tls_built_in_native_certs(false)</code>, so TLS certificate validation checks
+only the bundled webpki/Mozilla root set, never the OS trust store.
 If your collector’s certificate chains through an enterprise/private CA that
-is not in that bundle, the push will fail TLS verification silently — the
+is not in that bundle, the push fails TLS verification silently: the
 only symptom is the generic <code>tracing::warn!("otlp metrics push failed")</code> log
 line, not a certificate-specific error. If your collector uses such a CA,
 either terminate its TLS with a publicly-trusted certificate, or point
@@ -1469,7 +1462,7 @@ service:
 </code></pre>
 <p>Varve’s pusher sends <code>Content-Type: application/json</code> bodies matching the
 OTLP metrics JSON schema (<code>resourceMetrics</code> → <code>scopeMetrics</code> → <code>metrics</code>),
-not protobuf — ensure the collector’s <code>http</code> receiver accepts JSON (the
+not protobuf; ensure the collector’s <code>http</code> receiver accepts JSON (the
 standard <code>otlp</code> receiver does).</p>
 <h2 id="3-coordination-objects-and-failover-runbook"><a class="header" href="#3-coordination-objects-and-failover-runbook">3. Coordination objects and failover runbook</a></h2>
 <h3 id="coordination-objects-shared-object-store-spec-12"><a class="header" href="#coordination-objects-shared-object-store-spec-12">Coordination objects (shared object store, spec §12)</a></h3>
@@ -1498,11 +1491,11 @@ takeover_after_ms = 15000       # default; must be &gt;= 2 * heartbeat_interval_
 "{backend}"”).</li>
 <li><code>cas-failover</code> also requires the storage backend’s conditional-put
 capability probe (slice 5) to report <code>Supported</code>; anything else
-(<code>Unsupported</code> or <code>Inconsistent</code>) is a hard error at startup — see
-<code>CasUnsupported</code> below. Verified live against both MinIO (probe
-<code>Supported</code>, gate passes) and Garage (probe <code>Inconsistent</code> — Garage’s S3
+(<code>Unsupported</code> or <code>Inconsistent</code>) is a hard error at startup (see
+<code>CasUnsupported</code> below). Verified against both MinIO (probe
+<code>Supported</code>, gate passes) and Garage (probe <code>Inconsistent</code>: Garage’s S3
 layer accepts an <code>If-None-Match</code> create over an existing object instead of
-rejecting it — gate correctly refuses with an actionable error).</li>
+rejecting it, so the gate correctly refuses with an actionable error).</li>
 </ul>
 <h3 id="runbook-what-each-failure-state-means-and-what-to-do"><a class="header" href="#runbook-what-each-failure-state-means-and-what-to-do">Runbook: what each failure state means and what to do</a></h3>
 <div class="table-wrapper">
@@ -1511,9 +1504,9 @@ rejecting it — gate correctly refuses with an actionable error).</li>
 <tr><th>State</th><th>Meaning</th><th>Operator action</th></tr>
 </thead>
 <tbody>
-<tr><td><code>EngineError::WriterActive { address, age_ms, takeover_after_ms }</code></td><td><code>designated-writer</code>’s best-effort startup guard: a fresh advertisement from a <em>different</em> node id already exists in <code>v1/writer.json</code> (age below <code>takeover_after_ms</code>). This is <strong>not</strong> a fencing mechanism — it only refuses a second writer from starting while another looks alive.</td><td>Stop the other writer if it’s a leftover process, or simply wait — the guard’s own message says “wait for its heartbeat to go stale.” Once <code>age_ms</code> exceeds <code>takeover_after_ms</code>, a retried start proceeds. If you need real (non-best-effort) fencing, switch <code>[coordinator] backend</code> to <code>cas-failover</code> on a backend whose conditional-put probe is <code>Supported</code>.</td></tr>
-<tr><td><code>EngineError::CasUnsupported { reason }</code></td><td>Startup with <code>backend = "cas-failover"</code> against a storage backend whose slice-5 capability probe returned <code>Unsupported</code> or <code>Inconsistent</code> (i.e. its S3-compatible API doesn’t honor <code>If-None-Match</code>/<code>If-Match</code> correctly — e.g. Garage’s current server-side create-if-absent behavior). The engine refuses to start rather than run without real fencing.</td><td>Switch <code>[coordinator] backend</code> to <code>"designated-writer"</code> on this backend (accepting best-effort guarding only), or move the shared log/object store to a backend that passes the probe (verified: MinIO passes; Garage does not, as of this slice).</td></tr>
-<tr><td><code>EngineError::WriterFenced(reason)</code></td><td><strong>Terminal.</strong> The writer observed a fatal event after already appending durably — either a lease loss (a <code>cas-failover</code> heartbeat returned <code>Lost</code>) or a post-durability apply failure. The writer loop publishes the failure so <code>/healthz</code> degrades, drains every subsequent queued command with <code>WriterFenced</code> (mapped to HTTP 503 <code>writer_fenced</code>), and stops. There is no recovery path that resumes the same process — the block-flush-after-fatal path is deliberately never taken.</td><td>Restart the writer process. On restart it re-runs <code>acquire()</code>/recovery from scratch: for <code>cas-failover</code>, it will only regain the lease if it can win a fresh seizure (i.e. after the current legitimate holder is itself gone); check <code>v1/lease.json</code>’s current holder/epoch before restarting to confirm you’re not restarting into an immediate second fencing.</td></tr>
+<tr><td><code>EngineError::WriterActive { address, age_ms, takeover_after_ms }</code></td><td><code>designated-writer</code>’s best-effort startup guard: a fresh advertisement from a different node id already exists in <code>v1/writer.json</code> (age below <code>takeover_after_ms</code>). This is not a fencing mechanism; it only refuses a second writer from starting while another looks alive.</td><td>Stop the other writer if it’s a leftover process, or simply wait; the guard’s own message says “wait for its heartbeat to go stale.” Once <code>age_ms</code> exceeds <code>takeover_after_ms</code>, a retried start proceeds. If you need real (non-best-effort) fencing, switch <code>[coordinator] backend</code> to <code>cas-failover</code> on a backend whose conditional-put probe is <code>Supported</code>.</td></tr>
+<tr><td><code>EngineError::CasUnsupported { reason }</code></td><td>Startup with <code>backend = "cas-failover"</code> against a storage backend whose slice-5 capability probe returned <code>Unsupported</code> or <code>Inconsistent</code> (i.e. its S3-compatible API doesn’t honor <code>If-None-Match</code>/<code>If-Match</code> correctly, e.g. Garage’s current server-side create-if-absent behavior). The engine refuses to start rather than run without real fencing.</td><td>Switch <code>[coordinator] backend</code> to <code>"designated-writer"</code> on this backend (accepting best-effort guarding only), or move the shared log/object store to a backend that passes the probe (verified: MinIO passes; Garage does not, as of this slice).</td></tr>
+<tr><td><code>EngineError::WriterFenced(reason)</code></td><td><strong>Terminal.</strong> The writer observed a fatal event after already appending durably: either a lease loss (a <code>cas-failover</code> heartbeat returned <code>Lost</code>) or a post-durability apply failure. The writer loop publishes the failure so <code>/healthz</code> degrades, drains every subsequent queued command with <code>WriterFenced</code> (mapped to HTTP 503 <code>writer_fenced</code>), and stops. There is no recovery path that resumes the same process; the block-flush-after-fatal path is never taken.</td><td>Restart the writer process. On restart it re-runs <code>acquire()</code>/recovery from scratch: for <code>cas-failover</code>, it will only regain the lease if it can win a fresh seizure (i.e. after the current legitimate holder is itself gone); check <code>v1/lease.json</code>’s current holder/epoch before restarting to confirm you’re not restarting into an immediate second fencing.</td></tr>
 </tbody>
 </table>
 </div>
@@ -1529,11 +1522,12 @@ row count is consistent (4) everywhere.</li>
 0 acked-tx loss, over a 60 s run (the nightly gate runs this for 30 min per
 the roadmap exit criterion; the 60 s run here is the CI-speed smoke check).</li>
 </ul>
+<pre><code></code></pre>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="http-api"><a class="header" href="#http-api">HTTP API</a></h1>
 <p>This is the frozen slice-9 wire contract served by <code>varved</code> (<code>crates/varve-server</code>). Every route,
 status code, and body on this page is copied from <code>crates/varve-server/tests/http_api.rs</code> and
-<code>crates/varve-server/src/{api.rs,http/{mod.rs,handlers.rs}}</code> — nothing here is invented.</p>
+<code>crates/varve-server/src/{api.rs,http/{mod.rs,handlers.rs}}</code>.</p>
 <h2 id="routes--auth-matrix"><a class="header" href="#routes--auth-matrix">Routes &amp; auth matrix</a></h2>
 <div class="table-wrapper">
 <table>
@@ -1541,20 +1535,20 @@ status code, and body on this page is copied from <code>crates/varve-server/test
 <tr><th>Route</th><th>Method</th><th>Auth</th><th>Notes</th></tr>
 </thead>
 <tbody>
-<tr><td><code>/healthz</code></td><td>GET</td><td><strong>public</strong></td><td>I/O-free — reads only the in-memory follower-error state, never touches the object store.</td></tr>
+<tr><td><code>/healthz</code></td><td>GET</td><td><strong>public</strong></td><td>I/O-free; reads only the in-memory follower-error state, never touches the object store.</td></tr>
 <tr><td><code>/v1/query</code></td><td>POST</td><td>bearer</td><td>Read-only; served by any node with the data.</td></tr>
-<tr><td><code>/v1/tx</code></td><td>POST</td><td>bearer</td><td>Mutation; <strong>writer-only</strong> — redirects on a non-writer node.</td></tr>
+<tr><td><code>/v1/tx</code></td><td>POST</td><td>bearer</td><td>Mutation; <strong>writer-only</strong>, redirects on a non-writer node.</td></tr>
 <tr><td><code>/v1/status</code></td><td>GET</td><td>bearer</td><td>Roles, applied progress, manifest watermark, probe verdict.</td></tr>
 <tr><td><code>/metrics</code></td><td>GET</td><td>bearer</td><td>Prometheus text format.</td></tr>
-<tr><td><code>/v1/admin/compact</code></td><td>POST</td><td>bearer</td><td><strong>Compactor-role-only</strong> — redirects otherwise.</td></tr>
-<tr><td><code>/v1/admin/gc</code></td><td>POST</td><td>bearer</td><td><strong>Compactor-role-only</strong> — redirects otherwise.</td></tr>
+<tr><td><code>/v1/admin/compact</code></td><td>POST</td><td>bearer</td><td><strong>Compactor-role-only</strong>, redirects otherwise.</td></tr>
+<tr><td><code>/v1/admin/gc</code></td><td>POST</td><td>bearer</td><td><strong>Compactor-role-only</strong>, redirects otherwise.</td></tr>
 <tr><td><code>/v1/admin/verify</code></td><td>POST</td><td>bearer</td><td>Runs on any node (not role-gated).</td></tr>
 </tbody>
 </table>
 </div>
 <p>Bearer auth is <code>Authorization: Bearer &lt;token&gt;</code> against a configured <code>Authenticator</code> (the builtin
-is <code>static</code>, a fixed subject→token table). A <strong>duplicate</strong> <code>Authorization</code> header is treated as
-unauthenticated (401), not an error — a client sending two auth headers gets rejected exactly
+is <code>static</code>, a fixed subject→token table). A duplicate <code>Authorization</code> header is treated as
+unauthenticated (401), not an error: a client sending two auth headers gets rejected exactly
 like a client sending none, from <code>authorization_accept_and_body_limit_are_parsed_exactly</code>. Every
 response, authenticated or not, carries <code>x-content-type-options: nosniff</code>.</p>
 <h2 id="the-421-writer-redirect"><a class="header" href="#the-421-writer-redirect">The 421 writer redirect</a></h2>
@@ -1564,16 +1558,16 @@ response, authenticated or not, carries <code>x-content-type-options: nosniff</c
 <p>If no writer has published an address yet, the response is <code>503 Service Unavailable</code> with
 <code>{"code": "writer_unavailable", ...}</code> instead. (Source:
 <code>query_node_tx_redirects_to_fresh_advertisement_or_503</code>.) The CLI’s <code>RemoteClient</code> follows one
-such redirect automatically and re-sends the request to the advertised writer; a <strong>second</strong> 421
+such redirect automatically and re-sends the request to the advertised writer; a second 421
 in a row is treated as a <code>RedirectLoop</code> error rather than followed again.</p>
 <h2 id="requestresponse-bodies"><a class="header" href="#requestresponse-bodies">Request/response bodies</a></h2>
-<p><strong><code>POST /v1/tx</code></strong> — a parameterized INSERT, from <code>tx_then_json_query_round_trips</code>:</p>
+<p><strong><code>POST /v1/tx</code></strong>: a parameterized INSERT, from <code>tx_then_json_query_round_trips</code>:</p>
 <pre><code class="language-json">{"gql": "INSERT (:Person {_id: 1, name: $name})", "params": {"name": "Ada"}}
 </code></pre>
 <p>Response (<code>200 OK</code>, <code>TxResponse</code>):</p>
 <pre><code class="language-json">{"tx_id": 1, "system_time": "...", "system_time_us": ..., "side_effects": {...}, "basis": ...}
 </code></pre>
-<p><strong><code>POST /v1/query</code></strong> — reading it back at a fixed transaction-id basis:</p>
+<p><strong><code>POST /v1/query</code></strong>: reading it back at a fixed transaction-id basis:</p>
 <pre><code class="language-json">{"gql": "MATCH (p:Person) RETURN p.name AS name", "basis": 1}
 </code></pre>
 <p>Response (<code>200 OK</code>, JSON default):</p>
@@ -1594,20 +1588,21 @@ before giving up. A basis that never arrives within the timeout is <code>408 Req
 <li><code>*/*</code> or <code>application/json</code> (or no <code>Accept</code> header at all) → the default JSON <code>{"rows": [...]}</code>
 shape shown above.</li>
 <li>Anything else (e.g. <code>application/jsonish</code>) → <code>406 Not Acceptable</code>.</li>
-<li>If <strong>both</strong> <code>application/json</code> and the Arrow media type are offered, Arrow wins (checked
-first) — from <code>authorization_accept_and_body_limit_are_parsed_exactly</code>.</li>
+<li>If both <code>application/json</code> and the Arrow media type are offered, Arrow wins (checked
+first), from <code>authorization_accept_and_body_limit_are_parsed_exactly</code>.</li>
 </ul>
 <h2 id="tagged-bytes-json-convention"><a class="header" href="#tagged-bytes-json-convention">Tagged-bytes JSON convention</a></h2>
 <p>Binary property values round-trip through JSON as a single-key object with a <code>$bytes</code> key holding
 standard base64: <code>{"$bytes": "&lt;base64&gt;"}</code>. This is handled symmetrically by
 <code>params_from_json</code>/<code>scalar_from_json</code> on the way in and <code>batches_to_json</code>/the CLI’s
-<code>TaggedBytesEncoder</code> on the way out — arrays and any other multi-key or nested object shape are
+<code>TaggedBytesEncoder</code> on the way out; arrays and any other multi-key or nested object shape are
 rejected as invalid parameters.</p>
 <h2 id="error-responses"><a class="header" href="#error-responses">Error responses</a></h2>
 <p>Every error is <code>{"code": "...", "message": "...", "writer": null}</code> (<code>ErrorResponse</code>); <code>message</code>
-never leaks internal detail — <code>internal</code> errors are deliberately generic even when the
-underlying GQL referenced something sensitive (<code>invalid_requests_negotiation_timeout_and_ internal_errors_are_stable</code> asserts the literal string <code>secret_storage_credential</code> from a failing
-query never appears in the response body).</p>
+never leaks internal detail: <code>internal</code> errors are generic even when the underlying GQL
+referenced something sensitive (<code>invalid_requests_negotiation_timeout_and_internal_errors_are_stable</code>
+asserts the literal string <code>secret_storage_credential</code> from a failing query never appears in the
+response body).</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -1622,22 +1617,21 @@ query never appears in the response body).</p>
 <tr><td>421</td><td><code>misdirected_request</code></td><td>A writer-only or compactor-only route hit a node without that role; <code>writer</code> names the current writer if known.</td></tr>
 <tr><td>429</td><td><code>backpressure</code></td><td>The writer’s submission queue is full; response includes <code>Retry-After: 1</code>.</td></tr>
 <tr><td>503</td><td><code>writer_unavailable</code></td><td>A redirect-eligible route with no writer advertisement published yet.</td></tr>
-<tr><td>503</td><td><code>follower_failed</code></td><td>The node’s log-follower loop has stopped (terminal state — also reflected by <code>/healthz</code> returning 503 <code>{"status":"degraded","error":"follower stopped"}</code>).</td></tr>
+<tr><td>503</td><td><code>follower_failed</code></td><td>The node’s log-follower loop has stopped (terminal state; also reflected by <code>/healthz</code> returning 503 <code>{"status":"degraded","error":"follower stopped"}</code>).</td></tr>
 <tr><td>503</td><td><code>writer_fenced</code></td><td>This writer has been fenced by a newer epoch (<code>cas-failover</code> takeover elsewhere).</td></tr>
-<tr><td>500</td><td><code>internal</code></td><td>Anything else — object-store I/O failure, unexpected engine error, etc.</td></tr>
+<tr><td>500</td><td><code>internal</code></td><td>Anything else: object-store I/O failure, unexpected engine error, etc.</td></tr>
 </tbody>
 </table>
 </div>
 <h2 id="tls"><a class="header" href="#tls">TLS</a></h2>
-<p><code>[server.http] tls_cert</code>/<code>tls_key</code> must both be set or both omitted — a lone cert or key is a
+<p><code>[server.http] tls_cert</code>/<code>tls_key</code> must both be set or both omitted; a lone cert or key is a
 config-time error. <code>advertised_address</code> (used for the 421 redirect body) is required on any node
 with the <code>Writer</code> role and must be an absolute <code>http://</code>/<code>https://</code> URL.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="cli"><a class="header" href="#cli">CLI</a></h1>
 <p>The <code>varve</code> binary (<code>crates/varve-cli</code>) talks to either an embedded local database or a remote
 <code>varved</code> server, using the same subcommands either way. Every usage line on this page is copied
-from <code>varve --help</code>/<code>varve &lt;subcommand&gt; --help</code>, run live against this exact commit while
-writing this page.</p>
+from <code>varve --help</code>/<code>varve &lt;subcommand&gt; --help</code>.</p>
 <h2 id="connection-selection"><a class="header" href="#connection-selection">Connection selection</a></h2>
 <pre><code>$ varve --help
 Varve bitemporal graph database client
@@ -1657,12 +1651,12 @@ Options:
       --token &lt;TOKEN&gt;  Bearer token sent with every request to `--url`. Falls back to the `VARVE_TOKEN` environment variable; never echoed back by `--help` or any diagnostic output [env: VARVE_TOKEN]
   -h, --help           Print help
 </code></pre>
-<p><code>--dir</code> and <code>--url</code> (and <code>--token</code>) are <strong>global</strong> flags: they must come <em>before</em> the subcommand
+<p><code>--dir</code> and <code>--url</code> (and <code>--token</code>) are global flags: they must come before the subcommand
 (<code>varve --dir ./mydb shell</code>, not <code>varve shell --dir ./mydb</code>). Exactly one connection mode is
 required:</p>
 <ul>
-<li><code>--dir &lt;DIR&gt;</code> — open a local database directory embedded in the CLI process.</li>
-<li><code>--url &lt;URL&gt;</code> + <code>--token &lt;TOKEN&gt;</code> (or <code>VARVE_TOKEN</code> env var) — talk to a remote <code>varved</code> over
+<li><code>--dir &lt;DIR&gt;</code>: open a local database directory embedded in the CLI process.</li>
+<li><code>--url &lt;URL&gt;</code> + <code>--token &lt;TOKEN&gt;</code> (or <code>VARVE_TOKEN</code> env var): talk to a remote <code>varved</code> over
 HTTP/HTTPS.</li>
 </ul>
 <p>Both together, or neither, is a startup error with one of these exact messages
@@ -1685,7 +1679,7 @@ Options:
 multiple lines), and <code>:status</code>, <code>:help</code>, <code>:quit</code>/<code>:exit</code> are built-in commands. See
 <a href="#getting-started-laptop-5-minutes">Getting started</a> for full transcript examples of both <code>--dir</code> and
 <code>--url</code> mode. Every completed write echoes a <code>tx &lt;id&gt; @ &lt;system_time&gt;</code> receipt line followed by
-one line per <em>nonzero</em> side-effect count (nodes/relationships created or deleted, properties set
+one line per nonzero side-effect count (nodes/relationships created or deleted, properties set
 or removed, labels added or removed); a query prints an Arrow-pretty table, or <code>(0 rows)</code> if
 every returned batch is empty.</p>
 <h2 id="import"><a class="header" href="#import"><code>import</code></a></h2>
@@ -1702,14 +1696,15 @@ Options:
       --graph &lt;GRAPH&gt;  Graph to `USE` before each insert. Omitted entirely (no `USE` clause) when not given
   -h, --help           Print help
 </code></pre>
-<p>Each line of the JSONL file becomes one parameterized <code>INSERT (:&lt;LABEL&gt; {...})</code> transaction —
-object keys become <code>$pN</code>-style bound parameters (sorted, deterministic), never string-interpolated
-into the GQL — and the resulting statement is validated with <code>varve_gql::parse_program</code> <em>before</em>
-any request is sent. Import stops at the first failing line, reporting its 1-based line number
-and how many lines were already committed. JSON object keys and the <code>--label</code>/<code>--graph</code> values
-are all validated as GQL identifiers (ASCII shape only — first byte a letter or <code>_</code>, the rest
-alphanumeric or <code>_</code>); the parser is still the sole authority on whether the resulting GQL is
-actually valid (e.g. reserved-word collisions), not this shape check.</p>
+<p>Each line of the JSONL file becomes one parameterized <code>INSERT (:&lt;LABEL&gt; {...})</code> transaction.
+Object keys become <code>$pN</code>-style bound parameters (sorted, deterministic), never
+string-interpolated into the GQL, and the resulting statement is validated with
+<code>varve_gql::parse_program</code> before any request is sent. Import stops at the first failing line,
+reporting its 1-based line number and how many lines were already committed. JSON object keys
+and the <code>--label</code>/<code>--graph</code> values are all validated as GQL identifiers (ASCII shape only: first
+byte a letter or <code>_</code>, the rest alphanumeric or <code>_</code>); the parser is still the sole authority on
+whether the resulting GQL is actually valid (e.g. reserved-word collisions), not this shape
+check.</p>
 <h2 id="export"><a class="header" href="#export"><code>export</code></a></h2>
 <pre><code>$ varve export --help
 Run a GQL query and write results as line-delimited JSON
@@ -1749,12 +1744,12 @@ Options:
 (<code>CommandClient::status</code>/<code>compact</code>/<code>gc</code>/<code>verify</code>). With <code>--json</code>, the raw response struct is
 printed via <code>serde_json::to_string</code>; without it, a fixed-field-order human-readable rendering is
 printed (e.g. <code>format_status</code>/<code>format_compaction</code>/<code>format_gc</code>/<code>format_verify</code> in
-<code>crates/varve-cli/src/output.rs</code>) — a missing <code>manifest_block_id</code> renders as the literal text
-<code>none</code>, never a blank or <code>null</code>.</p>
+<code>crates/varve-cli/src/output.rs</code>), where a missing <code>manifest_block_id</code> renders as the literal
+text <code>none</code>, never a blank or <code>null</code>.</p>
 <h2 id="jsonl-format-notes"><a class="header" href="#jsonl-format-notes">JSONL format notes</a></h2>
 <p>Every JSONL line (both <code>import</code> input and <code>export</code> output) is a flat JSON object. Scalar values
-map directly (<code>null</code>, <code>true</code>/<code>false</code>, numbers — integers must fit <code>i64</code>/<code>u64</code> and floats must be
-finite, i.e. no <code>NaN</code>/<code>Infinity</code> — and strings); binary values are the single-key <code>{"$bytes": "&lt;base64&gt;"}</code> form described above; arrays and any other nested-object shape are rejected as
+map directly (<code>null</code>, <code>true</code>/<code>false</code>, numbers, and strings; integers must fit <code>i64</code>/<code>u64</code> and
+floats must be finite, i.e. no <code>NaN</code>/<code>Infinity</code>); binary values are the single-key <code>{"$bytes": "&lt;base64&gt;"}</code> form described above; arrays and any other nested-object shape are rejected as
 invalid parameters (the same validation the HTTP API’s <code>params_from_json</code> enforces, since the
 CLI reuses it directly).</p>
 

@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-e97f12ed.js";
+            window.path_to_searchindex_js = "../searchindex-b7ef6f64.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-47ba109b.js"></script>
@@ -175,8 +175,8 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="configuration-reference"><a class="header" href="#configuration-reference">Configuration reference</a></h1>
-<!-- GENERATED — do not hand-edit. Produced by `cargo run -p varve-testkit --bin config_reference` (`just docs-gen`); `crates/varve-testkit/tests/config_reference_doc.rs` pins this file to that output. -->
-<p>Every <code>[section]</code> key a <code>varve.toml</code> file accepts (spec §4/§11), one table per section, generated from the same <code>#[serde(default = ...)]</code> code paths the engine, log, storage, and server crates use to parse it — see <a href="profiles.html">Deployment profiles &amp; sizing</a> for worked topologies and <a href="metrics.html">Metrics &amp; observability</a> for the <code>[coordinator]</code> and <code>[metrics.otlp]</code> runbooks. Any key here can also be set via a <code>VARVE__SECTION__KEY</code> environment variable at process startup (e.g. <code>VARVE__LOG__LOCAL__DIR=/data/log</code> sets <code>[log.local] dir</code>); nested sections use an extra <code>__</code>, e.g. <code>VARVE__STORAGE__S3__ENDPOINT</code>.</p>
+<!-- GENERATED FILE. Do not hand-edit. Produced by `cargo run -p varve-testkit --bin config_reference` (`just docs-gen`); `crates/varve-testkit/tests/config_reference_doc.rs` pins this file to that output. -->
+<p>Every <code>[section]</code> key a <code>varve.toml</code> file accepts (spec §4/§11), one table per section, generated from the same <code>#[serde(default = ...)]</code> code paths the engine, log, storage, and server crates use to parse it. See <a href="profiles.html">Deployment profiles &amp; sizing</a> for worked topologies and <a href="metrics.html">Metrics &amp; observability</a> for the <code>[coordinator]</code> and <code>[metrics.otlp]</code> runbooks. Any key here can also be set via a <code>VARVE__SECTION__KEY</code> environment variable at process startup (e.g. <code>VARVE__LOG__LOCAL__DIR=/data/log</code> sets <code>[log.local] dir</code>); nested sections use an extra <code>__</code>, e.g. <code>VARVE__STORAGE__S3__ENDPOINT</code>.</p>
 <h2 id="node"><a class="header" href="#node"><code>[node]</code></a></h2>
 <p>Node role selection and query/follower tuning (spec §4, §12).</p>
 <div class="table-wrapper">

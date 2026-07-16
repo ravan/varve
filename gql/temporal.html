@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-e97f12ed.js";
+            window.path_to_searchindex_js = "../searchindex-b7ef6f64.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-47ba109b.js"></script>
@@ -179,18 +179,18 @@
 <a href="../../../design/2026-07-04-varve-design.html">design specification</a> §3/§8 (Ceiling/Polygon
 resolution, ported from XTDB):</p>
 <ul>
-<li><strong>Valid time</strong> — when a fact was true <em>in the world</em>. User-controlled via <code>VALID FROM</code>/
+<li><strong>Valid time</strong>: when a fact was true in the world. User-controlled via <code>VALID FROM</code>/
 <code>VALID TO</code> on <code>INSERT</code>; defaults to “now” through “forever” (open-ended) if omitted.</li>
-<li><strong>System time</strong> — when Varve <em>learned</em> the fact. Writer-assigned, monotonic, never
+<li><strong>System time</strong>: when Varve learned the fact. Writer-assigned, monotonic, never
 user-settable; every mutation gets the writer’s current system time as its <code>_system_from</code>.</li>
 </ul>
 <p>A query’s temporal position on each axis is set independently with <code>FOR VALID_TIME …</code> and
-<code>FOR SYSTEM_TIME …</code>, each accepted <strong>at most once</strong> per query (a duplicate axis is a parse
-error: <code>"duplicate ..."</code>). Omitting a <code>FOR</code> clause defaults to <code>AS OF now</code> on both axes — i.e.
-plain <code>MATCH</code> without any <code>FOR</code> clause is exactly <code>FOR VALID_TIME AS OF now FOR SYSTEM_TIME AS OF now</code>, current state as currently known.</p>
+<code>FOR SYSTEM_TIME …</code>, each accepted at most once per query (a duplicate axis is a parse
+error: <code>"duplicate ..."</code>). Omitting a <code>FOR</code> clause defaults to <code>AS OF now</code> on both axes: plain
+<code>MATCH</code> without any <code>FOR</code> clause is exactly <code>FOR VALID_TIME AS OF now FOR SYSTEM_TIME AS OF now</code>, current state as currently known.</p>
 <h2 id="forms"><a class="header" href="#forms">Forms</a></h2>
 <p>Each axis independently accepts one of four forms (all four verified against
-<code>crates/varve-gql/src/parser.rs</code>’s own passing test suite — <code>cargo test -p varve-gql --lib</code>:
+<code>crates/varve-gql/src/parser.rs</code>’s passing test suite, <code>cargo test -p varve-gql --lib</code>:
 65 passed):</p>
 <div class="table-wrapper">
 <table>
@@ -217,25 +217,25 @@ MATCH (p:Person) RETURN p.name
 MATCH (p:Person) RETURN p.name
 </code></pre>
 <p><em>(parser test)</em></p>
-<p>System-time travel — “what did we believe at this instant” — freshly exercised end to end by
-<code>cargo run --release --example gql_tour -p varve</code> while writing this page:</p>
+<p>System-time travel (“what did we believe at this instant”), exercised end to end by
+<code>cargo run --release --example gql_tour -p varve</code>:</p>
 <pre><code class="language-gql">FOR SYSTEM_TIME AS OF TIMESTAMP '2026-07-12T12:20:28.657968Z'
 MATCH (p:Person) RETURN p._id, p.name ORDER BY p._id
 </code></pre>
-<p><em>(getting-started.md’s live transcript — a person inserted after this timestamp is correctly
+<p><em>(getting-started.md’s live transcript: a person inserted after this timestamp is correctly
 absent from the result, while an earlier-valid-time-but-later-inserted person is also absent,
 because system time governs “what Varve knew then”, independent of valid time)</em></p>
-<p><code>DELETE</code>/<code>MATCH … INSERT</code>/<code>DETACH DELETE</code> all read <strong>current state only</strong> — a <code>FOR</code> clause on
+<p><code>DELETE</code>/<code>MATCH … INSERT</code>/<code>DETACH DELETE</code> all read current state only; a <code>FOR</code> clause on
 any of them is a parse error (“DELETE reads current state - temporal clauses not supported” /
 “MATCH … INSERT reads current state - temporal clauses not supported”). Retroactive/as-of
 mutation is out of scope for v1.</p>
 <h2 id="insert--valid-from--valid-to"><a class="header" href="#insert--valid-from--valid-to"><code>INSERT … VALID FROM</code> / <code>VALID TO</code></a></h2>
 <pre><code class="language-gql">INSERT (:P {_id: 1}) VALID FROM DATE '2020-01-01' TO DATE '2021-01-01'
 </code></pre>
-<p><em>(parser test — <code>VALID FROM</code> must be strictly earlier than <code>VALID TO</code> when both are given)</em></p>
+<p><em>(parser test: <code>VALID FROM</code> must be strictly earlier than <code>VALID TO</code> when both are given)</em></p>
 <pre><code class="language-gql">INSERT (:P {_id: 1}) VALID TO DATE '2021-01-01'
 </code></pre>
-<p><em>(parser test — <code>VALID FROM</code> defaults to “now” when omitted)</em></p>
+<p><em>(parser test: <code>VALID FROM</code> defaults to “now” when omitted)</em></p>
 <p>A retro-dated insert with no upper bound (defaults to “forever”), exercised live in
 <a href="../getting-started.html">Getting started</a>:</p>
 <pre><code class="language-gql">INSERT (:Person {_id: 3, name: 'Cleo'}) VALID FROM DATE '2020-01-01'
@@ -247,45 +247,45 @@ mutation is out of scope for v1.</p>
 <h2 id="temporal-functions"><a class="header" href="#temporal-functions">Temporal functions</a></h2>
 <p><code>valid_from(var)</code>, <code>valid_to(var)</code>, and <code>system_from(var)</code> project the bound-in-time fields of
 a matched variable in a <code>RETURN</code> (backed by DataFusion columns <code>_valid_from</code>/<code>_valid_to</code>/
-<code>_system_from</code> — <code>crates/varve-plan/src/functions.rs</code>):</p>
+<code>_system_from</code>, <code>crates/varve-plan/src/functions.rs</code>):</p>
 <pre><code class="language-gql">MATCH (p:Person) RETURN valid_from(p) AS since, valid_to(p), system_from(p)
 </code></pre>
 <p><em>(parser test)</em></p>
 <p>There is no <code>system_to()</code>: per the <a href="../architecture.html">architecture overview</a>, effective
-system-time upper bounds are never stored — they are derived at read time by scanning newer
+system-time upper bounds are never stored; they are derived at read time by scanning newer
 events for the same internal id, never persisted as their own field.</p>
 <h2 id="erase-vs-delete-gdpr-semantics"><a class="header" href="#erase-vs-delete-gdpr-semantics"><code>ERASE</code> vs <code>DELETE</code>: GDPR semantics</a></h2>
 <p><code>DELETE</code> (and <code>DETACH DELETE</code>) is an ordinary bitemporal tombstone: the entity disappears from
-<em>current</em> state, but every historical <code>FOR SYSTEM_TIME AS OF &lt;before-the-delete&gt;</code> query still
-sees it, exactly as any other superseded fact. Nothing is ever physically removed by <code>DELETE</code>
+current state, but every historical <code>FOR SYSTEM_TIME AS OF &lt;before-the-delete&gt;</code> query still
+sees it, exactly as any other superseded fact. Nothing is physically removed by <code>DELETE</code>
 alone.</p>
-<p><code>ERASE</code> (and <code>DETACH ERASE</code>) is Varve’s GDPR <strong>hard-delete extension</strong> — not part of standard
-GQL — and is fundamentally different: it hides the entity’s entire history at <em>every</em> system-time
-instant, not just from now on, and its underlying property/label bytes are physically removed
-from every stored object once compaction and garbage collection have run. The following tests
-(all currently green — <code>cargo test -p varve --test erase</code> and <code>cargo test -p varve --test gdpr_gc</code>, run while writing this page) are the load-bearing proof, cited here <strong>by exact test
-name</strong> so the claims can be checked directly against the source:</p>
+<p><code>ERASE</code> (and <code>DETACH ERASE</code>) is Varve’s GDPR hard-delete extension, not part of standard GQL,
+and behaves differently: it hides the entity’s entire history at every system-time instant, not
+just from now on, and its underlying property/label bytes are physically removed from every
+stored object once compaction and garbage collection have run. The following tests
+(<code>cargo test -p varve --test erase</code> and <code>cargo test -p varve --test gdpr_gc</code>) back these claims,
+cited by exact test name so they can be checked directly against the source:</p>
 <div class="table-wrapper">
 <table>
 <thead>
 <tr><th>Test (file)</th><th>Proves</th></tr>
 </thead>
 <tbody>
-<tr><td><code>erase_hides_history_at_every_system_time</code> (<code>erase.rs</code>)</td><td>An erased entity is invisible even to a <code>FOR SYSTEM_TIME AS OF</code> query timestamped <em>before</em> the erase — a deliberate GDPR choice, not a time-travel bug.</td></tr>
+<tr><td><code>erase_hides_history_at_every_system_time</code> (<code>erase.rs</code>)</td><td>An erased entity is invisible even to a <code>FOR SYSTEM_TIME AS OF</code> query timestamped before the erase, a deliberate GDPR choice rather than a time-travel bug.</td></tr>
 <tr><td><code>erase_connected_requires_detach</code> (<code>erase.rs</code>)</td><td>A plain <code>ERASE</code> on a node with incident edges fails with <code>EngineError::StillConnected</code> rather than silently orphaning edges; <code>DETACH ERASE</code> is required.</td></tr>
 <tr><td><code>detach_erase_erases_incident_edges</code> (<code>erase.rs</code>)</td><td><code>DETACH ERASE</code> also erases the node’s incident edges, not just the node itself.</td></tr>
 <tr><td><code>erase_then_reinsert_same_id_is_fresh_entity</code> (<code>erase.rs</code>)</td><td>Re-inserting the same <code>_id</code> after an erase starts a genuinely fresh entity, uncontaminated by the erased history.</td></tr>
 <tr><td><code>erased_property_bytes_absent_after_compaction_and_gc</code> (<code>gdpr_gc.rs</code>, Task 2)</td><td>After compaction + GC, an erased entity’s property bytes are absent from the compacted store, not merely hidden by a filter.</td></tr>
 <tr><td><code>post_erase_reinsert_survives_compaction</code> (<code>gdpr_gc.rs</code>, Task 2)</td><td>A re-inserted-after-erase entity survives a subsequent compaction pass correctly (the erase doesn’t corrupt later history for the same id).</td></tr>
-<tr><td><code>erased_bytes_absent_from_every_stored_object_and_log_segment</code> (<code>gdpr_gc.rs</code>, Task 2)</td><td>LOCAL-profile whole-disk proof: scans <strong>every</strong> stored byte — every log segment and every store object on disk — and asserts the erased entity’s property values appear in none of them.</td></tr>
+<tr><td><code>erased_bytes_absent_from_every_stored_object_and_log_segment</code> (<code>gdpr_gc.rs</code>, Task 2)</td><td>LOCAL-profile whole-disk proof: scans every stored byte (every log segment and every store object on disk) and asserts the erased entity’s property values appear in none of them.</td></tr>
 <tr><td><code>erased_bytes_absent_from_every_raw_object_on_the_object_store_log_profile</code> (<code>gdpr_gc.rs</code>, Task 3)</td><td>Same proof against the object-store-log profile: lists and GETs every raw <code>v1/</code> key in the object store directly (not through the engine’s own read path), so the check cannot be fooled by a caching or indexing bug.</td></tr>
-<tr><td><code>detach_erase_scrubs_edge_property_bytes_too</code> (<code>gdpr_gc.rs</code>, Task 2)</td><td><code>DETACH ERASE</code> scrubs edge/adjacency property bytes as thoroughly as node bytes — the edge-side GDPR proof.</td></tr>
+<tr><td><code>detach_erase_scrubs_edge_property_bytes_too</code> (<code>gdpr_gc.rs</code>, Task 2)</td><td><code>DETACH ERASE</code> scrubs edge/adjacency property bytes as thoroughly as node bytes; the edge-side GDPR proof.</td></tr>
 </tbody>
 </table>
 </div>
-<p>In short: reach for <code>DELETE</code> for ordinary “this is no longer true” business logic (history stays
-auditable); reach for <code>ERASE</code>/<code>DETACH ERASE</code> only when a legal erasure obligation requires the
-data to become genuinely unrecoverable after the next compaction + GC cycle.</p>
+<p>Reach for <code>DELETE</code> for ordinary “this is no longer true” business logic (history stays
+auditable). Reach for <code>ERASE</code>/<code>DETACH ERASE</code> only when a legal erasure obligation requires the
+data to become unrecoverable after the next compaction + GC cycle.</p>
 
                     </main>
 

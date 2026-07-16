@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-e97f12ed.js";
+            window.path_to_searchindex_js = "../searchindex-b7ef6f64.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-47ba109b.js"></script>
@@ -176,43 +176,43 @@
                     <main>
                         <h1 id="failover"><a class="header" href="#failover">Failover</a></h1>
 <p>Varve supports two writer-coordination modes, selected by <code>[coordinator] backend</code>. Exactly one
-is active per deployment; neither requires more than one <strong>log</strong> for the database (see the
+is active per deployment, and neither requires more than one <strong>log</strong> for the database (see the
 <a href="../architecture.html">architecture overview</a> for why Varve needs no source/replica log pair).</p>
 <h2 id="designated-writer-default"><a class="header" href="#designated-writer-default"><code>designated-writer</code> (default)</a></h2>
 <p>Exactly one writer process runs per database, and its uniqueness is enforced entirely by the
-<strong>deployment orchestrator</strong> — a systemd unit, a Kubernetes <code>StatefulSet</code> of size 1, or simply
-“only one process was started.” The writer publishes its identity as a plain, unconditional
-<code>PUT</code> object; no conditional-write semantics are required anywhere in this mode. This is why
-<code>designated-writer</code> works identically on <strong>every</strong> S3-API backend, sovereign or not — see the
-<a href="../backends.html">backend matrix</a>. If the writer process dies, recovery is manual (or orchestrator
--driven restart): there is no automatic standby takeover in this mode.</p>
+<strong>deployment orchestrator</strong>: a systemd unit, a Kubernetes <code>StatefulSet</code> of size 1, or simply
+“only one process was started”. The writer publishes its identity as a plain, unconditional
+<code>PUT</code> object, and no conditional-write semantics are required anywhere in this mode. This is why
+<code>designated-writer</code> works identically on every S3-API backend, sovereign or not (see the
+<a href="../backends.html">backend matrix</a>). If the writer process dies, recovery is manual (or
+orchestrator-driven restart); there is no automatic standby takeover in this mode.</p>
 <h2 id="cas-failover-opt-in-probe-gated"><a class="header" href="#cas-failover-opt-in-probe-gated"><code>cas-failover</code> (opt-in, probe-gated)</a></h2>
 <p><code>cas-failover</code> lets a standby writer automatically take over from a dead one, using the object
 store’s conditional-write (CAS) support to arbitrate. Because that support cannot be assumed on
 every S3-API backend, Varve gates this mode behind a startup capability probe
-(<code>Db::probe_capabilities</code>, <a href="../backends.html">backend matrix</a>): <strong>only a <code>Supported</code> verdict is
-allowed to enable it.</strong> A backend that fails the probe refuses <code>cas-failover</code> outright, naming
+(<code>Db::probe_capabilities</code>, <a href="../backends.html">backend matrix</a>): only a <code>Supported</code> verdict is
+allowed to enable it. A backend that fails the probe refuses <code>cas-failover</code> outright, naming
 the missing capability, rather than silently degrading to something unsafe.</p>
 <p>Mechanics: standby writers race a lease object; the winner <strong>increments the log epoch</strong>, which
 fences the old writer’s future appends by making them provably stale, then recovers from the
 latest committed manifest and resumes serving writes. Log positions are <code>(epoch, offset)</code> pairs
 with the epoch in the high bits, so packed positions still sort correctly across an epoch bump.</p>
-<p><strong>Live proof:</strong> <code>cargo run --release --example failover -p varve</code>
-(<code>crates/varve/examples/failover.rs</code>) runs two writer handles sharing one in-memory object
-store, kills the first (drops it without releasing its lease — a true crash, not a graceful
-handoff), and asserts the standby takes over in under 10 seconds with <strong>zero acked-transaction
-loss</strong>, then proves the dead writer’s late append is durable-but-dead: a real object lands in
-the store, but is invisible to the new writer, to a fresh query-only node, and to <code>verify()</code>. A
-run captured while writing this page:</p>
+<p>The <code>failover</code> example (<code>crates/varve/examples/failover.rs</code>) exercises this end to end.
+<code>cargo run --release --example failover -p varve</code> runs two writer handles sharing one in-memory
+object store, kills the first (drops it without releasing its lease, a true crash rather than a
+graceful handoff), and asserts the standby takes over in under 10 seconds with zero
+acked-transaction loss. It then confirms the dead writer’s late append is durable but dead: a
+real object lands in the store, but is invisible to the new writer, to a fresh query-only node,
+and to <code>verify()</code>. A run captured while writing this page:</p>
 <pre><code>writer A acquired lease (epoch 0), committed 3 txs
 writer A crashed (heartbeats stopped)
 writer B took over in 303ms: epoch 1, fence 0@3
-zombie append landed at (0,3) — IGNORED by B, query node, and verify
+zombie append landed at (0,3), IGNORED by B, query node, and verify
 final row count everywhere: 4
 </code></pre>
-<p>(Run-to-run timing varies with machine load — STATUS.md’s slice-10 close recorded 304 ms on a
-separate run — but the example’s own assertion is <code>takeover &lt; Duration::from_secs(10)</code>, so any
-passing run is comfortably under the 10-second bound; a 30-minute chaos soak,
+<p>(Run-to-run timing varies with machine load; STATUS.md’s slice-10 close recorded 304 ms on a
+separate run. The example’s own assertion is <code>takeover &lt; Duration::from_secs(10)</code>, so any
+passing run is comfortably under the 10-second bound. A 30-minute chaos soak,
 <code>VARVE_CHAOS_SECS=1800</code>, survived 64 kills with 2,463 acked transactions all present and
 <code>verify()</code> clean.)</p>
 <p><code>[coordinator]</code> config:</p>
@@ -223,30 +223,30 @@ takeover_after_ms = 300
 </code></pre>
 <h2 id="manifest-selection-hardening-task-4"><a class="header" href="#manifest-selection-hardening-task-4">Manifest selection hardening (Task 4)</a></h2>
 <p><code>latest_manifest</code> selects the newest committed manifest by <strong><code>(watermark, block_id)</code></strong>,
-watermark-first — <code>block_id</code> only breaks ties between manifests at equal watermark (a
-flush-vs-compaction race). This closed a known limitation from slice 10: because a compaction or
+watermark-first: <code>block_id</code> only breaks ties between manifests at equal watermark (a
+flush-vs-compaction race). This closed a known limitation from slice 10. Because a compaction or
 flush manifest <code>PUT</code> is the commit point for the object store and has <strong>no epoch-fence
-equivalent</strong> (only the log is epoch-fenced), a fenced writer’s stray manifest — one with a
-higher <code>block_id</code> but a <strong>stale</strong> watermark — could previously have won recovery/verify/follower
-reads by block_id alone. Selecting by watermark first makes that permanently impossible: a stale
+equivalent</strong> (only the log is epoch-fenced), a fenced writer’s stray manifest, one with a
+higher <code>block_id</code> but a stale watermark, could previously have won recovery/verify/follower
+reads by block_id alone. Selecting by watermark first makes that impossible: a stale
 watermark can never win regardless of block_id. The before/after lease ack-gate (a fenced writer
 never acks a compaction <code>Ok</code> and instead goes fatal) remains the liveness guard that stops a
 zombie from completing a stray manifest <code>PUT</code> in the first place; watermark-first selection is
 the correctness backstop if it somehow did.</p>
 <h2 id="gc-followers-and-loggap-task-1"><a class="header" href="#gc-followers-and-loggap-task-1">GC, followers, and <code>LogGap</code> (Task 1)</a></h2>
-<p>Garbage collection sweeps superseded <code>v1/log/**.vlog</code> objects — but only those <strong>wholly below
+<p>Garbage collection sweeps superseded <code>v1/log/**.vlog</code> objects, but only those <strong>wholly below
 the minimum retained manifest watermark</strong> (the minimum <code>watermark</code> across the manifest set
-<code>blocks_to_keep</code> protects), making the object-store log’s <code>trim</code> a real no-op-safe operation
-rather than an aspirational one. This has a direct operational consequence: <strong>a query follower
-that has lagged behind the writer by more than the retained watermark window loses its log tail
-and terminates fail-stop with <code>LogGap</code></strong>, rather than silently serving a gap in history. This is
-the correct, intentional behavior — a genuine, fence-unexplained gap in a follower’s or
-<code>verify()</code>’s log read is a correctness hazard, not something to paper over — and the follower
-recovers cleanly by restarting from the latest manifest. Size <code>[gc] blocks_to_keep</code> (default 10)
-to comfortably exceed your slowest follower’s realistic lag; see
-<a href="profiles.html#sizing-knobs">sizing knobs</a> for the tuning table. A legitimate epoch bump during
-<code>cas-failover</code> recovery is not mistaken for a gap (the same fence-aware contiguity check
-<code>follower</code> and <code>verify</code> both use recognizes it as an intentional jump, not a hole).</p>
+<code>blocks_to_keep</code> protects), which makes the object-store log’s <code>trim</code> a real no-op-safe
+operation rather than an aspirational one. This has a direct operational consequence: a query
+follower that has lagged behind the writer by more than the retained watermark window loses its
+log tail and terminates fail-stop with <code>LogGap</code>, rather than silently serving a gap in history.
+This is intentional. A genuine, fence-unexplained gap in a follower’s or <code>verify()</code>’s log read
+is a correctness hazard, and the follower recovers cleanly by restarting from the latest
+manifest. Size <code>[gc] blocks_to_keep</code> (default 10) to comfortably exceed your slowest follower’s
+realistic lag; see <a href="profiles.html#sizing-knobs">sizing knobs</a> for the tuning table. A legitimate
+epoch bump during <code>cas-failover</code> recovery is not mistaken for a gap (the same fence-aware
+contiguity check <code>follower</code> and <code>verify</code> both use recognizes it as an intentional jump, not a
+hole).</p>
 
                     </main>
 

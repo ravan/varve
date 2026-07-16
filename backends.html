@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-e97f12ed.js";
+            window.path_to_searchindex_js = "searchindex-b7ef6f64.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-47ba109b.js"></script>
@@ -175,8 +175,8 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="backends"><a class="header" href="#backends">Backends</a></h1>
-<p>Varve speaks to <strong>any S3-API object store</strong> through <code>object_store::aws</code> (<code>crates/varve-storage/ src/s3.rs</code>), adapted to Varve’s own sovereign <code>ObjectStore</code> trait — the engine only ever sees
-<code>put</code>/<code>get</code>/<code>get_range</code>/<code>list</code>. Conditional-write (CAS) support is <em>probed</em>, never assumed (spec
+<p>Varve speaks to any S3-API object store through <code>object_store::aws</code> (<code>crates/varve-storage/ src/s3.rs</code>), adapted to Varve’s own <code>ObjectStore</code> trait, so the engine only ever sees
+<code>put</code>/<code>get</code>/<code>get_range</code>/<code>list</code>. Conditional-write (CAS) support is probed, never assumed (spec
 D5): a 4-step startup probe (<code>Db::probe_capabilities</code>) classifies a backend as <code>Supported</code>,
 <code>Unsupported</code>, or <code>Inconsistent</code>, and only a <code>Supported</code> verdict is allowed to run the opt-in
 <code>cas-failover</code> coordinator mode. See <a href="ops/failover.html">Failover</a> for what that mode buys you and
@@ -203,12 +203,12 @@ cadence matches <code>.github/workflows/ci.yml</code>’s <code>backend-matrix</
 </table>
 </div>
 <p>Garage and SeaweedFS both fail the probe the same way: a create-if-absent <code>PUT</code> against an
-<em>existing</em> key succeeds instead of being refused — the precondition is silently ignored rather
+existing key succeeds instead of being refused. The precondition is silently ignored rather
 than enforced, which the probe’s four steps (create → create-again-must-refuse →
-swap-current-etag → swap-STALE-must-refuse) are specifically designed to catch. Both assert
-<code>NotSupported</code> (the load-bearing negation <code>cas-failover</code>’s gate actually checks), not a pinned
+swap-current-etag → swap-STALE-must-refuse) are designed to catch. Both assert
+<code>NotSupported</code> (the negation <code>cas-failover</code>’s gate actually checks), not a pinned
 <code>Inconsistent{reason}</code> string, since backend-specific wording could legitimately change.</p>
-<p>The image pins above are the <strong>single source of truth</strong> in <code>backends.rs</code>, reproduced here
+<p>The image pins above are the single source of truth in <code>backends.rs</code>, reproduced here
 verbatim for reference (do not duplicate the version strings anywhere else):</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
@@ -224,7 +224,7 @@ specific backend names); it skips silently without Docker, so <code>just check</
 <p>All five S3-API backends share one config section (<code>crates/varve-storage/src/s3.rs</code>); only
 <code>bucket</code> is required. The builder starts from <code>AmazonS3Builder::from_env()</code> (standard <code>AWS_*</code>
 environment variables and the AWS provider chain), so explicit config keys are overrides, not
-requirements — an AWS deployment using ambient credentials needs only <code>bucket</code>.</p>
+requirements. An AWS deployment using ambient credentials needs only <code>bucket</code>.</p>
 <pre><code class="language-toml">[storage]
 backend = "s3"
 
@@ -246,12 +246,12 @@ if the backend enforces one (Garage does, conventionally <code>"garage"</code>).
 rely on the ambient environment/instance-role credential chain. <code>path_style</code> should be <code>false</code>
 for AWS proper, though AWS still accepts path-style requests for backward compatibility.</p>
 <h2 id="sovereignty"><a class="header" href="#sovereignty">Sovereignty</a></h2>
-<p>Plain, unconditional <code>PUT</code>/<code>GET</code>/<code>LIST</code> is <strong>always sufficient</strong> to run Varve in its default
-<code>designated-writer</code> mode — no backend capability beyond basic S3-API object storage is ever
+<p>Plain, unconditional <code>PUT</code>/<code>GET</code>/<code>LIST</code> is always sufficient to run Varve in its default
+<code>designated-writer</code> mode: no backend capability beyond basic S3-API object storage is
 required, which is why Varve runs identically on a fully sovereign, self-hosted, open-source
 backend (Garage, SeaweedFS, Ceph RGW) as it does on AWS. Conditional-write (CAS) support is
-<strong>strictly optional</strong>: it unlocks the opt-in <code>cas-failover</code> coordinator mode, is detected by a
-startup probe rather than assumed, and its absence is never an error for normal operation — a
+strictly optional. It unlocks the opt-in <code>cas-failover</code> coordinator mode, is detected by a
+startup probe rather than assumed, and its absence is never an error for normal operation. A
 backend that fails the probe simply cannot run <code>cas-failover</code>, and falls back to (or stays on)
 <code>designated-writer</code>, enforced by the deployment orchestrator instead of the object store. Varve
 will never make CAS a hard requirement for shipping v1 functionality.</p>

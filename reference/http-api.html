@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-e97f12ed.js";
+            window.path_to_searchindex_js = "../searchindex-b7ef6f64.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-47ba109b.js"></script>
@@ -177,7 +177,7 @@
                         <h1 id="http-api"><a class="header" href="#http-api">HTTP API</a></h1>
 <p>This is the frozen slice-9 wire contract served by <code>varved</code> (<code>crates/varve-server</code>). Every route,
 status code, and body on this page is copied from <code>crates/varve-server/tests/http_api.rs</code> and
-<code>crates/varve-server/src/{api.rs,http/{mod.rs,handlers.rs}}</code> — nothing here is invented.</p>
+<code>crates/varve-server/src/{api.rs,http/{mod.rs,handlers.rs}}</code>.</p>
 <h2 id="routes--auth-matrix"><a class="header" href="#routes--auth-matrix">Routes &amp; auth matrix</a></h2>
 <div class="table-wrapper">
 <table>
@@ -185,20 +185,20 @@ status code, and body on this page is copied from <code>crates/varve-server/test
 <tr><th>Route</th><th>Method</th><th>Auth</th><th>Notes</th></tr>
 </thead>
 <tbody>
-<tr><td><code>/healthz</code></td><td>GET</td><td><strong>public</strong></td><td>I/O-free — reads only the in-memory follower-error state, never touches the object store.</td></tr>
+<tr><td><code>/healthz</code></td><td>GET</td><td><strong>public</strong></td><td>I/O-free; reads only the in-memory follower-error state, never touches the object store.</td></tr>
 <tr><td><code>/v1/query</code></td><td>POST</td><td>bearer</td><td>Read-only; served by any node with the data.</td></tr>
-<tr><td><code>/v1/tx</code></td><td>POST</td><td>bearer</td><td>Mutation; <strong>writer-only</strong> — redirects on a non-writer node.</td></tr>
+<tr><td><code>/v1/tx</code></td><td>POST</td><td>bearer</td><td>Mutation; <strong>writer-only</strong>, redirects on a non-writer node.</td></tr>
 <tr><td><code>/v1/status</code></td><td>GET</td><td>bearer</td><td>Roles, applied progress, manifest watermark, probe verdict.</td></tr>
 <tr><td><code>/metrics</code></td><td>GET</td><td>bearer</td><td>Prometheus text format.</td></tr>
-<tr><td><code>/v1/admin/compact</code></td><td>POST</td><td>bearer</td><td><strong>Compactor-role-only</strong> — redirects otherwise.</td></tr>
-<tr><td><code>/v1/admin/gc</code></td><td>POST</td><td>bearer</td><td><strong>Compactor-role-only</strong> — redirects otherwise.</td></tr>
+<tr><td><code>/v1/admin/compact</code></td><td>POST</td><td>bearer</td><td><strong>Compactor-role-only</strong>, redirects otherwise.</td></tr>
+<tr><td><code>/v1/admin/gc</code></td><td>POST</td><td>bearer</td><td><strong>Compactor-role-only</strong>, redirects otherwise.</td></tr>
 <tr><td><code>/v1/admin/verify</code></td><td>POST</td><td>bearer</td><td>Runs on any node (not role-gated).</td></tr>
 </tbody>
 </table>
 </div>
 <p>Bearer auth is <code>Authorization: Bearer &lt;token&gt;</code> against a configured <code>Authenticator</code> (the builtin
-is <code>static</code>, a fixed subject→token table). A <strong>duplicate</strong> <code>Authorization</code> header is treated as
-unauthenticated (401), not an error — a client sending two auth headers gets rejected exactly
+is <code>static</code>, a fixed subject→token table). A duplicate <code>Authorization</code> header is treated as
+unauthenticated (401), not an error: a client sending two auth headers gets rejected exactly
 like a client sending none, from <code>authorization_accept_and_body_limit_are_parsed_exactly</code>. Every
 response, authenticated or not, carries <code>x-content-type-options: nosniff</code>.</p>
 <h2 id="the-421-writer-redirect"><a class="header" href="#the-421-writer-redirect">The 421 writer redirect</a></h2>
@@ -208,16 +208,16 @@ response, authenticated or not, carries <code>x-content-type-options: nosniff</c
 <p>If no writer has published an address yet, the response is <code>503 Service Unavailable</code> with
 <code>{"code": "writer_unavailable", ...}</code> instead. (Source:
 <code>query_node_tx_redirects_to_fresh_advertisement_or_503</code>.) The CLI’s <code>RemoteClient</code> follows one
-such redirect automatically and re-sends the request to the advertised writer; a <strong>second</strong> 421
+such redirect automatically and re-sends the request to the advertised writer; a second 421
 in a row is treated as a <code>RedirectLoop</code> error rather than followed again.</p>
 <h2 id="requestresponse-bodies"><a class="header" href="#requestresponse-bodies">Request/response bodies</a></h2>
-<p><strong><code>POST /v1/tx</code></strong> — a parameterized INSERT, from <code>tx_then_json_query_round_trips</code>:</p>
+<p><strong><code>POST /v1/tx</code></strong>: a parameterized INSERT, from <code>tx_then_json_query_round_trips</code>:</p>
 <pre><code class="language-json">{"gql": "INSERT (:Person {_id: 1, name: $name})", "params": {"name": "Ada"}}
 </code></pre>
 <p>Response (<code>200 OK</code>, <code>TxResponse</code>):</p>
 <pre><code class="language-json">{"tx_id": 1, "system_time": "...", "system_time_us": ..., "side_effects": {...}, "basis": ...}
 </code></pre>
-<p><strong><code>POST /v1/query</code></strong> — reading it back at a fixed transaction-id basis:</p>
+<p><strong><code>POST /v1/query</code></strong>: reading it back at a fixed transaction-id basis:</p>
 <pre><code class="language-json">{"gql": "MATCH (p:Person) RETURN p.name AS name", "basis": 1}
 </code></pre>
 <p>Response (<code>200 OK</code>, JSON default):</p>
@@ -238,20 +238,21 @@ before giving up. A basis that never arrives within the timeout is <code>408 Req
 <li><code>*/*</code> or <code>application/json</code> (or no <code>Accept</code> header at all) → the default JSON <code>{"rows": [...]}</code>
 shape shown above.</li>
 <li>Anything else (e.g. <code>application/jsonish</code>) → <code>406 Not Acceptable</code>.</li>
-<li>If <strong>both</strong> <code>application/json</code> and the Arrow media type are offered, Arrow wins (checked
-first) — from <code>authorization_accept_and_body_limit_are_parsed_exactly</code>.</li>
+<li>If both <code>application/json</code> and the Arrow media type are offered, Arrow wins (checked
+first), from <code>authorization_accept_and_body_limit_are_parsed_exactly</code>.</li>
 </ul>
 <h2 id="tagged-bytes-json-convention"><a class="header" href="#tagged-bytes-json-convention">Tagged-bytes JSON convention</a></h2>
 <p>Binary property values round-trip through JSON as a single-key object with a <code>$bytes</code> key holding
 standard base64: <code>{"$bytes": "&lt;base64&gt;"}</code>. This is handled symmetrically by
 <code>params_from_json</code>/<code>scalar_from_json</code> on the way in and <code>batches_to_json</code>/the CLI’s
-<code>TaggedBytesEncoder</code> on the way out — arrays and any other multi-key or nested object shape are
+<code>TaggedBytesEncoder</code> on the way out; arrays and any other multi-key or nested object shape are
 rejected as invalid parameters.</p>
 <h2 id="error-responses"><a class="header" href="#error-responses">Error responses</a></h2>
 <p>Every error is <code>{"code": "...", "message": "...", "writer": null}</code> (<code>ErrorResponse</code>); <code>message</code>
-never leaks internal detail — <code>internal</code> errors are deliberately generic even when the
-underlying GQL referenced something sensitive (<code>invalid_requests_negotiation_timeout_and_ internal_errors_are_stable</code> asserts the literal string <code>secret_storage_credential</code> from a failing
-query never appears in the response body).</p>
+never leaks internal detail: <code>internal</code> errors are generic even when the underlying GQL
+referenced something sensitive (<code>invalid_requests_negotiation_timeout_and_internal_errors_are_stable</code>
+asserts the literal string <code>secret_storage_credential</code> from a failing query never appears in the
+response body).</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -266,14 +267,14 @@ query never appears in the response body).</p>
 <tr><td>421</td><td><code>misdirected_request</code></td><td>A writer-only or compactor-only route hit a node without that role; <code>writer</code> names the current writer if known.</td></tr>
 <tr><td>429</td><td><code>backpressure</code></td><td>The writer’s submission queue is full; response includes <code>Retry-After: 1</code>.</td></tr>
 <tr><td>503</td><td><code>writer_unavailable</code></td><td>A redirect-eligible route with no writer advertisement published yet.</td></tr>
-<tr><td>503</td><td><code>follower_failed</code></td><td>The node’s log-follower loop has stopped (terminal state — also reflected by <code>/healthz</code> returning 503 <code>{"status":"degraded","error":"follower stopped"}</code>).</td></tr>
+<tr><td>503</td><td><code>follower_failed</code></td><td>The node’s log-follower loop has stopped (terminal state; also reflected by <code>/healthz</code> returning 503 <code>{"status":"degraded","error":"follower stopped"}</code>).</td></tr>
 <tr><td>503</td><td><code>writer_fenced</code></td><td>This writer has been fenced by a newer epoch (<code>cas-failover</code> takeover elsewhere).</td></tr>
-<tr><td>500</td><td><code>internal</code></td><td>Anything else — object-store I/O failure, unexpected engine error, etc.</td></tr>
+<tr><td>500</td><td><code>internal</code></td><td>Anything else: object-store I/O failure, unexpected engine error, etc.</td></tr>
 </tbody>
 </table>
 </div>
 <h2 id="tls"><a class="header" href="#tls">TLS</a></h2>
-<p><code>[server.http] tls_cert</code>/<code>tls_key</code> must both be set or both omitted — a lone cert or key is a
+<p><code>[server.http] tls_cert</code>/<code>tls_key</code> must both be set or both omitted; a lone cert or key is a
 config-time error. <code>advertised_address</code> (used for the 421 redirect body) is required on any node
 with the <code>Writer</code> role and must be an absolute <code>http://</code>/<code>https://</code> URL.</p>
 

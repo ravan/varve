@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-e97f12ed.js";
+            window.path_to_searchindex_js = "../searchindex-b7ef6f64.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-47ba109b.js"></script>
@@ -175,14 +175,14 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="operations-guide"><a class="header" href="#operations-guide">Operations guide</a></h1>
-<p>This section is for running Varve in production, not for writing GQL against it. Start with
-<a href="profiles.html">Deployment profiles &amp; sizing</a> to pick a topology and the handful of tuning knobs
-that actually matter at your scale; consult the <a href="configuration.html">configuration reference</a> for
-every <code>[section]</code> key <code>varve.toml</code> accepts; read <a href="failover.html">Failover</a> before choosing between
-the default <code>designated-writer</code> mode and the opt-in, probe-gated <code>cas-failover</code> mode; and wire
-<a href="metrics.html">Metrics &amp; observability</a> into Prometheus/Grafana and, optionally, an OpenTelemetry
-collector before you need them at 2am. <a href="../backends.html">Backends &amp; capability matrix</a> covers
-which S3-API object stores are CI-verified and how to configure each.</p>
+<p>This section covers running Varve in production rather than writing GQL against it. Start with
+<a href="profiles.html">Deployment profiles &amp; sizing</a> to pick a topology and the tuning knobs that matter
+at your scale. Consult the <a href="configuration.html">configuration reference</a> for every <code>[section]</code>
+key <code>varve.toml</code> accepts. Read <a href="failover.html">Failover</a> before choosing between the default
+<code>designated-writer</code> mode and the opt-in, probe-gated <code>cas-failover</code> mode. Wire
+<a href="metrics.html">Metrics &amp; observability</a> into Prometheus/Grafana, and optionally an OpenTelemetry
+collector, before you need it. <a href="../backends.html">Backends &amp; capability matrix</a> covers which
+S3-API object stores are CI-verified and how to configure each.</p>
 
                     </main>
 

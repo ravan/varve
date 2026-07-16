@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-e97f12ed.js";
+            window.path_to_searchindex_js = "../searchindex-b7ef6f64.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-47ba109b.js"></script>
@@ -177,8 +177,7 @@
                         <h1 id="cli"><a class="header" href="#cli">CLI</a></h1>
 <p>The <code>varve</code> binary (<code>crates/varve-cli</code>) talks to either an embedded local database or a remote
 <code>varved</code> server, using the same subcommands either way. Every usage line on this page is copied
-from <code>varve --help</code>/<code>varve &lt;subcommand&gt; --help</code>, run live against this exact commit while
-writing this page.</p>
+from <code>varve --help</code>/<code>varve &lt;subcommand&gt; --help</code>.</p>
 <h2 id="connection-selection"><a class="header" href="#connection-selection">Connection selection</a></h2>
 <pre><code>$ varve --help
 Varve bitemporal graph database client
@@ -198,12 +197,12 @@ Options:
       --token &lt;TOKEN&gt;  Bearer token sent with every request to `--url`. Falls back to the `VARVE_TOKEN` environment variable; never echoed back by `--help` or any diagnostic output [env: VARVE_TOKEN]
   -h, --help           Print help
 </code></pre>
-<p><code>--dir</code> and <code>--url</code> (and <code>--token</code>) are <strong>global</strong> flags: they must come <em>before</em> the subcommand
+<p><code>--dir</code> and <code>--url</code> (and <code>--token</code>) are global flags: they must come before the subcommand
 (<code>varve --dir ./mydb shell</code>, not <code>varve shell --dir ./mydb</code>). Exactly one connection mode is
 required:</p>
 <ul>
-<li><code>--dir &lt;DIR&gt;</code> — open a local database directory embedded in the CLI process.</li>
-<li><code>--url &lt;URL&gt;</code> + <code>--token &lt;TOKEN&gt;</code> (or <code>VARVE_TOKEN</code> env var) — talk to a remote <code>varved</code> over
+<li><code>--dir &lt;DIR&gt;</code>: open a local database directory embedded in the CLI process.</li>
+<li><code>--url &lt;URL&gt;</code> + <code>--token &lt;TOKEN&gt;</code> (or <code>VARVE_TOKEN</code> env var): talk to a remote <code>varved</code> over
 HTTP/HTTPS.</li>
 </ul>
 <p>Both together, or neither, is a startup error with one of these exact messages
@@ -226,7 +225,7 @@ Options:
 multiple lines), and <code>:status</code>, <code>:help</code>, <code>:quit</code>/<code>:exit</code> are built-in commands. See
 <a href="../getting-started.html">Getting started</a> for full transcript examples of both <code>--dir</code> and
 <code>--url</code> mode. Every completed write echoes a <code>tx &lt;id&gt; @ &lt;system_time&gt;</code> receipt line followed by
-one line per <em>nonzero</em> side-effect count (nodes/relationships created or deleted, properties set
+one line per nonzero side-effect count (nodes/relationships created or deleted, properties set
 or removed, labels added or removed); a query prints an Arrow-pretty table, or <code>(0 rows)</code> if
 every returned batch is empty.</p>
 <h2 id="import"><a class="header" href="#import"><code>import</code></a></h2>
@@ -243,14 +242,15 @@ Options:
       --graph &lt;GRAPH&gt;  Graph to `USE` before each insert. Omitted entirely (no `USE` clause) when not given
   -h, --help           Print help
 </code></pre>
-<p>Each line of the JSONL file becomes one parameterized <code>INSERT (:&lt;LABEL&gt; {...})</code> transaction —
-object keys become <code>$pN</code>-style bound parameters (sorted, deterministic), never string-interpolated
-into the GQL — and the resulting statement is validated with <code>varve_gql::parse_program</code> <em>before</em>
-any request is sent. Import stops at the first failing line, reporting its 1-based line number
-and how many lines were already committed. JSON object keys and the <code>--label</code>/<code>--graph</code> values
-are all validated as GQL identifiers (ASCII shape only — first byte a letter or <code>_</code>, the rest
-alphanumeric or <code>_</code>); the parser is still the sole authority on whether the resulting GQL is
-actually valid (e.g. reserved-word collisions), not this shape check.</p>
+<p>Each line of the JSONL file becomes one parameterized <code>INSERT (:&lt;LABEL&gt; {...})</code> transaction.
+Object keys become <code>$pN</code>-style bound parameters (sorted, deterministic), never
+string-interpolated into the GQL, and the resulting statement is validated with
+<code>varve_gql::parse_program</code> before any request is sent. Import stops at the first failing line,
+reporting its 1-based line number and how many lines were already committed. JSON object keys
+and the <code>--label</code>/<code>--graph</code> values are all validated as GQL identifiers (ASCII shape only: first
+byte a letter or <code>_</code>, the rest alphanumeric or <code>_</code>); the parser is still the sole authority on
+whether the resulting GQL is actually valid (e.g. reserved-word collisions), not this shape
+check.</p>
 <h2 id="export"><a class="header" href="#export"><code>export</code></a></h2>
 <pre><code>$ varve export --help
 Run a GQL query and write results as line-delimited JSON
@@ -290,12 +290,12 @@ Options:
 (<code>CommandClient::status</code>/<code>compact</code>/<code>gc</code>/<code>verify</code>). With <code>--json</code>, the raw response struct is
 printed via <code>serde_json::to_string</code>; without it, a fixed-field-order human-readable rendering is
 printed (e.g. <code>format_status</code>/<code>format_compaction</code>/<code>format_gc</code>/<code>format_verify</code> in
-<code>crates/varve-cli/src/output.rs</code>) — a missing <code>manifest_block_id</code> renders as the literal text
-<code>none</code>, never a blank or <code>null</code>.</p>
+<code>crates/varve-cli/src/output.rs</code>), where a missing <code>manifest_block_id</code> renders as the literal
+text <code>none</code>, never a blank or <code>null</code>.</p>
 <h2 id="jsonl-format-notes"><a class="header" href="#jsonl-format-notes">JSONL format notes</a></h2>
 <p>Every JSONL line (both <code>import</code> input and <code>export</code> output) is a flat JSON object. Scalar values
-map directly (<code>null</code>, <code>true</code>/<code>false</code>, numbers — integers must fit <code>i64</code>/<code>u64</code> and floats must be
-finite, i.e. no <code>NaN</code>/<code>Infinity</code> — and strings); binary values are the single-key <code>{"$bytes": "&lt;base64&gt;"}</code> form described above; arrays and any other nested-object shape are rejected as
+map directly (<code>null</code>, <code>true</code>/<code>false</code>, numbers, and strings; integers must fit <code>i64</code>/<code>u64</code> and
+floats must be finite, i.e. no <code>NaN</code>/<code>Infinity</code>); binary values are the single-key <code>{"$bytes": "&lt;base64&gt;"}</code> form described above; arrays and any other nested-object shape are rejected as
 invalid parameters (the same validation the HTTP API’s <code>params_from_json</code> enforces, since the
 CLI reuses it directly).</p>
 

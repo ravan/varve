@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-e97f12ed.js";
+            window.path_to_searchindex_js = "../searchindex-b7ef6f64.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-47ba109b.js"></script>
@@ -175,20 +175,18 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="gql-reference"><a class="header" href="#gql-reference">GQL reference</a></h1>
-<p>Varve implements the <strong>practical core</strong> of GQL (ISO/IEC 39075:2024) described in the
+<p>Varve implements the practical core of GQL (ISO/IEC 39075:2024) described in the
 <a href="../../../design/2026-07-04-varve-design.html">design specification</a> §8: an openCypher-flavored
 subset covering pattern matching, mutation, temporal travel, and the usual read-query pipeline
 (<code>FILTER</code>/<code>LET</code>/<code>FOR</code>/<code>ORDER BY</code>/<code>UNION</code>/aggregation). See <a href="deviations.html">Deviations</a> for what
-is deliberately out of scope, and <a href="temporal.html">Bitemporal queries</a> for <code>FOR VALID_TIME</code> /
-<code>FOR SYSTEM_TIME</code>.</p>
-<p>Every example below is copied <strong>verbatim</strong> from one of two verified sources — never invented —
-and is confirmed to parse on this exact commit:</p>
+is out of scope, and <a href="temporal.html">Bitemporal queries</a> for <code>FOR VALID_TIME</code> / <code>FOR SYSTEM_TIME</code>.</p>
+<p>Every example below is copied verbatim from one of two verified sources and parses on this exact
+commit:</p>
 <ul>
-<li><code>crates/varve-gql/src/parser.rs</code>’s own test suite (<code>cargo test -p varve-gql --lib</code>: <strong>65
-passed, 0 failed</strong>), for examples marked “parser test”.</li>
-<li><code>crates/varve/examples/gql_tour.rs</code>, freshly executed end to end (<code>cargo run --release --example gql_tour -p varve</code>) against a real in-memory <code>Db</code> while writing this page, for
-examples marked “gql_tour”. Its full source and captured output are both worth reading start
-to end for a single coherent walkthrough.</li>
+<li><code>crates/varve-gql/src/parser.rs</code>’s own test suite (<code>cargo test -p varve-gql --lib</code>: 65
+passed, 0 failed), for examples marked “parser test”.</li>
+<li><code>crates/varve/examples/gql_tour.rs</code>, run end to end (<code>cargo run --release --example gql_tour -p varve</code>) against a real in-memory <code>Db</code>, for examples marked “gql_tour”. Its full source and
+captured output read start to end as a single coherent walkthrough.</li>
 </ul>
 <h2 id="insert"><a class="header" href="#insert">INSERT</a></h2>
 <p>Create nodes and edges. A bare node needs at least a label, a property, or an outgoing/incoming
@@ -197,15 +195,15 @@ hop; edges always require a label (see <a href="deviations.html">Deviations</a>)
        (:Person {_id: 2, name: 'Bob', age: 41, city: 'Paris'}),
        (:Person {_id: 3, name: 'Cy', age: 36, city: 'London'})
 </code></pre>
-<p><em>(gql_tour — seeds the tour’s three people)</em></p>
+<p><em>(gql_tour: seeds the tour’s three people)</em></p>
 <p><code>MATCH … INSERT</code> binds existing nodes and inserts an edge between them:</p>
 <pre><code class="language-gql">MATCH (a:Person {_id: 1}), (b:Person {_id: 2}) INSERT (a)-[:KNOWS]-&gt;(b)
 </code></pre>
 <p><em>(gql_tour)</em></p>
-<p><code>INSERT</code> also accepts <code>VALID FROM</code>/<code>VALID TO</code> to backdate or bound a fact’s valid-time range —
-see <a href="temporal.html">Bitemporal queries</a>.</p>
+<p><code>INSERT</code> also accepts <code>VALID FROM</code>/<code>VALID TO</code> to backdate or bound a fact’s valid-time range.
+See <a href="temporal.html">Bitemporal queries</a>.</p>
 <h2 id="match"><a class="header" href="#match">MATCH</a></h2>
-<p>Binds one or more comma-separated <strong>linear</strong> paths (see <a href="deviations.html">Deviations</a> for what
+<p>Binds one or more comma-separated linear paths (see <a href="deviations.html">Deviations</a> for what
 “linear” excludes) and an optional <code>WHERE</code>:</p>
 <pre><code class="language-gql">MATCH (a:Person)-[:KNOWS]-&gt;(b:Person) RETURN a.name, b.name
 </code></pre>
@@ -217,7 +215,7 @@ OPTIONAL MATCH (p)-[:MENTORS]-&gt;(mentor:Person)
 RETURN p.name AS person, mentor.name AS mentor
 ORDER BY person ASC
 </code></pre>
-<p><em>(gql_tour — Ada/Bob/Cy all have no mentor yet, so <code>mentor</code> is <code>NULL</code> for every row, and every
+<p><em>(gql_tour: Ada/Bob/Cy all have no mentor yet, so <code>mentor</code> is <code>NULL</code> for every row, and every
 row still appears)</em></p>
 <h2 id="where"><a class="header" href="#where">WHERE</a></h2>
 <p>Filters a <code>MATCH</code>’s bindings by a boolean expression; supports parameters (<code>$name</code>):</p>
@@ -234,7 +232,7 @@ LET name = b.name
 FOR friend IN [b]
 RETURN name AS n, friend
 </code></pre>
-<p><em>(parser test — exercises FILTER, LET, and pipeline FOR together)</em></p>
+<p><em>(parser test: exercises FILTER, LET, and pipeline FOR together)</em></p>
 <p><code>RETURN</code> itself supports <code>DISTINCT</code>, <code>ORDER BY &lt;expr&gt; [ASC|DESC]</code> (comma-separated, mixed
 directions), and <code>SKIP</code>/<code>LIMIT</code>:</p>
 <pre><code class="language-gql">MATCH (n:Person)
@@ -272,7 +270,7 @@ call is a plain projection.</p>
 RETURN p.city AS city, count(*) AS people
 ORDER BY city ASC
 </code></pre>
-<p><em>(gql_tour — output: <code>London | 2</code>, <code>Paris | 1</code>)</em></p>
+<p><em>(gql_tour: output <code>London | 2</code>, <code>Paris | 1</code>)</em></p>
 <h2 id="set"><a class="header" href="#set">SET</a></h2>
 <p>Assigns a property or adds a label to an already-bound variable (both forms may appear in one
 comma-separated <code>SET</code>):</p>
@@ -285,7 +283,7 @@ comma-separated <code>SET</code>):</p>
 </code></pre>
 <p><em>(gql_tour)</em></p>
 <h2 id="delete-detach"><a class="header" href="#delete-detach">DELETE [DETACH]</a></h2>
-<p>Soft-deletes matched nodes/edges — a normal bitemporal tombstone, current-state-only (no <code>FOR</code>
+<p>Soft-deletes matched nodes/edges: a normal bitemporal tombstone, current-state-only (no <code>FOR</code>
 clause is accepted on a <code>DELETE</code>; see <a href="temporal.html">Bitemporal queries</a>):</p>
 <pre><code class="language-gql">MATCH (p:Person) WHERE p.name = 'Ada' DELETE p
 </code></pre>
@@ -296,20 +294,20 @@ clause is accepted on a <code>DELETE</code>; see <a href="temporal.html">Bitempo
 <p><em>(parser test)</em></p>
 <h2 id="erase-detach"><a class="header" href="#erase-detach">ERASE [DETACH]</a></h2>
 <p>Varve’s GDPR hard-delete extension (not part of standard GQL): erases a node’s history at
-<em>every</em> system-time and valid-time instant, not just from now on. See
+every system-time and valid-time instant, not just from now on. See
 <a href="temporal.html">Bitemporal queries</a> for the full DELETE-vs-ERASE contrast and the tests that prove
 bytes are physically gone after compaction + GC.</p>
 <pre><code class="language-gql">MATCH (n:Person) ERASE n
 </code></pre>
-<p><em>(parser test — fails with <code>StillConnected</code> if <code>n</code> still has incident edges; use <code>DETACH ERASE</code>)</em></p>
+<p><em>(parser test: fails with <code>StillConnected</code> if <code>n</code> still has incident edges; use <code>DETACH ERASE</code>)</em></p>
 <pre><code class="language-gql">MATCH (p:Person {_id: 1}) DETACH ERASE p
 </code></pre>
-<p><em>(gql_tour — after this, even a <code>FOR SYSTEM_TIME AS OF</code> query timestamped before the erase
+<p><em>(gql_tour: after this, even a <code>FOR SYSTEM_TIME AS OF</code> query timestamped before the erase
 returns zero rows for this entity, confirmed by the tour’s own printed
 <code>history after erase visible rows: 0</code>)</em></p>
 <h2 id="create-graph--drop-graph"><a class="header" href="#create-graph--drop-graph">CREATE GRAPH / DROP GRAPH</a></h2>
 <p>Catalog statements; a program may not mix catalog statements with data statements (<code>INSERT</code>,
-<code>MATCH</code>, mutations) in the same transaction — see <a href="deviations.html">Deviations</a>.</p>
+<code>MATCH</code>, mutations) in the same transaction (see <a href="deviations.html">Deviations</a>).</p>
 <pre><code class="language-gql">CREATE GRAPH people
 </code></pre>
 <p><em>(parser test; also <code>gql_tour</code>’s first statement: <code>CREATE GRAPH tour</code>)</em></p>
@@ -321,17 +319,17 @@ returns zero rows for this entity, confirmed by the tour’s own printed
 program:</p>
 <pre><code class="language-gql">CREATE GRAPH g; USE g; MATCH (n) RETURN n; DROP GRAPH g;
 </code></pre>
-<p><em>(parser test, <code>parse_program</code> — this parses as shown, but catalog and data statements cannot
+<p><em>(parser test, <code>parse_program</code>: this parses as shown, but catalog and data statements cannot
 share one transaction at execute time (see <a href="deviations.html">Deviations</a>), so in practice this
 must be run as three separate transactions: <code>CREATE GRAPH g;</code>, then <code>USE g; MATCH (n) RETURN n;</code>, then <code>DROP GRAPH g;</code>)</em></p>
 <h2 id="parameters"><a class="header" href="#parameters">Parameters</a></h2>
 <p><code>$name</code> placeholders bind to a caller-supplied parameter map (see <code>WHERE</code>, above, for a live
-example) — this is how the HTTP API’s <code>params</code> field and the CLI’s JSONL import both pass
+example). This is how the HTTP API’s <code>params</code> field and the CLI’s JSONL import both pass
 values without string-building GQL.</p>
 <h2 id="case"><a class="header" href="#case">CASE</a></h2>
 <pre><code class="language-gql">CASE x.kind WHEN 'a' THEN 1 ELSE 2 END
 </code></pre>
-<p><em>(parser test, as one expression inside a <code>RETURN</code> list — see <code>CAST</code>, below, for the full line)</em></p>
+<p><em>(parser test, as one expression inside a <code>RETURN</code> list; see <code>CAST</code> below for the full line)</em></p>
 <h2 id="exists"><a class="header" href="#exists">EXISTS</a></h2>
 <p>A boolean subquery: true iff the nested pattern has at least one match for the outer row’s
 bindings.</p>

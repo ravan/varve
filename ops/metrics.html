@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-e97f12ed.js";
+            window.path_to_searchindex_js = "../searchindex-b7ef6f64.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-47ba109b.js"></script>
@@ -175,23 +175,23 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="varve-operations-reference-metrics-tracing-and-failover"><a class="header" href="#varve-operations-reference-metrics-tracing-and-failover">Varve operations reference: metrics, tracing, and failover</a></h1>
-<p>Grafana-ready reference for everything Varve exposes at <code>GET /metrics</code>
+<p>Reference for everything Varve exposes at <code>GET /metrics</code>
 (Prometheus text format, <code>PrometheusMetrics</code> in
 <code>crates/varve-server/src/metrics/mod.rs</code>), the stable <code>tracing</code> span names
-emitted across the write/read/follower paths, and the coordination objects +
+emitted across the write/read/follower paths, and the coordination objects and
 failover runbook for the <code>[coordinator]</code> subsystem (spec §12). Every name
-below is copied verbatim from source — nothing here is invented.</p>
+below is copied verbatim from source.</p>
 <h2 id="1-metrics"><a class="header" href="#1-metrics">1. Metrics</a></h2>
 <p>All metrics are served on the writer/query-node HTTP surface at <code>/metrics</code>.
-Metric names ending in <code>_total</code> that are implemented as a Prometheus
-<code>IntGauge</code>/<code>IntGaugeVec</code> rather than a <code>Counter</code> are noted explicitly below —
-<strong>they are monotone by construction</strong> (mirrors of engine <code>AtomicU64</code>
+Some metric names ending in <code>_total</code> are implemented as a Prometheus
+<code>IntGauge</code>/<code>IntGaugeVec</code> rather than a <code>Counter</code>, noted explicitly below.
+They are monotone by construction (mirrors of engine <code>AtomicU64</code>
 counters that only ever increase within a process lifetime), so
-<code>rate()</code>/<code>increase()</code> behave correctly, but a Prometheus counter-type
-<code>reset()</code> detection (e.g. after a process restart, the gauge drops to 0 and
-<code>rate()</code> briefly reads negative-then-corrects) is a <code>Gauge</code>, not <code>Counter</code>,
-concern operators should be aware of. Only <code>varve_http_requests_total</code> is a
-true <code>IntCounterVec</code>.</p>
+<code>rate()</code>/<code>increase()</code> behave correctly. One caveat: because they are a
+<code>Gauge</code> type rather than <code>Counter</code>, Prometheus counter-reset detection does
+not apply, so after a process restart the gauge drops to 0 and <code>rate()</code>
+briefly reads negative before it corrects. Only <code>varve_http_requests_total</code>
+is a true <code>IntCounterVec</code>.</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -199,24 +199,24 @@ true <code>IntCounterVec</code>.</p>
 </thead>
 <tbody>
 <tr><td><code>varve_http_requests_total</code></td><td>counter</td><td><code>method</code>, <code>route</code>, <code>status</code></td><td>HTTP requests served</td><td><code>rate(varve_http_requests_total[5m])</code> by <code>route</code>/<code>status</code></td></tr>
-<tr><td><code>varve_http_request_duration_seconds</code></td><td>histogram</td><td><code>method</code>, <code>route</code></td><td>HTTP request latency</td><td><code>histogram_quantile(0.99, rate(varve_http_request_duration_seconds_bucket[5m]))</code> — query-latency p99</td></tr>
-<tr><td><code>varve_applied_tx_id</code></td><td>gauge</td><td>—</td><td>Latest applied transaction id on this node</td><td><code>varve_applied_tx_id</code></td></tr>
-<tr><td><code>varve_applied_log_position</code></td><td>gauge</td><td>—</td><td>Latest applied log position on this node</td><td><code>varve_applied_log_position</code></td></tr>
-<tr><td><code>varve_manifest_watermark</code></td><td>gauge</td><td>—</td><td>Current manifest watermark</td><td><code>varve_manifest_watermark</code></td></tr>
-<tr><td><code>varve_follower_healthy</code></td><td>gauge (0/1)</td><td>—</td><td>1 while the follower loop has no error; 0 once <code>follower_error</code> is set</td><td><code>min_over_time(varve_follower_healthy[5m]) == 0</code> — alert on follower stalls</td></tr>
-<tr><td><code>varve_log_head_position</code></td><td>gauge</td><td>—</td><td>Latest known log head (writer publishes its own durable position, lag 0 by construction; a follower/query node publishes <code>max(last-read+1, watermark seen in gap check)</code>, or the jumped cursor on a fence jump)</td><td><code>varve_log_head_position</code></td></tr>
-<tr><td><code>varve_log_lag_records</code></td><td>gauge</td><td>—</td><td><strong>Follower lag</strong>: records between this node’s applied position and the (locally known) log head</td><td><code>varve_log_lag_records</code> per node — alert if sustained &gt; 0 on a query node</td></tr>
-<tr><td><code>varve_txs_committed_total</code></td><td>gauge, monotone-by-construction (mirrors an engine <code>AtomicU64</code>, <code>_total</code>-named but not a <code>Counter</code> type)</td><td>—</td><td>Committed transactions</td><td><strong>ingest rate</strong>: <code>rate(varve_txs_committed_total[1m])</code></td></tr>
-<tr><td><code>varve_events_committed_total</code></td><td>gauge, monotone-by-construction</td><td>—</td><td>Committed events (finer-grained than tx count)</td><td><code>rate(varve_events_committed_total[1m])</code></td></tr>
-<tr><td><code>varve_commit_failures_total</code></td><td>gauge, monotone-by-construction</td><td>—</td><td>Pre-durability append failures</td><td><code>increase(varve_commit_failures_total[15m]) &gt; 0</code> — alert</td></tr>
-<tr><td><code>varve_flush_blocks_total</code></td><td>gauge, monotone-by-construction</td><td>—</td><td>Successful block flushes</td><td><code>rate(varve_flush_blocks_total[5m])</code></td></tr>
-<tr><td><code>varve_flush_failures_total</code></td><td>gauge, monotone-by-construction</td><td>—</td><td>Failed block flushes</td><td><code>increase(varve_flush_failures_total[15m]) &gt; 0</code> — alert</td></tr>
-<tr><td><code>varve_compaction_runs_total</code></td><td>gauge, monotone-by-construction</td><td>—</td><td>Compaction runs</td><td><code>rate(varve_compaction_runs_total[1h])</code></td></tr>
-<tr><td><code>varve_backpressure_rejections_total</code></td><td>gauge, monotone-by-construction</td><td>—</td><td><code>try_execute_as</code> rejections under backpressure (429s)</td><td><code>rate(varve_backpressure_rejections_total[1m])</code> — sustained &gt; 0 means writers are saturated</td></tr>
-<tr><td><code>varve_live_rows</code></td><td>gauge</td><td>—</td><td>Unflushed rows across all graphs</td><td><code>varve_live_rows</code></td></tr>
-<tr><td><code>varve_live_bytes</code></td><td>gauge</td><td>—</td><td>Unflushed approximate bytes across all graphs (drives the memory-watermark early flush)</td><td><code>varve_live_bytes</code> — compare against the configured watermark</td></tr>
-<tr><td><code>varve_persisted_tries</code></td><td>gauge</td><td>—</td><td>Persisted tries across all scopes</td><td><code>varve_persisted_tries</code></td></tr>
-<tr><td><code>varve_compaction_debt_tries</code></td><td>gauge</td><td>—</td><td>I/O-free compaction-debt proxy: Σ over scopes of <code>max(0, tries(scope) − 1)</code> (each scope with more than one persisted trie has debt equal to all but its newest)</td><td><code>varve_compaction_debt_tries</code> — <strong>caveat: this is a count of extra tries, computed without any I/O; it approximates compaction debt but does not measure bytes-to-rewrite or read amplification directly</strong></td></tr>
+<tr><td><code>varve_http_request_duration_seconds</code></td><td>histogram</td><td><code>method</code>, <code>route</code></td><td>HTTP request latency</td><td><code>histogram_quantile(0.99, rate(varve_http_request_duration_seconds_bucket[5m]))</code>, query-latency p99</td></tr>
+<tr><td><code>varve_applied_tx_id</code></td><td>gauge</td><td>(none)</td><td>Latest applied transaction id on this node</td><td><code>varve_applied_tx_id</code></td></tr>
+<tr><td><code>varve_applied_log_position</code></td><td>gauge</td><td>(none)</td><td>Latest applied log position on this node</td><td><code>varve_applied_log_position</code></td></tr>
+<tr><td><code>varve_manifest_watermark</code></td><td>gauge</td><td>(none)</td><td>Current manifest watermark</td><td><code>varve_manifest_watermark</code></td></tr>
+<tr><td><code>varve_follower_healthy</code></td><td>gauge (0/1)</td><td>(none)</td><td>1 while the follower loop has no error; 0 once <code>follower_error</code> is set</td><td><code>min_over_time(varve_follower_healthy[5m]) == 0</code>, alert on follower stalls</td></tr>
+<tr><td><code>varve_log_head_position</code></td><td>gauge</td><td>(none)</td><td>Latest known log head (writer publishes its own durable position, lag 0 by construction; a follower/query node publishes <code>max(last-read+1, watermark seen in gap check)</code>, or the jumped cursor on a fence jump)</td><td><code>varve_log_head_position</code></td></tr>
+<tr><td><code>varve_log_lag_records</code></td><td>gauge</td><td>(none)</td><td><strong>Follower lag</strong>: records between this node’s applied position and the (locally known) log head</td><td><code>varve_log_lag_records</code> per node, alert if sustained &gt; 0 on a query node</td></tr>
+<tr><td><code>varve_txs_committed_total</code></td><td>gauge, monotone-by-construction (mirrors an engine <code>AtomicU64</code>, <code>_total</code>-named but not a <code>Counter</code> type)</td><td>(none)</td><td>Committed transactions</td><td><strong>ingest rate</strong>: <code>rate(varve_txs_committed_total[1m])</code></td></tr>
+<tr><td><code>varve_events_committed_total</code></td><td>gauge, monotone-by-construction</td><td>(none)</td><td>Committed events (finer-grained than tx count)</td><td><code>rate(varve_events_committed_total[1m])</code></td></tr>
+<tr><td><code>varve_commit_failures_total</code></td><td>gauge, monotone-by-construction</td><td>(none)</td><td>Pre-durability append failures</td><td><code>increase(varve_commit_failures_total[15m]) &gt; 0</code>, alert</td></tr>
+<tr><td><code>varve_flush_blocks_total</code></td><td>gauge, monotone-by-construction</td><td>(none)</td><td>Successful block flushes</td><td><code>rate(varve_flush_blocks_total[5m])</code></td></tr>
+<tr><td><code>varve_flush_failures_total</code></td><td>gauge, monotone-by-construction</td><td>(none)</td><td>Failed block flushes</td><td><code>increase(varve_flush_failures_total[15m]) &gt; 0</code>, alert</td></tr>
+<tr><td><code>varve_compaction_runs_total</code></td><td>gauge, monotone-by-construction</td><td>(none)</td><td>Compaction runs</td><td><code>rate(varve_compaction_runs_total[1h])</code></td></tr>
+<tr><td><code>varve_backpressure_rejections_total</code></td><td>gauge, monotone-by-construction</td><td>(none)</td><td><code>try_execute_as</code> rejections under backpressure (429s)</td><td><code>rate(varve_backpressure_rejections_total[1m])</code>, sustained &gt; 0 means writers are saturated</td></tr>
+<tr><td><code>varve_live_rows</code></td><td>gauge</td><td>(none)</td><td>Unflushed rows across all graphs</td><td><code>varve_live_rows</code></td></tr>
+<tr><td><code>varve_live_bytes</code></td><td>gauge</td><td>(none)</td><td>Unflushed approximate bytes across all graphs (drives the memory-watermark early flush)</td><td><code>varve_live_bytes</code>, compare against the configured watermark</td></tr>
+<tr><td><code>varve_persisted_tries</code></td><td>gauge</td><td>(none)</td><td>Persisted tries across all scopes</td><td><code>varve_persisted_tries</code></td></tr>
+<tr><td><code>varve_compaction_debt_tries</code></td><td>gauge</td><td>(none)</td><td>I/O-free compaction-debt proxy: Σ over scopes of <code>max(0, tries(scope) − 1)</code> (each scope with more than one persisted trie has debt equal to all but its newest)</td><td><code>varve_compaction_debt_tries</code>; caveat: this is a count of extra tries, computed without any I/O, and approximates compaction debt but does not measure bytes-to-rewrite or read amplification directly</td></tr>
 <tr><td><code>varve_cache_hits_total</code></td><td>gauge vec, monotone-by-construction</td><td><code>tier</code></td><td>Cache-tier hits</td><td>see cache hit ratio below</td></tr>
 <tr><td><code>varve_cache_misses_total</code></td><td>gauge vec, monotone-by-construction</td><td><code>tier</code></td><td>Cache-tier misses</td><td>see cache hit ratio below</td></tr>
 </tbody>
@@ -244,10 +244,10 @@ downstream of <code>tracing-opentelemetry</code>).</p>
 <tr><td><code>varve.commit</code></td><td><code>flush</code>/<code>flush_impl</code> (<code>writer.rs</code>)</td><td><code>batch</code> (known up front), <code>first_position</code> (recorded once <code>log.append</code> succeeds)</td><td>Log append of a staged batch</td></tr>
 <tr><td><code>varve.apply</code></td><td>writer loop (<code>writer.rs</code>)</td><td><code>batch</code></td><td>Applying an appended batch to the live index; a plain sync-entered span, never held across an <code>.await</code></td></tr>
 <tr><td><code>varve.flush_block</code></td><td><code>flush.rs</code></td><td><code>block_id</code></td><td>A single block flush to storage</td></tr>
-<tr><td><code>varve.compact</code></td><td><code>compact</code> (<code>writer.rs</code>)</td><td>—</td><td>Wraps an entire compaction run</td></tr>
+<tr><td><code>varve.compact</code></td><td><code>compact</code> (<code>writer.rs</code>)</td><td>(none)</td><td>Wraps an entire compaction run</td></tr>
 <tr><td><code>varve.follower.apply</code></td><td><code>apply_next_range</code> (<code>follower.rs</code>)</td><td><code>from</code> (known at entry), <code>applied</code> (recorded before returning)</td><td>Follower catch-up application of a log range</td></tr>
-<tr><td><code>varve.query.parse</code></td><td>query entrypoint (<code>db.rs</code>)</td><td>—</td><td>Synchronous GQL parse (entered span, no async work)</td></tr>
-<tr><td><code>varve.query.plan</code></td><td>query entrypoint (<code>db.rs</code>)</td><td>—</td><td>Query planning, including each leg of a UNION</td></tr>
+<tr><td><code>varve.query.parse</code></td><td>query entrypoint (<code>db.rs</code>)</td><td>(none)</td><td>Synchronous GQL parse (entered span, no async work)</td></tr>
+<tr><td><code>varve.query.plan</code></td><td>query entrypoint (<code>db.rs</code>)</td><td>(none)</td><td>Query planning, including each leg of a UNION</td></tr>
 <tr><td><code>varve.query.execute</code></td><td>query entrypoint (<code>db.rs</code>)</td><td><code>graph</code></td><td>Query execution against a named graph, including each leg of a UNION</td></tr>
 </tbody>
 </table>
@@ -255,7 +255,7 @@ downstream of <code>tracing-opentelemetry</code>).</p>
 <h3 id="metricsotlp-configuration"><a class="header" href="#metricsotlp-configuration"><code>[metrics.otlp]</code> configuration</a></h3>
 <p>The <code>otlp</code> <code>MetricsSink</code> (feature <code>otel</code>) wraps <code>PrometheusMetrics</code> and adds a
 background task that gathers the same Prometheus registry on an interval and
-POSTs it as OTLP/HTTP JSON metrics (hand-rolled converter — no OpenTelemetry
+POSTs it as OTLP/HTTP JSON metrics (hand-rolled converter, no OpenTelemetry
 SDK dependency). Counters convert to OTLP <code>sum</code> (<code>isMonotonic: true</code>,
 cumulative temporality); gauges to OTLP <code>gauge</code>; histograms to OTLP
 <code>histogram</code> with per-interval delta bucket counts derived from Prometheus’s
@@ -268,18 +268,18 @@ endpoint = "http://otel-collector:4318/v1/metrics"   # required, no default
 push_interval_ms = 10000                              # default; how often the registry is gathered and pushed
 </code></pre>
 <ul>
-<li><code>endpoint</code> is required — <code>PrometheusMetricsFactory</code>/<code>OtlpMetricsFactory</code>
+<li><code>endpoint</code> is required; the <code>PrometheusMetricsFactory</code>/<code>OtlpMetricsFactory</code>
 build error is <code>"[metrics.otlp] endpoint is required"</code> if omitted.</li>
 <li><code>push_interval_ms</code> defaults to <code>10000</code> (10s).</li>
 <li>Push failures are logged via <code>tracing::warn!("otlp metrics push failed", ...)</code>
-and are never fatal — a collector outage degrades observability, not the
+and are never fatal; a collector outage degrades observability, not the
 write/read path.</li>
 </ul>
 <p><strong>OTLP-over-HTTPS certificate caveat:</strong> the OTLP pusher’s HTTP client is built
-with <code>tls_built_in_native_certs(false)</code> — TLS certificate validation checks
-<strong>only</strong> the bundled webpki/Mozilla root set, <strong>never the OS trust store</strong>.
+with <code>tls_built_in_native_certs(false)</code>, so TLS certificate validation checks
+only the bundled webpki/Mozilla root set, never the OS trust store.
 If your collector’s certificate chains through an enterprise/private CA that
-is not in that bundle, the push will fail TLS verification silently — the
+is not in that bundle, the push fails TLS verification silently: the
 only symptom is the generic <code>tracing::warn!("otlp metrics push failed")</code> log
 line, not a certificate-specific error. If your collector uses such a CA,
 either terminate its TLS with a publicly-trusted certificate, or point
@@ -303,7 +303,7 @@ service:
 </code></pre>
 <p>Varve’s pusher sends <code>Content-Type: application/json</code> bodies matching the
 OTLP metrics JSON schema (<code>resourceMetrics</code> → <code>scopeMetrics</code> → <code>metrics</code>),
-not protobuf — ensure the collector’s <code>http</code> receiver accepts JSON (the
+not protobuf; ensure the collector’s <code>http</code> receiver accepts JSON (the
 standard <code>otlp</code> receiver does).</p>
 <h2 id="3-coordination-objects-and-failover-runbook"><a class="header" href="#3-coordination-objects-and-failover-runbook">3. Coordination objects and failover runbook</a></h2>
 <h3 id="coordination-objects-shared-object-store-spec-12"><a class="header" href="#coordination-objects-shared-object-store-spec-12">Coordination objects (shared object store, spec §12)</a></h3>
@@ -332,11 +332,11 @@ takeover_after_ms = 15000       # default; must be &gt;= 2 * heartbeat_interval_
 "{backend}"”).</li>
 <li><code>cas-failover</code> also requires the storage backend’s conditional-put
 capability probe (slice 5) to report <code>Supported</code>; anything else
-(<code>Unsupported</code> or <code>Inconsistent</code>) is a hard error at startup — see
-<code>CasUnsupported</code> below. Verified live against both MinIO (probe
-<code>Supported</code>, gate passes) and Garage (probe <code>Inconsistent</code> — Garage’s S3
+(<code>Unsupported</code> or <code>Inconsistent</code>) is a hard error at startup (see
+<code>CasUnsupported</code> below). Verified against both MinIO (probe
+<code>Supported</code>, gate passes) and Garage (probe <code>Inconsistent</code>: Garage’s S3
 layer accepts an <code>If-None-Match</code> create over an existing object instead of
-rejecting it — gate correctly refuses with an actionable error).</li>
+rejecting it, so the gate correctly refuses with an actionable error).</li>
 </ul>
 <h3 id="runbook-what-each-failure-state-means-and-what-to-do"><a class="header" href="#runbook-what-each-failure-state-means-and-what-to-do">Runbook: what each failure state means and what to do</a></h3>
 <div class="table-wrapper">
@@ -345,9 +345,9 @@ rejecting it — gate correctly refuses with an actionable error).</li>
 <tr><th>State</th><th>Meaning</th><th>Operator action</th></tr>
 </thead>
 <tbody>
-<tr><td><code>EngineError::WriterActive { address, age_ms, takeover_after_ms }</code></td><td><code>designated-writer</code>’s best-effort startup guard: a fresh advertisement from a <em>different</em> node id already exists in <code>v1/writer.json</code> (age below <code>takeover_after_ms</code>). This is <strong>not</strong> a fencing mechanism — it only refuses a second writer from starting while another looks alive.</td><td>Stop the other writer if it’s a leftover process, or simply wait — the guard’s own message says “wait for its heartbeat to go stale.” Once <code>age_ms</code> exceeds <code>takeover_after_ms</code>, a retried start proceeds. If you need real (non-best-effort) fencing, switch <code>[coordinator] backend</code> to <code>cas-failover</code> on a backend whose conditional-put probe is <code>Supported</code>.</td></tr>
-<tr><td><code>EngineError::CasUnsupported { reason }</code></td><td>Startup with <code>backend = "cas-failover"</code> against a storage backend whose slice-5 capability probe returned <code>Unsupported</code> or <code>Inconsistent</code> (i.e. its S3-compatible API doesn’t honor <code>If-None-Match</code>/<code>If-Match</code> correctly — e.g. Garage’s current server-side create-if-absent behavior). The engine refuses to start rather than run without real fencing.</td><td>Switch <code>[coordinator] backend</code> to <code>"designated-writer"</code> on this backend (accepting best-effort guarding only), or move the shared log/object store to a backend that passes the probe (verified: MinIO passes; Garage does not, as of this slice).</td></tr>
-<tr><td><code>EngineError::WriterFenced(reason)</code></td><td><strong>Terminal.</strong> The writer observed a fatal event after already appending durably — either a lease loss (a <code>cas-failover</code> heartbeat returned <code>Lost</code>) or a post-durability apply failure. The writer loop publishes the failure so <code>/healthz</code> degrades, drains every subsequent queued command with <code>WriterFenced</code> (mapped to HTTP 503 <code>writer_fenced</code>), and stops. There is no recovery path that resumes the same process — the block-flush-after-fatal path is deliberately never taken.</td><td>Restart the writer process. On restart it re-runs <code>acquire()</code>/recovery from scratch: for <code>cas-failover</code>, it will only regain the lease if it can win a fresh seizure (i.e. after the current legitimate holder is itself gone); check <code>v1/lease.json</code>’s current holder/epoch before restarting to confirm you’re not restarting into an immediate second fencing.</td></tr>
+<tr><td><code>EngineError::WriterActive { address, age_ms, takeover_after_ms }</code></td><td><code>designated-writer</code>’s best-effort startup guard: a fresh advertisement from a different node id already exists in <code>v1/writer.json</code> (age below <code>takeover_after_ms</code>). This is not a fencing mechanism; it only refuses a second writer from starting while another looks alive.</td><td>Stop the other writer if it’s a leftover process, or simply wait; the guard’s own message says “wait for its heartbeat to go stale.” Once <code>age_ms</code> exceeds <code>takeover_after_ms</code>, a retried start proceeds. If you need real (non-best-effort) fencing, switch <code>[coordinator] backend</code> to <code>cas-failover</code> on a backend whose conditional-put probe is <code>Supported</code>.</td></tr>
+<tr><td><code>EngineError::CasUnsupported { reason }</code></td><td>Startup with <code>backend = "cas-failover"</code> against a storage backend whose slice-5 capability probe returned <code>Unsupported</code> or <code>Inconsistent</code> (i.e. its S3-compatible API doesn’t honor <code>If-None-Match</code>/<code>If-Match</code> correctly, e.g. Garage’s current server-side create-if-absent behavior). The engine refuses to start rather than run without real fencing.</td><td>Switch <code>[coordinator] backend</code> to <code>"designated-writer"</code> on this backend (accepting best-effort guarding only), or move the shared log/object store to a backend that passes the probe (verified: MinIO passes; Garage does not, as of this slice).</td></tr>
+<tr><td><code>EngineError::WriterFenced(reason)</code></td><td><strong>Terminal.</strong> The writer observed a fatal event after already appending durably: either a lease loss (a <code>cas-failover</code> heartbeat returned <code>Lost</code>) or a post-durability apply failure. The writer loop publishes the failure so <code>/healthz</code> degrades, drains every subsequent queued command with <code>WriterFenced</code> (mapped to HTTP 503 <code>writer_fenced</code>), and stops. There is no recovery path that resumes the same process; the block-flush-after-fatal path is never taken.</td><td>Restart the writer process. On restart it re-runs <code>acquire()</code>/recovery from scratch: for <code>cas-failover</code>, it will only regain the lease if it can win a fresh seizure (i.e. after the current legitimate holder is itself gone); check <code>v1/lease.json</code>’s current holder/epoch before restarting to confirm you’re not restarting into an immediate second fencing.</td></tr>
 </tbody>
 </table>
 </div>
@@ -363,6 +363,7 @@ row count is consistent (4) everywhere.</li>
 0 acked-tx loss, over a 60 s run (the nightly gate runs this for 30 min per
 the roadmap exit criterion; the 60 s run here is the CI-speed smoke check).</li>
 </ul>
+<pre><code></code></pre>
 
                     </main>
 
