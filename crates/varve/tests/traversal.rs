@@ -73,6 +73,36 @@ fn string_pairs(batches: &[varve::RecordBatch], col_a: &str, col_b: &str) -> Vec
     out
 }
 
+/// Same row-pairing contract as [`string_pairs`], for a string column zipped
+/// against a float64 column — used to check that an Int property value widened
+/// to Float64 in a mixed-type column scan.
+fn string_f64_pairs(
+    batches: &[varve::RecordBatch],
+    str_col: &str,
+    f64_col: &str,
+) -> Vec<(String, f64)> {
+    let mut out = Vec::new();
+    for b in batches {
+        let is_ = b.schema().column_with_name(str_col).unwrap().0;
+        let if_ = b.schema().column_with_name(f64_col).unwrap().0;
+        let arr_s = b
+            .column(is_)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+            .unwrap();
+        let arr_f = b
+            .column(if_)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Float64Array>()
+            .unwrap();
+        for i in 0..b.num_rows() {
+            out.push((arr_s.value(i).to_string(), arr_f.value(i)));
+        }
+    }
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    out
+}
+
 /// Same row-pairing contract as [`string_pairs`], for a string column
 /// zipped against an int64 column (e.g. a node's name against an edge
 /// property).
@@ -191,6 +221,56 @@ async fn return_from_multiple_vars_and_edge_var() {
     // guards the actual edge-property <-> node pairing.
     assert_eq!(
         string_int_pairs(&rows, "b", "since"),
+        vec![("Bob".to_string(), 2020), ("Cy".to_string(), 2022)]
+    );
+}
+
+#[tokio::test]
+async fn unlabeled_target_endpoint_scans_all_nodes() {
+    // The target `(b)` carries no label, so it must bind to any node the
+    // edge reaches -- mirroring GUAC's Neighbors query
+    // `MATCH (a {_id})-[e:E]->(b)`. Regression: this used to error with
+    // "empty path input is not supported by this execution path".
+    let db = Db::memory();
+    seed_triangle(&db).await;
+    let rows = db
+        .query("MATCH (a:Person)-[:KNOWS]->(b) WHERE a.name = 'Ada' RETURN b.name AS name")
+        .await
+        .unwrap();
+    assert_eq!(
+        names(&rows, "name"),
+        vec!["Bob".to_string(), "Cy".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn unlabeled_source_endpoint_scans_all_nodes() {
+    // Reverse arm of GUAC's Neighbors UNION: `MATCH (c)-[e:E]->(a {_id})`.
+    // Cy is known by Ada (2022) and Bob (2021).
+    let db = Db::memory();
+    seed_triangle(&db).await;
+    let rows = db
+        .query("MATCH (c)-[:KNOWS]->(a:Person) WHERE a.name = 'Cy' RETURN c.name AS name")
+        .await
+        .unwrap();
+    assert_eq!(
+        names(&rows, "name"),
+        vec!["Ada".to_string(), "Bob".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn anchored_unlabeled_endpoint_with_edge_var() {
+    // The exact GUAC Neighbors shape: point-anchored start, edge variable
+    // whose property is returned, unlabeled target.
+    let db = Db::memory();
+    seed_triangle(&db).await;
+    let rows = db
+        .query("MATCH (a {_id: 1})-[e:KNOWS]->(b) RETURN b.name AS name, e.since AS since")
+        .await
+        .unwrap();
+    assert_eq!(
+        string_int_pairs(&rows, "name", "since"),
         vec![("Bob".to_string(), 2020), ("Cy".to_string(), 2022)]
     );
 }
@@ -325,6 +405,70 @@ async fn two_hop_traversal_survives_flush_and_restart() {
         .await
         .unwrap();
     assert_eq!(names(&rows, "name"), vec!["Cy".to_string()]);
+}
+
+#[tokio::test]
+async fn unlabeled_endpoint_over_persisted_blocks_multi_label() {
+    // Reproduces the GUAC Neighbors failure at scale: multiple node labels
+    // (several tries), edges flushed into persisted blocks, and an unlabeled
+    // traversal endpoint that must union across every trie.
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = Db::open(blocks_config(dir.path(), 4)).await.unwrap();
+        // A shared numeric property `score` is a whole number on one label
+        // (parsed as Int) and a fraction on another (Float). An unlabeled
+        // endpoint unions both tries, so the column must widen Int->Float
+        // rather than erroring with MixedPropertyTypes -- the exact clash
+        // GUAC's scoreValue/aggregateScore hits across many labels.
+        db.execute("INSERT (:A {_id: 1, name: 'a1'}), (:B {_id: 2, name: 'b2', score: 10}), (:C {_id: 3, name: 'c3', score: 7.5}), (:B {_id: 4, name: 'b4', score: 20})").await.unwrap();
+        db.execute("MATCH (a:A {_id: 1}), (b:B {_id: 2}) INSERT (a)-[:E {kind: 'x'}]->(b)")
+            .await
+            .unwrap();
+        db.execute("MATCH (a:A {_id: 1}), (c:C {_id: 3}) INSERT (a)-[:E {kind: 'y'}]->(c)")
+            .await
+            .unwrap();
+        wait_for_flush(dir.path()).await;
+    }
+    let db = Db::local(dir.path()).await.unwrap();
+    // Labeled-start, edge var, unlabeled target — GUAC Neighbors shape. The
+    // unlabeled `b` widens `score` (Int 10 on :B, Float 7.5 on :C) to Float64.
+    let rows = db
+        .query("MATCH (a:A)-[e:E]->(b) RETURN b.name AS name, e.kind AS kind, b.score AS score")
+        .await
+        .unwrap();
+    assert_eq!(
+        string_pairs(&rows, "name", "kind"),
+        vec![
+            ("b2".to_string(), "x".to_string()),
+            ("c3".to_string(), "y".to_string())
+        ]
+    );
+    // Int 10 on :B is widened to 10.0; Float 7.5 on :C is unchanged.
+    assert_eq!(
+        string_f64_pairs(&rows, "name", "score"),
+        vec![("b2".to_string(), 10.0), ("c3".to_string(), 7.5)]
+    );
+    // Point-anchored start (fast-path candidate), unlabeled target.
+    let anchored = db
+        .query("MATCH (a {_id: 1})-[e:E]->(b) RETURN b.name AS name, e.kind AS kind")
+        .await
+        .unwrap();
+    assert_eq!(
+        string_pairs(&anchored, "name", "kind"),
+        vec![
+            ("b2".to_string(), "x".to_string()),
+            ("c3".to_string(), "y".to_string())
+        ]
+    );
+    // Reverse arm: unlabeled source into anchored target.
+    let reverse = db
+        .query("MATCH (c)-[e:E]->(b {_id: 2}) RETURN c.name AS name, e.kind AS kind")
+        .await
+        .unwrap();
+    assert_eq!(
+        string_pairs(&reverse, "name", "kind"),
+        vec![("a1".to_string(), "x".to_string())]
+    );
 }
 
 // ---- quantified paths (task 9) ------------------------------------------

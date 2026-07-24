@@ -151,6 +151,14 @@
           title: 'Invalid request',
           description: 'Varve rejected the request. The original GQL and parameters remain available.',
         };
+      case 'query_error':
+        return {
+          title: 'Query rejected',
+          description:
+            typeof failure.message === 'string' && failure.message.length > 0
+              ? failure.message
+              : 'Varve could not execute this query. Adjust the statement and rerun.',
+        };
       case 'basis_timeout':
         return {
           title: 'Basis timeout',

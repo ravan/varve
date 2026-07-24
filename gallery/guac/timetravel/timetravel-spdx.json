@@ -1,0 +1,53 @@
+{
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "gallery-timetravel-demo",
+  "spdxVersion": "SPDX-2.2",
+  "creationInfo": {
+    "created": "2026-07-23T00:00:00Z",
+    "creators": ["Tool: guac-varve-gallery"]
+  },
+  "dataLicense": "CC0-1.0",
+  "documentNamespace": "https://example.com/guac-varve-gallery/timetravel",
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-app",
+      "name": "gallery-app",
+      "versionInfo": "1.0.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE_MANAGER",
+          "referenceLocator": "pkg:golang/example.com/gallery-app@1.0.0",
+          "referenceType": "purl"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-newdep",
+      "name": "gallery-newdep",
+      "versionInfo": "9.9.9",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE_MANAGER",
+          "referenceLocator": "pkg:golang/example.com/gallery-newdep@9.9.9",
+          "referenceType": "purl"
+        }
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relatedSpdxElement": "SPDXRef-app",
+      "relationshipType": "DESCRIBES"
+    },
+    {
+      "spdxElementId": "SPDXRef-app",
+      "relatedSpdxElement": "SPDXRef-newdep",
+      "relationshipType": "DEPENDS_ON"
+    }
+  ]
+}

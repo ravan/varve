@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1
+#
+# Gallery build for GUAC's guacgql (GraphQL API server) and guacone (ingest +
+# query CLI), both carrying the in-tree `varve` graphql backend. Unlike GUAC's
+# upstream dockerfiles/Dockerfile.guac-cont (which drives goreleaser via
+# `make build`), this compiles exactly the two binaries the gallery needs with
+# a plain `go build`, so the image builds on any host without extra tooling.
+#
+# Build context is `../../refs/guac` (the GUAC module root); see the
+# docker-compose.yml `guacgql` service build stanza.
+
+# ---- builder ------------------------------------------------------------
+FROM golang:1.26.0 AS builder
+WORKDIR /src
+COPY . .
+# CGO stays enabled (default): GUAC's blank-imported backends pull in the
+# sqlite driver, which needs cgo to compile. The golang image ships gcc, and
+# the ubuntu runtime below provides the matching glibc at run time.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go build -o /out/guacgql ./cmd/guacgql && \
+    go build -o /out/guacone ./cmd/guacone
+
+# ---- runtime ------------------------------------------------------------
+FROM ubuntu:22.04
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /out/guacgql /usr/local/bin/guacgql
+COPY --from=builder /out/guacone /usr/local/bin/guacone
+# `command:` (guacgql ...) is supplied by docker-compose.yml; guacone is run
+# on demand via `docker compose exec guacgql guacone ...`.
+ENTRYPOINT ["/usr/local/bin/guacgql"]

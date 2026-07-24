@@ -272,6 +272,12 @@
         title: 'Invalid request',
         description: 'Varve rejected the request. The query and parameters remain available to edit.',
       },
+      query_error: {
+        title: 'Query rejected',
+        description:
+          failure.message ??
+          'Varve could not execute this query. Adjust the statement and rerun.',
+      },
       not_acceptable: {
         title: 'Compatibility issue',
         description: 'The target cannot return a response format this Explorer supports.',
@@ -342,6 +348,7 @@
       [
         'unauthorized',
         'invalid_request',
+        'query_error',
         'not_acceptable',
         'basis_timeout',
         'backpressure',

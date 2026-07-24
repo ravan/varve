@@ -32,9 +32,15 @@ interface StableError {
   message: string;
 }
 
+// The bound on a forwarded query_error message: upstream bodies are already
+// size-limited before we parse them, but a defensive cap keeps a pathological
+// message from ballooning the UI.
+const QUERY_ERROR_MESSAGE_MAX = 2000;
+
 const STABLE_UPSTREAM_ERRORS = new Map<ExplorerErrorCode, StableError>([
   ['unauthorized', { status: 401, message: 'Authentication required' }],
   ['invalid_request', { status: 400, message: 'Invalid request' }],
+  ['query_error', { status: 422, message: 'Query could not be executed' }],
   ['not_acceptable', { status: 406, message: 'Requested response format is not supported' }],
   ['basis_timeout', { status: 408, message: 'Basis wait timed out' }],
   ['backpressure', { status: 429, message: 'Varve is busy; retry later' }],
@@ -108,7 +114,14 @@ export function normalizeUpstreamError(
     return errorResponse('malformed_response', 'Varve returned an invalid response', 502);
   }
   const retryAfterMs = code === 'backpressure' ? parseRetryAfter(retryAfter) : undefined;
-  return errorResponse(code, stable.message, stable.status, retryAfterMs);
+  // query_error (422) is the engine's own reason a statement was rejected — a
+  // type clash, an unknown column, a mixed-type property. It references only
+  // the caller's request and carries no server secret, so forward the real
+  // message (bounded) instead of a stable placeholder; every other code keeps
+  // its opaque stable message.
+  const message =
+    code === 'query_error' ? value.message.slice(0, QUERY_ERROR_MESSAGE_MAX) : stable.message;
+  return errorResponse(code, message, stable.status, retryAfterMs);
 }
 
 function isJsonContentType(value: string | null): boolean {

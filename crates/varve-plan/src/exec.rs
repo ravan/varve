@@ -14,7 +14,7 @@ use varve_types::{Iid, Instant, TemporalBounds, TemporalDimension};
 
 use crate::expr::{iid_from_conjuncts, lower_expr, split_conjuncts, ElementCols, Scope};
 use crate::functions::{session_context, FunctionRegistry};
-use crate::pattern::{mangle_batch, mangled};
+use crate::pattern::{col_exact, mangle_batch, mangled};
 
 #[derive(Debug, Error)]
 pub enum PlanError {
@@ -235,13 +235,15 @@ pub async fn iids_from_snapshot_with_functions(
                 return Err(PlanError::UnknownColumn(prop.clone()));
             }
             let scope = Scope::new(BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
-            df = df.filter(col(prop.as_str()).eq(lower_expr(value, &scope, params, functions)?))?;
+            df = df.filter(
+                col_exact(prop.as_str()).eq(lower_expr(value, &scope, params, functions)?),
+            )?;
         }
     }
     let iid_col = matched_var
         .map(|var| mangled(var, "_iid"))
         .unwrap_or_else(|| "_iid".to_string());
-    let df = df.select(vec![col(iid_col)])?;
+    let df = df.select(vec![col_exact(iid_col)])?;
 
     let mut iids = Vec::new();
     for batch in df.collect().await? {

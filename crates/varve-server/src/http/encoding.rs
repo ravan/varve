@@ -55,14 +55,19 @@ pub(super) fn arrow_ipc_response(
         while let Some(result) = stream.next().await {
             let batch = match result {
                 Ok(batch) => batch,
-                Err(_) => {
+                // The client still receives an opaque error (the raw execution
+                // error may embed storage credentials); the real cause is
+                // logged for operators.
+                Err(error) => {
+                    tracing::error!(%error, "arrow query result stream execution failed");
                     let _ = sender
                         .send(Err(io::Error::other("Arrow stream execution failed")))
                         .await;
                     return;
                 }
             };
-            if writer.write(&batch).is_err() {
+            if let Err(error) = writer.write(&batch) {
+                tracing::error!(%error, "arrow query result stream encoding failed");
                 let _ = sender
                     .send(Err(io::Error::other("Arrow stream encoding failed")))
                     .await;
@@ -80,7 +85,8 @@ pub(super) fn arrow_ipc_response(
                 }
             }
         }
-        if writer.finish().is_err() {
+        if let Err(error) = writer.finish() {
+            tracing::error!(%error, "arrow query result stream encoding failed");
             let _ = sender
                 .send(Err(io::Error::other("Arrow stream encoding failed")))
                 .await;

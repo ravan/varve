@@ -82,7 +82,14 @@ pub(super) async fn query(
             Ok(v) => Json(v).into_response(),
             Err(e) => mapped(e),
         },
-        Err(_) => mapped(ServerError::Protocol("query execution failed".into())),
+        // The client still receives an opaque 500 (the raw execution error may
+        // embed storage credentials), but the underlying cause is logged for
+        // operators — otherwise a query-time failure like a type clash in an
+        // unlabeled traversal is undiagnosable from the server side.
+        Err(error) => {
+            tracing::error!(%error, "query result stream execution failed");
+            mapped(ServerError::Protocol("query execution failed".into()))
+        }
     }
 }
 pub(super) async fn tx(
@@ -191,15 +198,33 @@ async fn redirect(c: &HttpContext) -> Response {
     }
 }
 fn mapped(e: ServerError) -> Response {
+    // A statement-caused engine error (a type clash, a mixed-type property
+    // column, an unknown column, an unsupported feature, ...) references only
+    // the caller's own request and carries no server secrets, so echo the real
+    // reason as 422 query_error: the query author gets an actionable message
+    // instead of an opaque 500. Every other engine error stays opaque below.
+    if let ServerError::Engine(ref engine_error) = e {
+        if let Some(message) = engine_error.client_query_error() {
+            return error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "query_error",
+                &message,
+                None,
+            );
+        }
+    }
     match e {
+        // A GQL parse failure is the caller's own syntax: surface the real
+        // parser message so the mistake is fixable, still as a 400.
+        ServerError::Engine(EngineError::Gql(ref parse_error)) => error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            &parse_error.to_string(),
+            None,
+        ),
         ServerError::InvalidRequest(_)
         | ServerError::Base64(_)
-        | ServerError::Engine(
-            EngineError::Gql(_)
-            | EngineError::Type(_)
-            | EngineError::NotAMutation
-            | EngineError::NotAQuery,
-        ) => error(
+        | ServerError::Engine(EngineError::NotAMutation | EngineError::NotAQuery) => error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "invalid request",
@@ -243,12 +268,19 @@ fn mapped(e: ServerError) -> Response {
         ServerError::Engine(EngineError::AccessDenied(_)) => {
             error(StatusCode::FORBIDDEN, "forbidden", "access denied", None)
         }
-        _ => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal",
-            "internal server error",
-            None,
-        ),
+        other => {
+            // Anything else becomes an opaque 500; log the real cause so
+            // operators can diagnose it. The message may embed storage
+            // credentials or a user-supplied identifier (e.g. an unknown
+            // graph name) and MUST NOT ship to the client.
+            tracing::error!(error = %other, "request mapped to internal server error");
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                "internal server error",
+                None,
+            )
+        }
     }
 }
 fn error(status: StatusCode, code: &str, message: &str, writer: Option<String>) -> Response {
@@ -302,5 +334,37 @@ mod tests {
             "user 'ada' lacks READ".into(),
         )));
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    async fn body_json(response: Response) -> serde_json::Value {
+        use http_body_util::BodyExt;
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+    }
+
+    /// A statement-caused engine error surfaces as 422 `query_error` with the
+    /// real reason so the query author can fix their statement. `Unsupported`
+    /// is one of the variants `client_query_error()` discloses.
+    #[tokio::test]
+    async fn statement_error_maps_to_422_query_error_with_real_message() {
+        let response = mapped(ServerError::Engine(EngineError::Unsupported(
+            "mixed Int/Float property 'scoreValue'".into(),
+        )));
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = body_json(response).await;
+        assert_eq!(body["code"], "query_error");
+        assert!(body["message"].as_str().unwrap().contains("scoreValue"));
+    }
+
+    /// An unknown graph carries a user-supplied name that must not be
+    /// reflected: it stays an opaque 500 and the name never reaches the body.
+    #[tokio::test]
+    async fn unknown_graph_stays_opaque_500() {
+        let response = mapped(ServerError::Engine(EngineError::UnknownGraph(
+            "secret_storage_credential".into(),
+        )));
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_json(response).await;
+        assert_eq!(body["code"], "internal");
+        assert!(!body.to_string().contains("secret_storage_credential"));
     }
 }

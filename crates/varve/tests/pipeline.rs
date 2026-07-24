@@ -179,6 +179,73 @@ async fn optional_match_chained_after_hop() {
     assert_eq!(string_rows(&rows, "name"), vec!["Cy"]);
 }
 
+// Regression: an unlabeled node pattern must scan all nodes (an empty label
+// conjunction matches everything), not zero. Previously `MATCH (n)` and
+// `MATCH (n {_id: 2})` returned no rows because the empty label filter rejected
+// every node.
+#[tokio::test]
+async fn match_unlabeled_node_scans_all_nodes() {
+    let db = Db::memory();
+    seed_people(&db).await;
+
+    let all = db.query("MATCH (n) RETURN n._id AS id").await.unwrap();
+    assert_eq!(int_rows(&all, "id"), vec![1, 2, 3]);
+
+    let one = db
+        .query("MATCH (n {_id: 2}) RETURN n._id AS id")
+        .await
+        .unwrap();
+    assert_eq!(int_rows(&one, "id"), vec![2]);
+}
+
+// Regression: an OPTIONAL MATCH whose start node reuses a variable bound by an
+// earlier clause (without repeating its label) must expand from that binding.
+// Previously the reused variable was scanned with an empty label filter that
+// matched nothing, so the relationship never expanded and the endpoint stayed
+// null for every row.
+#[tokio::test]
+async fn optional_match_reused_bound_var_without_label_expands() {
+    let db = Db::memory();
+    seed_people(&db).await;
+
+    let rows = db
+        .query(
+            "MATCH (a:Person)
+             OPTIONAL MATCH (a)-[:KNOWS]->(b:Person)
+             RETURN a.name AS a, b.name AS b",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        nullable_string_pairs(&rows, "a", "b"),
+        vec![
+            ("Ada".to_string(), Some("Bob".to_string())),
+            ("Bob".to_string(), None),
+            ("Cy".to_string(), None),
+        ]
+    );
+}
+
+// Regression: projecting a property whose name contains an upper-case letter
+// must round-trip like any other property. Previously `RETURN z.listVersion`
+// errored while `RETURN z.plainprop` worked.
+#[tokio::test]
+async fn project_property_with_uppercase_name() {
+    let db = Db::memory();
+    db.execute("INSERT (:ZTest {_id: 1, listVersion: 'x', plainprop: 'y'})")
+        .await
+        .unwrap();
+
+    let rows = db
+        .query("MATCH (z:ZTest {_id: 1}) RETURN z.listVersion AS lv, z.plainprop AS pp")
+        .await
+        .unwrap();
+
+    assert_eq!(string_rows(&rows, "lv"), vec!["x"]);
+    assert_eq!(string_rows(&rows, "pp"), vec!["y"]);
+}
+
 #[tokio::test]
 async fn comma_separated_paths_shared_var_join() {
     let db = Db::memory();

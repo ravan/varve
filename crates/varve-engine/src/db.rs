@@ -136,6 +136,41 @@ pub enum EngineError {
     Security(String),
 }
 
+impl EngineError {
+    /// A client-safe message when this error is caused by the *statement*
+    /// itself — a type clash, a mixed-type property column, an unknown
+    /// column/variable/parameter/function, an unsupported feature, or an
+    /// invalid `VALID` range — rather than an internal or infrastructure
+    /// fault.
+    ///
+    /// These messages reference only the caller's own request and carry no
+    /// server secrets, so callers may echo them to the requester (`varved`
+    /// returns them as HTTP `422 query_error`, giving the query author the
+    /// real reason their statement was rejected). Every other error returns
+    /// `None`: it may embed storage/credential or internal detail — even a
+    /// user-supplied identifier that must not be reflected, like an unknown
+    /// graph name — and MUST stay opaque; callers log it server-side and
+    /// return a generic message instead.
+    pub fn client_query_error(&self) -> Option<String> {
+        let statement_caused = matches!(
+            self,
+            EngineError::Type(_)
+                | EngineError::Unsupported(_)
+                | EngineError::InvalidValidRange { .. }
+                | EngineError::Index(IndexError::MixedPropertyTypes { .. })
+                | EngineError::Plan(
+                    PlanError::UnknownColumn(_)
+                        | PlanError::UnknownVariable(_)
+                        | PlanError::MissingParam(_)
+                        | PlanError::UnknownFunction(_)
+                        | PlanError::Unsupported(_)
+                        | PlanError::Index(IndexError::MixedPropertyTypes { .. })
+                )
+        );
+        statement_caused.then(|| self.to_string())
+    }
+}
+
 fn label_filter(labels: &LabelSpec) -> LabelFilter<'_> {
     match labels {
         LabelSpec::All(labels) if labels.len() == 1 => LabelFilter::Single(labels[0].as_str()),
@@ -2493,6 +2528,52 @@ mod tests {
             basis_result_after_timeout(&progress, BasisToken::TxId(7)),
             Err(EngineError::FollowerFailed(error)) if error == "terminal"
         ));
+    }
+
+    #[test]
+    fn client_query_error_discloses_statement_caused_errors() {
+        // Statement-caused: a mixed-type property column, an unknown column,
+        // an unsupported feature, and a type clash all carry the real message.
+        let mixed = EngineError::Index(IndexError::MixedPropertyTypes {
+            property: "scoreValue".into(),
+        });
+        assert_eq!(
+            mixed.client_query_error().as_deref(),
+            Some(mixed.to_string().as_str())
+        );
+
+        let unknown_column = EngineError::Plan(PlanError::UnknownColumn("nope".into()));
+        assert_eq!(
+            unknown_column.client_query_error().as_deref(),
+            Some(unknown_column.to_string().as_str())
+        );
+
+        let plan_mixed = EngineError::Plan(PlanError::Index(IndexError::MixedPropertyTypes {
+            property: "scoreValue".into(),
+        }));
+        assert!(plan_mixed.client_query_error().is_some());
+
+        let unsupported = EngineError::Unsupported("feature X".into());
+        assert!(unsupported.client_query_error().is_some());
+
+        let type_error = EngineError::Type(TypeError::InvalidId("bad".into()));
+        assert!(type_error.client_query_error().is_some());
+    }
+
+    #[test]
+    fn client_query_error_keeps_internal_and_infra_errors_opaque() {
+        // Infrastructure / internal faults MUST stay opaque, including a
+        // user-supplied graph name that must not be reflected.
+        assert!(EngineError::WriterUnavailable
+            .client_query_error()
+            .is_none());
+        assert!(EngineError::Poisoned.client_query_error().is_none());
+        assert!(EngineError::UnknownGraph("secret-graph".into())
+            .client_query_error()
+            .is_none());
+        assert!(EngineError::CommitFailed("boom".into())
+            .client_query_error()
+            .is_none());
     }
 
     #[test]

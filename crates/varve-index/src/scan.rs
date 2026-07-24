@@ -43,6 +43,23 @@ fn value_type(v: &Value) -> Option<DataType> {
     }
 }
 
+/// Reconcile two observed Arrow types for the same property across rows.
+/// `Int64` and `Float64` describe the same numeric column — a property
+/// recorded as a whole number on some rows and a fraction on others (e.g.
+/// GUAC's `scoreValue`, which round-trips whole scores through the tokenizer
+/// as `Int`) — so they widen to `Float64` and the `Int` values are cast when
+/// the column is built. Any other disagreement is a genuine type conflict and
+/// returns `None`, preserving the `MixedPropertyTypes` rejection.
+fn widen_types(a: &DataType, b: &DataType) -> Option<DataType> {
+    match (a, b) {
+        _ if a == b => Some(a.clone()),
+        (DataType::Int64, DataType::Float64) | (DataType::Float64, DataType::Int64) => {
+            Some(DataType::Float64)
+        }
+        _ => None,
+    }
+}
+
 fn timestamp_type() -> DataType {
     DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
 }
@@ -64,12 +81,13 @@ impl LabelFilter<'_> {
     fn matches(&self, labels: &[String]) -> bool {
         match self {
             Self::Single(label) => labels.iter().any(|candidate| candidate == *label),
-            Self::All(required) => {
-                !required.is_empty()
-                    && required
-                        .iter()
-                        .all(|label| labels.iter().any(|candidate| candidate == label))
-            }
+            // An empty conjunction matches everything: an unlabelled pattern
+            // `(n)` (LabelSpec::All([])) carries no label constraint, so it must
+            // scan all nodes rather than none. `all()` over an empty iterator is
+            // already true, so no explicit empty check is needed.
+            Self::All(required) => required
+                .iter()
+                .all(|label| labels.iter().any(|candidate| candidate == label)),
             Self::Any(allowed) => allowed
                 .iter()
                 .any(|label| labels.iter().any(|candidate| candidate == label)),
@@ -173,12 +191,16 @@ where
                     None => {
                         col_types.insert(k, dt);
                     }
-                    Some(existing) if *existing == dt => {}
-                    Some(_) => {
-                        return Err(IndexError::MixedPropertyTypes {
-                            property: k.clone(),
-                        })
-                    }
+                    Some(existing) => match widen_types(existing, &dt) {
+                        Some(widened) => {
+                            col_types.insert(k, widened);
+                        }
+                        None => {
+                            return Err(IndexError::MixedPropertyTypes {
+                                property: k.clone(),
+                            })
+                        }
+                    },
                 }
             }
         }
@@ -263,6 +285,9 @@ where
                 for row in &visible {
                     match row.doc.get(*name) {
                         Some(Value::Float(f)) => b.append_value(*f),
+                        // Widened from a mixed Int/Float column: cast the
+                        // whole-number rows up to f64 (see `widen_types`).
+                        Some(Value::Int(i)) => b.append_value(*i as f64),
                         _ => b.append_null(),
                     }
                 }
@@ -558,6 +583,30 @@ mod tests {
     }
 
     #[test]
+    fn label_filter_all_empty_matches_every_node() {
+        // An unlabelled pattern lowers to LabelFilter::All(&[]); the empty
+        // conjunction must match every node regardless of its labels.
+        let a = put_with_labels(1, 1, &["A"], "a");
+        let b = put_with_labels(2, 1, &["B"], "b");
+        let empty: Vec<String> = vec![];
+
+        let batch = snapshot_entities(
+            [
+                (a.iid, std::slice::from_ref(&a)),
+                (b.iid, std::slice::from_ref(&b)),
+            ],
+            LabelFilter::All(&empty),
+            &now_bounds(10),
+        )
+        .unwrap()
+        .unwrap();
+
+        let mut names = batch_names(&batch);
+        names.sort();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
     fn label_filter_any_matches_either() {
         let ab = put_with_labels(1, 1, &["A", "B"], "ab");
         let ac = put_with_labels(2, 1, &["A", "C"], "ac");
@@ -678,6 +727,52 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["y", "x"]); // reversed file order, not re-sorted
+    }
+
+    /// A property that is `Int` on one row and `Float` on another (across
+    /// labels, as an unlabeled scan unions them) widens to a `Float64` column
+    /// with the whole-number value cast up — rather than erroring with
+    /// `MixedPropertyTypes`. Guards GUAC's `scoreValue` Neighbors query.
+    #[test]
+    fn mixed_int_float_property_widens_to_float() {
+        fn node(entity: u8, label: &str, score: Value) -> Event {
+            let mut doc = Doc::new();
+            doc.insert("score".into(), score);
+            Event {
+                iid: iid(entity),
+                system_from: us(1),
+                valid_from: us(1),
+                valid_to: Instant::END_OF_TIME,
+                src: None,
+                dst: None,
+                op: Op::Put {
+                    labels: vec![label.into()],
+                    doc,
+                },
+            }
+        }
+        let a = node(1, "A", Value::Int(10));
+        let b = node(2, "B", Value::Float(7.5));
+        let mut pairs = vec![
+            (a.iid, std::slice::from_ref(&a)),
+            (b.iid, std::slice::from_ref(&b)),
+        ];
+        pairs.sort_by_key(|(iid, _)| *iid);
+        // Empty conjunction = unlabeled scan: unions both tries.
+        let batch = snapshot_entities(pairs, LabelFilter::All(&[]), &now_bounds(10))
+            .unwrap()
+            .unwrap();
+        let field = batch.schema().field_with_name("score").unwrap().clone();
+        assert_eq!(field.data_type(), &DataType::Float64);
+        let col = batch
+            .column_by_name("score")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap();
+        let mut got: Vec<f64> = (0..col.len()).map(|i| col.value(i)).collect();
+        got.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        assert_eq!(got, vec![7.5, 10.0]);
     }
 
     /// A node event (no endpoints) and an edge event (both endpoints), both

@@ -28,6 +28,7 @@ export interface TxReceipt {
 export type ExplorerErrorCode =
   | 'unauthorized'
   | 'invalid_request'
+  | 'query_error'
   | 'not_acceptable'
   | 'basis_timeout'
   | 'backpressure'

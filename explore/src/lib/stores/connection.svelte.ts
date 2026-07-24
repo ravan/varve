@@ -249,6 +249,7 @@ function isExplorerErrorCode(value: unknown): value is ExplorerErrorCode {
   return (
     value === 'unauthorized' ||
     value === 'invalid_request' ||
+    value === 'query_error' ||
     value === 'not_acceptable' ||
     value === 'basis_timeout' ||
     value === 'backpressure' ||

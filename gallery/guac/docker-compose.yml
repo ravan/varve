@@ -1,0 +1,116 @@
+# GUAC-on-varve gallery. A single-node Garage (S3) cluster backs a varve
+# writer + one query-only node over a shared object-store log; GUAC's guacgql
+# runs its in-tree `varve` backend against the writer, and guacone (baked into
+# the same image) drives ingest + queries. `demo.sh` orchestrates the whole
+# flow, including a bitemporal time-travel read the query node serves.
+#
+# All tokens/credentials here are DEMO-ONLY (see deploy/*.toml, gallery *.toml).
+
+x-garage-image: &garage_image dxflrs/garage:v1.0.1
+
+# Shared build for the two varved nodes: built once from the repo root (so the
+# image carries the current engine, including the mixed Int/Float widening fix
+# that makes GUAC's Neighbors query work), tagged, and reused.
+x-varved: &varved
+  build:
+    context: ../..
+    dockerfile: Dockerfile
+  image: varve:guac-gallery
+  command: ["--config", "/etc/varve/varve.toml"]
+  environment:
+    RUST_LOG: info
+  depends_on:
+    garage-init:
+      condition: service_completed_successfully
+  restart: "no"
+
+services:
+  garage:
+    image: *garage_image
+    volumes:
+      - ../../deploy/garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+    restart: "no"
+
+  # One-shot: forms the single-node layout, creates bucket `varve`, imports the
+  # fixed demo key, grants it, writes /shared/ready, then exits 0.
+  garage-init:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.garage-init
+      args:
+        GARAGE_IMAGE: *garage_image
+    image: varve-garage-init:guac-gallery
+    volumes:
+      - ../../deploy/garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - shared:/shared
+    depends_on:
+      garage:
+        condition: service_started
+    restart: "no"
+
+  writer:
+    <<: *varved
+    volumes:
+      - ./varve-writer.toml:/etc/varve/varve.toml:ro
+    ports:
+      - "8080:8080"
+
+  query-1:
+    <<: *varved
+    volumes:
+      - ./varve-query.toml:/etc/varve/varve.toml:ro
+    ports:
+      - "8081:8080"
+    depends_on:
+      garage-init:
+        condition: service_completed_successfully
+      writer:
+        condition: service_started
+
+  # guacgql serves the GraphQL API on :8010 with the varve backend pointed at
+  # the writer. The image also carries guacone; demo.sh execs it in-container
+  # (the exampledata corpus + the time-travel SBOM are mounted read-only).
+  guacgql:
+    build:
+      context: ../../refs/guac
+      dockerfile: ../../gallery/guac/Dockerfile.guac
+    image: guac-varve:gallery
+    command:
+      - "--gql-backend=varve"
+      - "--varve-addr=http://writer:8080"
+      - "--varve-token=varve-demo-token"
+      - "--gql-listen-port=8010"
+    ports:
+      - "8010:8010"
+    volumes:
+      - ../../refs/guac/internal/testing/testdata/exampledata:/data:ro
+      - ./timetravel:/timetravel:ro
+    healthcheck:
+      # guacgql serves only POST /query (no GET / playground in this build).
+      test:
+        - "CMD"
+        - "curl"
+        - "-fsS"
+        - "-X"
+        - "POST"
+        - "http://localhost:8010/query"
+        - "-H"
+        - "Content-Type: application/json"
+        - "-d"
+        - '{"query":"{__typename}"}'
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      garage-init:
+        condition: service_completed_successfully
+      writer:
+        condition: service_started
+
+volumes:
+  garage-meta:
+  garage-data:
+  shared:

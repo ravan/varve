@@ -2,14 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 
 use datafusion::arrow::datatypes::DataType;
-use datafusion::logical_expr::{binary_expr, cast, col, lit, when, Expr as DfExpr, Operator};
+use datafusion::logical_expr::{binary_expr, cast, lit, when, Expr as DfExpr, Operator};
 use datafusion::scalar::ScalarValue;
 use varve_gql::ast::{BinaryOp, CastType, Expr, Literal, PathPattern, UnaryOp};
 use varve_types::{Iid, Value};
 
 use crate::exec::to_df_literal;
 use crate::functions::{temporal_column, FunctionRegistry, ScalarFn};
-use crate::pattern::mangled;
+use crate::pattern::{col_exact, mangled};
 use crate::PlanError;
 
 pub struct Scope<'a> {
@@ -71,14 +71,14 @@ pub fn lower_expr(
             };
             let col_name = mangled(var, prop);
             if cols.has_column(&col_name) {
-                Ok(col(col_name))
+                Ok(col_exact(col_name))
             } else {
                 Ok(lit(ScalarValue::Null))
             }
         }
         Expr::Var(var) => {
             if scope.has_value_var(var) {
-                Ok(col(var))
+                Ok(col_exact(var))
             } else {
                 Err(PlanError::UnknownVariable(var.clone()))
             }
@@ -235,7 +235,7 @@ fn lower_temporal_fn(
     if !cols.has_column(&col_name) {
         return Err(PlanError::UnknownColumn(hidden.to_string()));
     }
-    let lowered_arg = col(col_name);
+    let lowered_arg = col_exact(col_name);
     match function {
         ScalarFn::Udf(udf) => Ok(udf.call(vec![lowered_arg])),
         ScalarFn::Builder(builder) => builder(vec![lowered_arg]),

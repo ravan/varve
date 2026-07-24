@@ -64,6 +64,40 @@ describe('forwardVarve', () => {
     },
   );
 
+  it('forwards the real upstream message for a query_error as 422', async () => {
+    const response = normalizeUpstreamError(422, {
+      code: 'query_error',
+      message: "mixed Int/Float property 'scoreValue'",
+    });
+
+    expect(response.status).toBe(422);
+    await expectError(response, {
+      code: 'query_error',
+      message: "mixed Int/Float property 'scoreValue'",
+    });
+  });
+
+  it('bounds a pathologically long query_error message', async () => {
+    const response = normalizeUpstreamError(422, {
+      code: 'query_error',
+      message: 'x'.repeat(5000),
+    });
+
+    expect(response.status).toBe(422);
+    const body = (await response.json()) as { message: string };
+    expect(body.message.length).toBe(2000);
+  });
+
+  it('replaces the message of a non-query_error code with its stable copy', async () => {
+    const response = normalizeUpstreamError(400, {
+      code: 'invalid_request',
+      message: 'leaked internal detail',
+    });
+
+    expect(response.status).toBe(400);
+    await expectError(response, { code: 'invalid_request', message: 'Invalid request' });
+  });
+
   it('accepts only empty or visible ASCII bearer token values', () => {
     expect(isSafeBearerToken('')).toBe(true);
     expect(isSafeBearerToken('AZaz09!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~')).toBe(true);

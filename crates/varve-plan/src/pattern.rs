@@ -57,6 +57,16 @@ pub fn mangled(var: &str, col: &str) -> String {
     format!("{var}__{col}")
 }
 
+/// A column reference by EXACT name. DataFusion's `col()` parses its argument as
+/// an identifier and lower-cases unquoted names; our internal column names embed
+/// user identifiers (variable and property names) via `mangled`, and the Arrow
+/// schema preserves their original case, so a normalizing reference to e.g.
+/// `z__listVersion` would look up `z__listversion` and miss the field. Always
+/// reference internal columns through this helper.
+pub(crate) fn col_exact(name: impl Into<String>) -> DfExpr {
+    DfExpr::Column(Column::new_unqualified(name))
+}
+
 /// What the engine must fetch for one pattern element, in path order:
 /// element 0 is the start node, then one Edge/Expand + one Node per hop.
 #[derive(Debug, Clone, PartialEq)]
@@ -1129,7 +1139,10 @@ fn path_dataframe(
                     lowering.functions,
                 )?;
                 let df = if preserve_vars.contains(&spec.var) {
-                    df.with_column(&exists_join_key(&spec.var), col(mangled(&spec.var, "_iid")))?
+                    df.with_column(
+                        &exists_join_key(&spec.var),
+                        col_exact(mangled(&spec.var, "_iid")),
+                    )?
                 } else {
                     df
                 };
@@ -1417,7 +1430,7 @@ fn join_dataframes(
     let mut drop_cols = Vec::new();
     for (var, key) in shared_vars.iter().zip(&keys) {
         let right_key = format!("__join_{key}");
-        right = right.with_column(&right_key, col(key.clone()))?;
+        right = right.with_column(&right_key, col_exact(key.clone()))?;
         right_keys.push(right_key);
         let prefix = format!("{var}__");
         drop_cols.extend(
@@ -1455,7 +1468,7 @@ fn join_optional_dataframes(
     if shared_vars.is_empty() {
         let left = left.with_column("__cross", lit(1i64))?;
         right = right.with_column("__cross_right", lit(1i64))?;
-        conditions.push(col("__cross").eq(col("__cross_right")));
+        conditions.push(col_exact("__cross").eq(col_exact("__cross_right")));
         right_keys.push("__cross_right".to_string());
         return finish_optional_join(
             left,
@@ -1471,8 +1484,8 @@ fn join_optional_dataframes(
     for var in shared_vars {
         let key = mangled(var, "_iid");
         let right_key = format!("__join_{key}");
-        right = right.with_column(&right_key, col(key.clone()))?;
-        conditions.push(col(key).eq(col(right_key.clone())));
+        right = right.with_column(&right_key, col_exact(key.clone()))?;
+        conditions.push(col_exact(key).eq(col_exact(right_key.clone())));
         right_keys.push(right_key);
         let prefix = format!("{var}__");
         drop_cols.extend(
@@ -2008,7 +2021,7 @@ fn project_return_body_frame(
                 let path_col = mangled(var, "path");
                 if df.schema().has_column_with_unqualified_name(&path_col) {
                     let out_name = alias.clone().unwrap_or_else(|| var.clone());
-                    projection.push(col(path_col).alias(out_name.clone()));
+                    projection.push(col_exact(path_col).alias(out_name.clone()));
                     output_names.push(out_name);
                     continue;
                 }
@@ -2085,7 +2098,7 @@ fn order_by_output_expr(
 }
 
 fn output_column(name: impl Into<String>) -> DfExpr {
-    DfExpr::Column(Column::new_unqualified(name))
+    col_exact(name)
 }
 
 fn project_bare_element(
@@ -2127,7 +2140,7 @@ fn project_bare_element(
     for suffix in ordered {
         let input_name = mangled(input_var, &suffix);
         let output_name = format!("{output_var}.{suffix}");
-        projection.push(col(input_name).alias(output_name.clone()));
+        projection.push(col_exact(input_name).alias(output_name.clone()));
         output_names.push(output_name);
     }
 }

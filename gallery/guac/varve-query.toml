@@ -1,0 +1,39 @@
+# Gallery query-only node: follows the shared object-store log and serves
+# reads. It holds no writer role and advertises no address; any write it
+# receives is redirected to the writer it discovers from the shared log. This
+# node is what makes the bitemporal time-travel reads in demo.sh interesting —
+# it sees the exact same durable history as the writer.
+#
+# Credentials/token below are DEMO-ONLY fixed material for this gallery, not
+# production secrets.
+[node]
+roles = ["query"]
+
+[log]
+backend = "object-store"
+group_commit_window_ms = 15
+group_commit_max_bytes = "8MiB"
+
+[storage]
+backend = "s3"
+[storage.s3]
+endpoint = "http://garage:3900"
+bucket = "varve"
+region = "garage"
+access_key_id = "GK000000000000000000000000"
+secret_access_key = "0000000000000000000000000000000000000000000000000000000000000000"
+path_style = true
+
+[server]
+backend = "http"
+[server.http]
+listen = "0.0.0.0:8080"
+max_body_bytes = "8MiB"
+
+[auth]
+backend = "static"
+[auth.static]
+tokens = [{ subject = "guac-gallery", token = "varve-demo-token" }]
+
+[metrics]
+backend = "prometheus"
