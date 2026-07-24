@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use url::Url;
 
 use crate::client::{CliError, CommandClient};
@@ -44,40 +44,74 @@ pub struct Cli {
 pub enum Command {
     /// Start an interactive REPL against the selected connection.
     Shell,
-    /// Import newline-delimited JSON objects as one parameterized `INSERT`
-    /// transaction per line.
+    /// Bulk-load a file or stdin through the engine's fast path
+    /// (`/v1/ingest` / `Db::ingest`); `--format jsonl-legacy` keeps the old
+    /// one-`INSERT`-per-line mode.
     Import(ImportArgs),
-    /// Run a GQL query and write results as line-delimited JSON.
+    /// Write the whole graph as bulk NDJSON, or a GQL query's rows as
+    /// line-delimited JSON (`--format`).
     Export(ExportArgs),
     /// Node administration: status, compaction, garbage collection, and
     /// integrity verification.
     Admin(AdminArgs),
 }
 
+/// Bulk-import wire format. `ndjson`/`csv` take the engine fast path
+/// (`Db::ingest` embedded, `/v1/ingest` remote); `jsonl-legacy` is the
+/// original one-parameterized-`INSERT`-per-line mode (the only mode with
+/// per-line GQL validation and the only one that uses `--label`/`--graph`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Default)]
+pub enum ImportFormat {
+    #[default]
+    Ndjson,
+    Csv,
+    JsonlLegacy,
+}
+
+/// Export wire format. `jsonl` runs a GQL query and writes its rows as
+/// line-delimited JSON (the original behavior); `ndjson` writes the WHOLE
+/// graph as bulk NDJSON (nodes then edges) so `export | import` copies a graph
+/// Varve→Varve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Default)]
+pub enum ExportFormat {
+    #[default]
+    Jsonl,
+    Ndjson,
+}
+
 /// Arguments for `varve import`.
 #[derive(Debug, clap::Args, PartialEq, Eq)]
 pub struct ImportArgs {
-    /// Label applied to every inserted node.
+    /// Wire format of the input.
+    #[arg(long, value_enum, default_value_t = ImportFormat::Ndjson)]
+    pub format: ImportFormat,
+    /// Label applied to every inserted node. Only valid with
+    /// `--format jsonl-legacy` (bulk formats carry labels per record).
     #[arg(long)]
-    pub label: String,
-    /// Graph to `USE` before each insert. Omitted entirely (no `USE`
-    /// clause) when not given.
+    pub label: Option<String>,
+    /// Graph to `USE` before each insert. Only valid with
+    /// `--format jsonl-legacy` (bulk formats load the default graph).
     #[arg(long)]
     pub graph: Option<String>,
-    /// Path to a JSONL file, or `-` to read from stdin.
+    /// Path to the input file, or `-` to read from stdin.
     pub file: String,
 }
 
 /// Arguments for `varve export`.
 #[derive(Debug, clap::Args, PartialEq, Eq)]
 pub struct ExportArgs {
-    /// The GQL query to run.
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = ExportFormat::Jsonl)]
+    pub format: ExportFormat,
+    /// The GQL query to run. Required for `--format jsonl`; rejected for
+    /// `--format ndjson` (which exports the whole graph).
     #[arg(long)]
-    pub query: String,
-    /// Read basis: a bare transaction id, or `at:<packed-u64>`.
+    pub query: Option<String>,
+    /// Read basis: a bare transaction id, or `at:<packed-u64>`. `--format
+    /// jsonl` only.
     #[arg(long)]
     pub basis: Option<String>,
-    /// Path to write line-delimited JSON to, or `-` to write to stdout.
+    /// Path to write to, or `-` to write to stdout.
     pub file: String,
 }
 

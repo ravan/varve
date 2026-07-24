@@ -32,6 +32,7 @@ fn router() -> axum::Router {
             readiness,
         },
         max_body_bytes: 1024 * 1024,
+        ingest: varve_server::IngestConfig::default(),
     })
 }
 
@@ -49,6 +50,7 @@ fn router_with_db(db: varve::Db) -> axum::Router {
             readiness,
         },
         max_body_bytes: 1024 * 1024,
+        ingest: varve_server::IngestConfig::default(),
     })
 }
 
@@ -319,6 +321,7 @@ async fn authorization_accept_and_body_limit_are_parsed_exactly() {
             readiness,
         },
         max_body_bytes: 8,
+        ingest: varve_server::IngestConfig::default(),
     });
     let oversized = call(
         small,
@@ -510,6 +513,7 @@ async fn security_enforcement_maps_to_403_and_filters_queries() {
             readiness,
         },
         max_body_bytes: 1024 * 1024,
+        ingest: varve_server::IngestConfig::default(),
     });
     let call_as = |app: axum::Router, token: &'static str, uri: &'static str, body: Value| async move {
         app.oneshot(

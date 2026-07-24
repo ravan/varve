@@ -3,13 +3,19 @@ use std::time::Duration;
 
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
-use varve::{BasisToken, Db, ProbeReport};
+use futures::StreamExt;
+use varve::{BasisToken, Db, EdgePut, NodePut, ProbeReport, TxReceipt};
+use varve_server::api::bulk::csv::CsvFramer;
+use varve_server::api::bulk::{
+    BulkOp, Framer, IngestProgress, IngestResponse, NdjsonFramer, DEFAULT_CHUNK_OPS,
+    DEFAULT_MAX_LINE_BYTES,
+};
 use varve_server::api::{
     params_from_json, CompactionResponse, GcResponse, QueryRequest, StatusResponse, TxRequest,
     TxResponse, VerifyResponse,
 };
 
-use crate::client::{CliError, CommandClient};
+use crate::client::{BulkBody, BulkFormat, CliError, CommandClient};
 
 /// Subject recorded against transactions issued from the embedded CLI
 /// adapter (mirrors the authenticated subject an HTTP tx would carry).
@@ -80,5 +86,98 @@ impl CommandClient for EmbeddedClient {
     async fn verify(&self) -> Result<VerifyResponse, CliError> {
         let report = self.db.verify().await?;
         Ok(VerifyResponse::from_report(&report))
+    }
+
+    /// Embedded bulk import: drive `body` through the SAME incremental framer
+    /// the `/v1/ingest` handler uses, committing `chunk_ops`-sized chunks as
+    /// one atomic `Db::ingest_as` each — no GQL parse or plan, constant memory
+    /// (one line + one chunk). Earlier chunks stay committed on a later
+    /// failure; the error carries the committed counts.
+    async fn ingest(
+        &self,
+        format: BulkFormat,
+        mut body: BulkBody,
+    ) -> Result<IngestResponse, CliError> {
+        let max_line_bytes = DEFAULT_MAX_LINE_BYTES.as_usize();
+        let mut framer = match format {
+            BulkFormat::Ndjson => Framer::Ndjson(NdjsonFramer::new(max_line_bytes)),
+            BulkFormat::Csv => Framer::Csv(Box::new(CsvFramer::new(max_line_bytes))),
+        };
+        let mut pending: Vec<BulkOp> = Vec::new();
+        let mut progress = IngestProgress::default();
+        let mut last: Option<TxReceipt> = None;
+
+        while let Some(frame) = body.next().await {
+            let frame = frame
+                .map_err(|error| ingest_error(&progress, format!("body stream error: {error}")))?;
+            let ops = framer
+                .push(&frame)
+                .map_err(|error| ingest_error(&progress, error.to_string()))?;
+            pending.extend(ops);
+            while pending.len() >= DEFAULT_CHUNK_OPS {
+                let chunk: Vec<BulkOp> = pending.drain(..DEFAULT_CHUNK_OPS).collect();
+                self.commit_chunk(chunk, &mut progress, &mut last).await?;
+            }
+        }
+        let tail = framer
+            .finish()
+            .map_err(|error| ingest_error(&progress, error.to_string()))?;
+        pending.extend(tail);
+        while !pending.is_empty() {
+            let take = pending.len().min(DEFAULT_CHUNK_OPS);
+            let chunk: Vec<BulkOp> = pending.drain(..take).collect();
+            self.commit_chunk(chunk, &mut progress, &mut last).await?;
+        }
+
+        match last {
+            Some(last) => Ok(IngestResponse::from_committed(&progress, &last)),
+            None => Err(CliError::InvalidInput(
+                "input contained no records".to_string(),
+            )),
+        }
+    }
+
+    async fn snapshot_all(&self) -> Result<(Option<RecordBatch>, Option<RecordBatch>), CliError> {
+        let nodes = self.db.snapshot_all_nodes().await?;
+        let edges = self.db.snapshot_all_edges().await?;
+        Ok((nodes, edges))
+    }
+}
+
+impl EmbeddedClient {
+    /// Commits one non-empty chunk as an atomic `Db::ingest_as` transaction
+    /// attributed to the embedded subject, folding the receipt into
+    /// `progress`/`last`. An engine failure surfaces as a committed-progress
+    /// [`CliError::Ingest`].
+    async fn commit_chunk(
+        &self,
+        chunk: Vec<BulkOp>,
+        progress: &mut IngestProgress,
+        last: &mut Option<TxReceipt>,
+    ) -> Result<(), CliError> {
+        let mut nodes: Vec<NodePut> = Vec::new();
+        let mut edges: Vec<EdgePut> = Vec::new();
+        for op in chunk {
+            match op {
+                BulkOp::Node(node) => nodes.push(node),
+                BulkOp::Edge(edge) => edges.push(edge),
+            }
+        }
+        match self.db.ingest_as(EMBEDDED_USER, nodes, edges).await {
+            Ok(receipt) => {
+                progress.absorb(&receipt);
+                *last = Some(receipt);
+                Ok(())
+            }
+            Err(error) => Err(ingest_error(progress, error.to_string())),
+        }
+    }
+}
+
+/// A committed-progress bulk-ingest error (mirrors the HTTP route's body).
+fn ingest_error(progress: &IngestProgress, message: String) -> CliError {
+    CliError::Ingest {
+        message,
+        committed: progress.clone(),
     }
 }

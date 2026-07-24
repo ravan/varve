@@ -7,6 +7,7 @@
 mod admin;
 mod cli;
 mod client;
+mod command;
 mod embedded;
 mod output;
 mod remote;
@@ -14,12 +15,15 @@ mod shell;
 mod transfer;
 
 pub use admin::{run_admin_compact, run_admin_gc, run_admin_status, run_admin_verify};
-pub use cli::{AdminArgs, AdminCommand, Cli, Command, ExportArgs, ImportArgs};
-pub use client::{CliError, CommandClient};
+pub use cli::{
+    AdminArgs, AdminCommand, Cli, Command, ExportArgs, ExportFormat, ImportArgs, ImportFormat,
+};
+pub use client::{BulkBody, BulkFormat, CliError, CommandClient};
+pub use command::{run_export, run_import};
 pub use embedded::EmbeddedClient;
 pub use remote::RemoteClient;
 pub use shell::{run_shell, RustylineInput, ShellEvent, ShellInput};
-pub use transfer::{export_jsonl, import_jsonl, parse_basis, ImportReport};
+pub use transfer::{export_jsonl, export_ndjson, import_jsonl, parse_basis, ImportReport};
 
 // Re-exported for convenience: the trait methods above are defined in terms
 // of these shared wire DTOs (`varve_server::api`), so callers building

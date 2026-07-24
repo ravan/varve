@@ -1,10 +1,15 @@
 //! HTTP fixture driver for the Garage scale-out Compose demo (roadmap slice 9,
-//! task 15). It exercises the deployed `writer` + two `query` nodes exactly the
-//! way an external client would: load the deterministic Slice 6 social graph
-//! over `POST /v1/tx`, then read it back at the writer's final basis from EVERY
-//! query node and assert the nodes AGREE — same rows, same Arrow decode. Any
-//! disagreement, HTTP failure, or empty result exits nonzero, so the demo
-//! script's `set -e` fails the run.
+//! task 15; bulk loader added in BI-5). It exercises the deployed `writer` +
+//! two `query` nodes exactly the way an external client would: bulk-load the
+//! deterministic Slice 6 social graph over `POST /v1/ingest` in ONE streamed
+//! request (the fast path — no GQL parse/plan per statement), then read it back
+//! at the writer's final basis from EVERY query node and assert the nodes AGREE
+//! — same rows, same Arrow decode. Any disagreement, HTTP failure, or empty
+//! result exits nonzero, so the demo script's `set -e` fails the run.
+//!
+//! Before BI-5 this loaded via one `POST /v1/tx` per node statement + edge
+//! program (≈602 requests, GQL parse/plan each). The bulk path loads the whole
+//! graph in a single request; the demo prints its measured records/s.
 //!
 //! Pure helpers (query text, row extraction, agreement) are unit-tested; the
 //! networked `run` is only reachable against a live deployment.
@@ -26,14 +31,12 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 const PEOPLE: usize = 200;
 const FRIENDSHIPS: usize = 1_000;
 const SEED: u64 = 42;
-/// Fixture batch sizes: 100 nodes per INSERT, 100 edge INSERTs per program.
-const NODE_BATCH: usize = 100;
-const EDGE_BATCH: usize = 100;
 /// Generous per-read basis timeout so a lagging follower always catches up to
 /// the writer's final basis before it answers.
 const BASIS_TIMEOUT_MS: u64 = 30_000;
 
 const ARROW_STREAM_CONTENT_TYPE: &str = "application/vnd.apache.arrow.stream";
+const NDJSON_CONTENT_TYPE: &str = "application/x-ndjson";
 
 #[derive(Parser)]
 #[command(name = "http_fixture", about = "Load + cross-verify the Compose demo")]
@@ -98,24 +101,31 @@ fn agree(form: &str, per_node: &[(String, Vec<String>)]) -> Result<usize, BoxErr
     Ok(first.len())
 }
 
-/// POSTs one mutation and returns the receipt's `basis`.
-async fn post_tx(client: &Client, writer: &str, token: &str, gql: &str) -> Result<u64, BoxError> {
+/// Bulk-loads an NDJSON body via `POST /v1/ingest` and returns the folded
+/// `basis` (last committed tx id) for the subsequent basis reads.
+async fn ingest_ndjson(
+    client: &Client,
+    writer: &str,
+    token: &str,
+    ndjson: String,
+) -> Result<u64, BoxError> {
     let response = client
-        .post(format!("{writer}/v1/tx"))
+        .post(format!("{writer}/v1/ingest"))
         .bearer_auth(token)
-        .json(&json!({ "gql": gql }))
+        .header(reqwest::header::CONTENT_TYPE, NDJSON_CONTENT_TYPE)
+        .body(ndjson)
         .send()
         .await?;
     let status = response.status();
     let body = response.text().await?;
     if !status.is_success() {
-        return Err(format!("tx to {writer} returned {status}: {body}").into());
+        return Err(format!("ingest to {writer} returned {status}: {body}").into());
     }
     let value: Value = serde_json::from_str(&body)?;
     value
         .get("basis")
         .and_then(Value::as_u64)
-        .ok_or_else(|| format!("tx response missing u64 `basis`: {body}").into())
+        .ok_or_else(|| format!("ingest response missing u64 `basis`: {body}").into())
 }
 
 /// POSTs a query at `basis` and returns the parsed JSON body.
@@ -191,16 +201,22 @@ async fn run(args: Args) -> Result<(), BoxError> {
     let client = Client::builder().timeout(Duration::from_secs(60)).build()?;
     let graph = social_graph(PEOPLE, FRIENDSHIPS, SEED);
 
-    // Load nodes then edges, one program per transaction, retaining the final
-    // basis the writer commits.
-    let mut basis = 0u64;
-    for statement in graph.node_statements(NODE_BATCH) {
-        basis = post_tx(&client, &args.writer, &args.token, &statement).await?;
-    }
-    for program in graph.edge_programs(EDGE_BATCH) {
-        basis = post_tx(&client, &args.writer, &args.token, &program).await?;
-    }
-    println!("http_fixture: loaded fixture, final basis = {basis}");
+    // Bulk-load the whole graph (nodes + edges) in ONE streamed
+    // `POST /v1/ingest` request — the fast path — and keep the returned basis.
+    let ndjson = graph.ndjson_records();
+    let records = graph.people + graph.edges.len();
+    let started = std::time::Instant::now();
+    let basis = ingest_ndjson(&client, &args.writer, &args.token, ndjson).await?;
+    let elapsed = started.elapsed().as_secs_f64();
+    let rate = if elapsed > 0.0 {
+        records as f64 / elapsed
+    } else {
+        f64::INFINITY
+    };
+    println!(
+        "http_fixture: bulk-loaded {records} records via POST /v1/ingest in {elapsed:.3}s \
+         ({rate:.0} records/s), final basis = {basis}"
+    );
 
     // Every query form must agree across every query node at the final basis.
     let forms: BTreeMap<&str, &str> = BTreeMap::from([

@@ -100,6 +100,21 @@ read-scaling query nodes over any S3-compatible object store.
 - Anchor-reachable node-scan pruning: anchored traversals prune non-anchor
   node scans to the anchor-reachable set (provably result-identical). Warm
   2-hop on a 1M-node/6M-edge graph: 17.85 ms after the one-time full sweep.
+- `POST /v1/ingest`: the bulk fast path over HTTP. Streaming, writer-only,
+  `Content-Type`-negotiated **NDJSON** (`type`-tagged node/edge records) or
+  **Neo4j-dialect CSV** (`:ID`/`:LABEL`/`:START_ID`/`:END_ID`/`:TYPE` +
+  typed columns), optional gzip, optional per-record valid time. Each
+  server-side chunk (`[ingest] chunk_ops`) commits as one atomic `Db::ingest`;
+  the stream is not atomic and a mid-stream failure reports committed progress
+  (idempotent replay is the retry story). Measured ~166k records/s vs ~88 for
+  the per-line `/v1/tx` surface (≈1,880×). The wire contract is the normative
+  `docs/book/src/reference/bulk-ingest.md`.
+- `varve import --format ndjson|csv|jsonl-legacy` (default `ndjson`): the bulk
+  formats stream to `/v1/ingest` (`--url`) or commit `Db::ingest` chunks
+  (`--dir`) with a records/s progress line; `jsonl-legacy` is the original
+  one-`INSERT`-per-line mode. `varve export --format ndjson` writes the whole
+  graph as bulk NDJSON so `export | import` copies a graph Varve→Varve
+  (embedded, current-state; round-trip proven).
 
 ### Compaction, GC, and GDPR erase
 
@@ -113,12 +128,12 @@ read-scaling query nodes over any S3-compatible object store.
 
 ### Server and CLI
 
-- `varved` HTTP server: bearer-authenticated `/v1/{query,tx,status,admin/*}`,
+- `varved` HTTP server: bearer-authenticated `/v1/{query,tx,ingest,status,admin/*}`,
   public I/O-free `/healthz`, Prometheus `/metrics`, JSON by default with an
   opt-in chunked Arrow IPC stream. Query nodes answer misdirected mutations
   with HTTP 421 and the writer's address.
-- `varve` CLI: embedded/remote shell, JSONL import/export, and admin
-  (status/compact/gc/verify).
+- `varve` CLI: embedded/remote shell, bulk + legacy import, query/whole-graph
+  export, and admin (status/compact/gc/verify).
 - Distroless container image; a Compose demo brings up 1 writer + 2 query
   nodes over Garage.
 
@@ -154,7 +169,12 @@ read-scaling query nodes over any S3-compatible object store.
   `USE`/DDL and the DML as separate transactions).
 - The v1 GQL write surface is one transaction per edge for `MATCH … INSERT`
   edge creation (an ingest-throughput characteristic, not a correctness
-  limit); use `Db::ingest` for bulk loads.
+  limit); use the bulk path for large loads — `Db::ingest` embedded,
+  `POST /v1/ingest` or `varve import` remotely.
+- Whole-graph NDJSON export (`varve export --format ndjson`) captures the
+  current state (one version per entity), not full history, and is embedded
+  (`--dir`) only — there is no HTTP export endpoint. Async load jobs, S3-pull
+  ingestion, and an Arrow-IPC request format are tracked as future work.
 - Retroactive / as-of `DELETE` is deferred post-v1 (`DELETE` acts on current
   state; a `FOR` clause on `DELETE` is a parse error).
 - Every spec §13 laptop target that has been measured is met; the object-store

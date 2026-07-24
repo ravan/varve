@@ -625,3 +625,22 @@ async fn follower_propagates_grants_to_query_nodes() {
         .unwrap();
     assert_eq!(strings(&batches, "p.name"), vec!["P"]);
 }
+
+/// `Db::is_admin` (the engine surface admin-only server routes gate on):
+/// disabled security lets anyone through; enabled security admits the
+/// bootstrap admin and the empty embedded-owner subject, and rejects a
+/// non-admin principal.
+#[tokio::test]
+async fn is_admin_reflects_security_configuration() {
+    let open = varve::Db::memory();
+    assert!(open.is_admin("anyone").await.unwrap());
+    assert!(open.is_admin("").await.unwrap());
+
+    let db = secured_db().await;
+    assert!(db.is_admin("root").await.unwrap(), "bootstrap admin");
+    assert!(db.is_admin("").await.unwrap(), "embedded process owner");
+    assert!(
+        !db.is_admin("ada").await.unwrap(),
+        "unknown principal is not an admin"
+    );
+}

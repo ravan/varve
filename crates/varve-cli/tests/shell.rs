@@ -126,6 +126,18 @@ impl CommandClient for FakeClient {
             log_records_checked: 0,
         })
     }
+
+    async fn ingest(
+        &self,
+        _format: varve_cli::BulkFormat,
+        _body: varve_cli::BulkBody,
+    ) -> Result<varve_server::api::bulk::IngestResponse, CliError> {
+        unreachable!("not exercised by shell tests")
+    }
+
+    async fn snapshot_all(&self) -> Result<(Option<RecordBatch>, Option<RecordBatch>), CliError> {
+        unreachable!("not exercised by shell tests")
+    }
 }
 
 /// One scripted input event. String literals convert to [`ScriptedInput::Line`]

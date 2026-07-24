@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 use varve::{Config, Db, Registries};
 use varve_config::{BuildContext, ConfigSection};
-use varve_server::{readiness_channel, FrontendContext, ServerError, ServerRegistries, Shutdown};
+use varve_server::{
+    readiness_channel, FrontendContext, IngestConfig, ServerError, ServerRegistries, Shutdown,
+};
 
 #[derive(Parser)]
 #[command(name = "varved", about = "Run the Varve database server")]
@@ -46,8 +48,15 @@ async fn main() -> Result<(), ServerError> {
     let server_section = config
         .section("server")
         .unwrap_or_else(ConfigSection::empty);
+    // `[ingest]` is a top-level section consumed by the HTTP frontend; read it
+    // here and hand it to the frontend factory through the BuildContext.
+    let ingest: IngestConfig = config
+        .section("ingest")
+        .unwrap_or_else(ConfigSection::empty)
+        .get()?;
     let mut frontend_context = BuildContext::empty();
     frontend_context.insert(db.clone());
+    frontend_context.insert(ingest);
     let frontend = registries.frontend.build(
         server_section.backend().unwrap_or("http"),
         &server_section,

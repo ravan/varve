@@ -1,3 +1,5 @@
+pub mod bulk;
+
 use std::collections::BTreeMap;
 
 use arrow::record_batch::RecordBatch;
@@ -250,7 +252,7 @@ pub fn params_from_json(
         .collect()
 }
 
-fn scalar_from_json(value: &JsonValue) -> Result<Value, ServerError> {
+pub(crate) fn scalar_from_json(value: &JsonValue) -> Result<Value, ServerError> {
     match value {
         JsonValue::Null => Ok(Value::Null),
         JsonValue::Bool(value) => Ok(Value::Bool(*value)),

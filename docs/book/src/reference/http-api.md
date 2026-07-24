@@ -11,6 +11,7 @@ status code, and body on this page is copied from `crates/varve-server/tests/htt
 | `/healthz` | GET | **public** | I/O-free; reads only the in-memory follower-error state, never touches the object store. |
 | `/v1/query` | POST | bearer | Read-only; served by any node with the data. |
 | `/v1/tx` | POST | bearer | Mutation; **writer-only**, redirects on a non-writer node. |
+| `/v1/ingest` | POST | bearer | Bulk load (NDJSON / Neo4j-CSV); **writer-only**. Streaming, per-chunk atomic. See [Bulk ingest](bulk-ingest.md). |
 | `/v1/status` | GET | bearer | Roles, applied progress, manifest watermark, probe verdict. |
 | `/metrics` | GET | bearer | Prometheus text format. |
 | `/v1/admin/compact` | POST | bearer | **Compactor-role-only**, redirects otherwise. |

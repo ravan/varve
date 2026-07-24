@@ -1,5 +1,5 @@
 use clap::{CommandFactory, Parser};
-use varve_cli::{AdminCommand, Cli, CliError, Command};
+use varve_cli::{AdminCommand, Cli, CliError, Command, ExportFormat, ImportFormat};
 
 #[test]
 fn shell_subcommand_is_recognized() {
@@ -25,22 +25,54 @@ fn dir_and_url_conflict() {
 }
 
 #[test]
-fn import_subcommand_is_recognized() {
-    let cli = Cli::try_parse_from([
+fn import_defaults_to_ndjson_with_no_label() {
+    // The bulk-first default: `varve import <file>` is NDJSON, no --label.
+    let cli = Cli::try_parse_from(["varve", "--dir", "/tmp/db", "import", "data.ndjson"])
+        .unwrap_or_else(|error| panic!("parse must succeed: {error}"));
+    match cli.command {
+        Command::Import(args) => {
+            assert_eq!(args.format, ImportFormat::Ndjson);
+            assert_eq!(args.label, None);
+            assert_eq!(args.graph, None);
+            assert_eq!(args.file, "data.ndjson");
+        }
+        other => panic!("expected Command::Import, got {other:?}"),
+    }
+}
+
+#[test]
+fn import_format_csv_and_jsonl_legacy_parse() {
+    let csv = Cli::try_parse_from([
         "varve",
         "--dir",
         "/tmp/db",
         "import",
-        "--label",
-        "Person",
-        "data.jsonl",
+        "--format",
+        "csv",
+        "nodes.csv",
     ])
     .unwrap_or_else(|error| panic!("parse must succeed: {error}"));
-    match cli.command {
+    assert!(matches!(csv.command, Command::Import(a) if a.format == ImportFormat::Csv));
+
+    let legacy = Cli::try_parse_from([
+        "varve",
+        "--dir",
+        "/tmp/db",
+        "import",
+        "--format",
+        "jsonl-legacy",
+        "--label",
+        "Person",
+        "--graph",
+        "social",
+        "rows.jsonl",
+    ])
+    .unwrap_or_else(|error| panic!("parse must succeed: {error}"));
+    match legacy.command {
         Command::Import(args) => {
-            assert_eq!(args.label, "Person");
-            assert_eq!(args.graph, None);
-            assert_eq!(args.file, "data.jsonl");
+            assert_eq!(args.format, ImportFormat::JsonlLegacy);
+            assert_eq!(args.label.as_deref(), Some("Person"));
+            assert_eq!(args.graph.as_deref(), Some("social"));
         }
         other => panic!("expected Command::Import, got {other:?}"),
     }
@@ -66,7 +98,7 @@ fn import_subcommand_rejects_dir_and_url_together() {
 }
 
 #[test]
-fn export_subcommand_is_recognized() {
+fn export_defaults_to_jsonl_query_mode() {
     let cli = Cli::try_parse_from([
         "varve",
         "--dir",
@@ -79,9 +111,36 @@ fn export_subcommand_is_recognized() {
     .unwrap_or_else(|error| panic!("parse must succeed: {error}"));
     match cli.command {
         Command::Export(args) => {
-            assert_eq!(args.query, "MATCH (p:Person) RETURN p.name AS name");
+            assert_eq!(args.format, ExportFormat::Jsonl);
+            assert_eq!(
+                args.query.as_deref(),
+                Some("MATCH (p:Person) RETURN p.name AS name")
+            );
             assert_eq!(args.basis, None);
             assert_eq!(args.file, "-");
+        }
+        other => panic!("expected Command::Export, got {other:?}"),
+    }
+}
+
+#[test]
+fn export_ndjson_needs_no_query() {
+    // Whole-graph bulk export: no --query.
+    let cli = Cli::try_parse_from([
+        "varve",
+        "--dir",
+        "/tmp/db",
+        "export",
+        "--format",
+        "ndjson",
+        "graph.ndjson",
+    ])
+    .unwrap_or_else(|error| panic!("parse must succeed: {error}"));
+    match cli.command {
+        Command::Export(args) => {
+            assert_eq!(args.format, ExportFormat::Ndjson);
+            assert_eq!(args.query, None);
+            assert_eq!(args.file, "graph.ndjson");
         }
         other => panic!("expected Command::Export, got {other:?}"),
     }

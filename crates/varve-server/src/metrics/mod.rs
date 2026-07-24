@@ -8,8 +8,8 @@ pub(crate) use otlp::OtlpMetricsFactory;
 
 use crate::ServerError;
 use prometheus::{
-    Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
-    TextEncoder,
+    Encoder, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, Opts, Registry, TextEncoder,
 };
 use std::{sync::Arc, time::Duration};
 use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
@@ -27,6 +27,10 @@ pub trait MetricsSink: Send + Sync {
     /// Task 12 (spec §12): sets the engine-counter/cache/inventory gauges
     /// from an I/O-free `Db::metrics()` snapshot.
     fn set_engine(&self, snapshot: &EngineMetricsSnapshot);
+    /// BI-2: records one completed `/v1/ingest` request — `records` = total
+    /// nodes + edges committed, `bytes` = post-decompression body bytes
+    /// streamed, `transactions` = chunks committed, `elapsed` = wall time.
+    fn observe_ingest(&self, records: u64, bytes: u64, transactions: u64, elapsed: Duration);
     fn encode(&self) -> Result<String, ServerError>;
 }
 
@@ -53,6 +57,10 @@ pub struct PrometheusMetrics {
     compaction_debt_tries: IntGauge,
     cache_hits: IntGaugeVec,
     cache_misses: IntGaugeVec,
+    ingest_records: IntCounter,
+    ingest_bytes: IntCounter,
+    ingest_transactions: IntCounter,
+    ingest_duration: Histogram,
 }
 
 impl PrometheusMetrics {
@@ -133,6 +141,26 @@ impl PrometheusMetrics {
             &["tier"],
         )
         .map_err(protocol)?;
+        let ingest_records = IntCounter::new(
+            "varve_ingest_records_total",
+            "Node + edge records committed through /v1/ingest",
+        )
+        .map_err(protocol)?;
+        let ingest_bytes = IntCounter::new(
+            "varve_ingest_bytes_total",
+            "Post-decompression request bytes streamed through /v1/ingest",
+        )
+        .map_err(protocol)?;
+        let ingest_transactions = IntCounter::new(
+            "varve_ingest_transactions_total",
+            "Chunk transactions committed through /v1/ingest",
+        )
+        .map_err(protocol)?;
+        let ingest_duration = Histogram::with_opts(HistogramOpts::new(
+            "varve_ingest_duration_seconds",
+            "End-to-end /v1/ingest request duration",
+        ))
+        .map_err(protocol)?;
         for collector in [
             Box::new(requests.clone()) as Box<dyn prometheus::core::Collector>,
             Box::new(duration.clone()),
@@ -155,6 +183,10 @@ impl PrometheusMetrics {
             Box::new(compaction_debt_tries.clone()),
             Box::new(cache_hits.clone()),
             Box::new(cache_misses.clone()),
+            Box::new(ingest_records.clone()),
+            Box::new(ingest_bytes.clone()),
+            Box::new(ingest_transactions.clone()),
+            Box::new(ingest_duration.clone()),
         ] {
             registry.register(collector).map_err(protocol)?;
         }
@@ -181,6 +213,10 @@ impl PrometheusMetrics {
             compaction_debt_tries,
             cache_hits,
             cache_misses,
+            ingest_records,
+            ingest_bytes,
+            ingest_transactions,
+            ingest_duration,
         })
     }
 
@@ -254,6 +290,13 @@ impl MetricsSink for PrometheusMetrics {
                 .with_label_values(&[tier.tier.as_str()])
                 .set(saturating_i64(tier.misses));
         }
+    }
+
+    fn observe_ingest(&self, records: u64, bytes: u64, transactions: u64, elapsed: Duration) {
+        self.ingest_records.inc_by(records);
+        self.ingest_bytes.inc_by(bytes);
+        self.ingest_transactions.inc_by(transactions);
+        self.ingest_duration.observe(elapsed.as_secs_f64());
     }
 
     fn encode(&self) -> Result<String, ServerError> {

@@ -6,12 +6,13 @@ use async_trait::async_trait;
 use reqwest::{header, Client, Response, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use url::Url;
+use varve_server::api::bulk::{IngestErrorResponse, IngestResponse};
 use varve_server::api::{
     CompactionResponse, ErrorResponse, GcResponse, QueryRequest, StatusResponse, TxRequest,
     TxResponse, VerifyResponse, ARROW_STREAM_CONTENT_TYPE,
 };
 
-use crate::client::{CliError, CommandClient};
+use crate::client::{BulkBody, BulkFormat, CliError, CommandClient};
 
 /// Default cap on a single buffered HTTP response body. The CLI always
 /// buffers query results client-side (table/JSONL rendering need a
@@ -106,6 +107,37 @@ impl RemoteClient {
                 },
                 Err(_) => CliError::Status { status },
             },
+            Err(error) => error,
+        }
+    }
+
+    /// Turns a non-2xx `/v1/ingest` response into a `CliError`, preferring the
+    /// committed-progress `IngestErrorResponse` (a mid-stream 422/5xx) so the
+    /// caller learns what durably committed; falls back to the plain
+    /// `ErrorResponse`/status mapping otherwise. A 429 is `Backpressure`.
+    async fn ingest_error_for(&self, response: Response) -> CliError {
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            return CliError::Backpressure;
+        }
+        let status = response.status().as_u16();
+        match self.read_bounded(response).await {
+            Ok(bytes) => {
+                // `IngestErrorResponse` requires `committed`; a gate-level
+                // `ErrorResponse` (415/401/…) lacks it and falls through.
+                if let Ok(error) = serde_json::from_slice::<IngestErrorResponse>(&bytes) {
+                    return CliError::Ingest {
+                        message: error.error,
+                        committed: error.committed,
+                    };
+                }
+                match serde_json::from_slice::<ErrorResponse>(&bytes) {
+                    Ok(error) => CliError::Api {
+                        code: error.code,
+                        message: error.message,
+                    },
+                    Err(_) => CliError::Status { status },
+                }
+            }
             Err(error) => error,
         }
     }
@@ -214,6 +246,43 @@ impl CommandClient for RemoteClient {
     async fn verify(&self) -> Result<VerifyResponse, CliError> {
         self.send_mutation("/v1/admin/verify", &()).await
     }
+
+    /// Streams `body` to `POST /v1/ingest` as one request (reqwest streamed
+    /// body — never buffered). Unlike `send_mutation`, a 421 is NOT followed:
+    /// the request body is a one-shot stream that cannot be replayed against
+    /// the advertised writer, so the caller is told to re-run with `--url`
+    /// pointed at the writer (idempotent replay is the retry story).
+    async fn ingest(&self, format: BulkFormat, body: BulkBody) -> Result<IngestResponse, CliError> {
+        let response = self
+            .http
+            .post(self.join("/v1/ingest")?)
+            .bearer_auth(&self.token)
+            .header(header::CONTENT_TYPE, format.content_type())
+            .body(reqwest::Body::wrap_stream(body))
+            .send()
+            .await?;
+        if response.status().is_success() {
+            return self.decode_json(response).await;
+        }
+        if response.status() == StatusCode::MISDIRECTED_REQUEST {
+            let bytes = self.read_bounded(response).await?;
+            let advertised = serde_json::from_slice::<ErrorResponse>(&bytes)
+                .ok()
+                .and_then(|error| error.writer)
+                .map(|writer| format!(" ({writer})"))
+                .unwrap_or_default();
+            return Err(CliError::InvalidInput(format!(
+                "ingest reached a non-writer node; re-run with --url pointing at the writer{advertised}"
+            )));
+        }
+        Err(self.ingest_error_for(response).await)
+    }
+
+    async fn snapshot_all(&self) -> Result<(Option<RecordBatch>, Option<RecordBatch>), CliError> {
+        Err(CliError::InvalidInput(
+            "bulk NDJSON export requires --dir; there is no HTTP export endpoint".to_string(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -275,6 +344,117 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "server is applying backpressure (429): retry"
+        );
+    }
+
+    /// Spawns `router` on an ephemeral port and returns a client pointed at it.
+    async fn serve(router: axum::Router) -> RemoteClient {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("listener must bind: {error}"));
+        let addr = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("addr must resolve: {error}"));
+        tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .unwrap_or_else(|error| panic!("server must serve: {error}"));
+        });
+        RemoteClient::new(
+            Url::parse(&format!("http://{addr}"))
+                .unwrap_or_else(|error| panic!("base url must parse: {error}")),
+            "token".to_string(),
+        )
+        .unwrap_or_else(|error| panic!("client must build: {error}"))
+    }
+
+    fn body_from(bytes: &'static [u8]) -> BulkBody {
+        Box::pin(futures::stream::once(async move {
+            Ok(bytes::Bytes::from_static(bytes))
+        }))
+    }
+
+    /// The streamed body reaches `/v1/ingest` and the `IngestResponse` is
+    /// parsed back. The mock counts the NDJSON lines it received, proving the
+    /// body was actually transmitted (not dropped).
+    #[tokio::test]
+    async fn ingest_streams_the_body_and_parses_the_response() {
+        use varve_server::api::bulk::IngestResponse;
+        let router = axum::Router::new().route(
+            "/v1/ingest",
+            axum::routing::post(|body: axum::body::Bytes| async move {
+                let nodes = body
+                    .split(|&b| b == b'\n')
+                    .filter(|line| !line.is_empty())
+                    .count() as u64;
+                axum::Json(IngestResponse {
+                    nodes,
+                    edges: 0,
+                    transactions: 1,
+                    basis: 5,
+                    system_time: "2024-01-01T00:00:00.000000Z".to_string(),
+                    system_time_us: 0,
+                })
+            }),
+        );
+        let client = serve(router).await;
+        let body = body_from(
+            b"{\"type\":\"node\",\"props\":{\"_id\":1}}\n{\"type\":\"node\",\"props\":{\"_id\":2}}\n",
+        );
+        let response = client
+            .ingest(BulkFormat::Ndjson, body)
+            .await
+            .unwrap_or_else(|error| panic!("ingest must succeed: {error}"));
+        assert_eq!(response.nodes, 2);
+        assert_eq!(response.basis, 5);
+    }
+
+    /// A mid-stream 422 carrying `IngestErrorResponse` maps to
+    /// `CliError::Ingest` with the committed counts preserved.
+    #[tokio::test]
+    async fn ingest_maps_a_committed_progress_error() {
+        use varve_server::api::bulk::{IngestErrorResponse, IngestProgress};
+        let router = axum::Router::new().route(
+            "/v1/ingest",
+            axum::routing::post(|_body: axum::body::Bytes| async move {
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    axum::Json(IngestErrorResponse {
+                        error: "line 3: edge record missing `dst`".to_string(),
+                        committed: IngestProgress {
+                            nodes: 2,
+                            edges: 0,
+                            transactions: 1,
+                            basis: 9,
+                        },
+                    }),
+                )
+            }),
+        );
+        let client = serve(router).await;
+        let error = client
+            .ingest(BulkFormat::Ndjson, body_from(b"whatever"))
+            .await
+            .expect_err("a 422 must surface as an error");
+        match error {
+            CliError::Ingest { message, committed } => {
+                assert!(message.contains("line 3"), "{message}");
+                assert_eq!(committed.nodes, 2);
+                assert_eq!(committed.basis, 9);
+            }
+            other => panic!("expected CliError::Ingest, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_all_is_rejected_on_the_remote_adapter() {
+        let error = client()
+            .snapshot_all()
+            .await
+            .expect_err("remote export must be rejected");
+        assert!(
+            matches!(error, CliError::InvalidInput(message) if message.contains("--dir")),
+            "expected an InvalidInput naming --dir"
         );
     }
 }

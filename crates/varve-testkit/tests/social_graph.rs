@@ -1,5 +1,5 @@
 //! Roadmap slice-6 exit-shape artifact (task 11): a real `Db`, driven
-//! through GQL over the deterministic social-graph fixture
+//! through chunked bulk ingestion over the deterministic social-graph fixture
 //! (`varve_testkit::fixture::social_graph`), cross-checked against the
 //! traversal oracle (task 10) for 2-hop friend-of-friend AND `{1,3}` KNOWS
 //! expansion from anchor `_id 0`. Complements `traversal_oracle.rs`'s random
@@ -7,40 +7,64 @@
 //! graph — the same content the perf-smoke bench
 //! (`varve/examples/traversal_bench.rs`) ingests at full 10k/60k scale.
 //!
-//! Fixture size: the brief's runtime guard fires here. The full 10k/60k
-//! fixture (~70k sequential statements through the writer, debug build)
-//! measured well over 5 minutes locally — nowhere near the ~90s budget — so
-//! per the brief this test ships at the REDUCED `social_graph(2_000,
-//! 12_000, 42)` size. The full 10k/60k fixture is exercised at release-build
-//! speed by the bench (`varve/examples/traversal_bench.rs`) instead; see
-//! task-11-report.md for both measured wall times.
+//! This test keeps the full `social_graph(2_000, 12_000, 42)` fixture used by
+//! the suite, but submits nodes and edges in bounded batches. That avoids the
+//! former ~12k sequential GQL edge transactions while exercising the same
+//! writer and preserving the exact graph queried below.
 #![allow(clippy::unwrap_used)]
 
 use std::time::Instant as WallInstant;
 
+use varve::{Doc, EdgePut, NodePut};
 use varve_testkit::fixture::social_graph;
 use varve_testkit::oracle::{column_i64, OracleDir};
 use varve_types::{Iid, Instant, Value};
 
-/// Reduced fixture shape (see the module doc's runtime-guard note): still
-/// dense enough to give the anchor a rich 2-hop/{1,3} neighborhood, small
-/// enough to stay well inside a debug `cargo test` run.
 const PEOPLE: usize = 2_000;
 const FRIENDSHIPS: usize = 12_000;
 const SEED: u64 = 42;
+const NODE_BATCH: usize = 1_000;
+const EDGE_BATCH: usize = 1_000;
 
-/// Roadmap exit shape: 2-hop friend-of-friend and {1,3} over the 10k/60k
-/// fixture, answers cross-checked against the oracle. Ingest via GQL.
+fn person(id: i64) -> NodePut {
+    let mut doc = Doc::new();
+    doc.insert("_id".to_string(), Value::Int(id));
+    doc.insert("name".to_string(), Value::Str(format!("p{id}")));
+    NodePut {
+        labels: vec!["Person".to_string()],
+        doc,
+        valid_from: None,
+        valid_to: None,
+    }
+}
+
+fn knows(src: i64, dst: i64) -> EdgePut {
+    EdgePut {
+        label: "KNOWS".to_string(),
+        src: Value::Int(src),
+        dst: Value::Int(dst),
+        doc: Doc::new(),
+        valid_from: None,
+        valid_to: None,
+    }
+}
+
+/// Roadmap exit shape: 2-hop friend-of-friend and {1,3} over the deterministic
+/// fixture, with both answers cross-checked against the oracle.
 #[tokio::test]
 async fn fixture_two_hop_and_quantified_match_oracle() {
     let started = WallInstant::now();
     let g = social_graph(PEOPLE, FRIENDSHIPS, SEED);
     let db = varve::Db::memory();
-    for stmt in g.node_statements(1000) {
-        db.execute(&stmt).await.unwrap();
+
+    for start in (0..g.people).step_by(NODE_BATCH) {
+        let end = (start + NODE_BATCH).min(g.people);
+        let nodes = (start..end).map(|id| person(id as i64)).collect();
+        db.ingest(nodes, Vec::new()).await.unwrap();
     }
-    for stmt in g.edge_statements() {
-        db.execute(&stmt).await.unwrap();
+    for edges in g.edges.chunks(EDGE_BATCH) {
+        let edges = edges.iter().map(|&(src, dst)| knows(src, dst)).collect();
+        db.ingest(Vec::new(), edges).await.unwrap();
     }
     eprintln!(
         "fixture_two_hop_and_quantified_match_oracle: ingested {} nodes / {} edges in {:.2?}",

@@ -15,4 +15,5 @@
   - [Failover](ops/failover.md)
   - [Metrics & observability](ops/metrics.md)
 - [HTTP API](reference/http-api.md)
+- [Bulk ingest](reference/bulk-ingest.md)
 - [CLI](reference/cli.md)

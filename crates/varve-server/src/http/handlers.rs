@@ -181,7 +181,7 @@ fn accept(v: Option<&str>) -> Result<bool, ServerError> {
         ))
     }
 }
-async fn redirect(c: &HttpContext) -> Response {
+pub(super) async fn redirect(c: &HttpContext) -> Response {
     match c.frontend.db.writer_advertisement().await {
         Ok(Some(a)) if !a.address.is_empty() => error(
             StatusCode::MISDIRECTED_REQUEST,
@@ -197,7 +197,7 @@ async fn redirect(c: &HttpContext) -> Response {
         ),
     }
 }
-fn mapped(e: ServerError) -> Response {
+pub(super) fn mapped(e: ServerError) -> Response {
     // A statement-caused engine error (a type clash, a mixed-type property
     // column, an unknown column, an unsupported feature, ...) references only
     // the caller's own request and carries no server secrets, so echo the real
@@ -283,7 +283,12 @@ fn mapped(e: ServerError) -> Response {
         }
     }
 }
-fn error(status: StatusCode, code: &str, message: &str, writer: Option<String>) -> Response {
+pub(super) fn error(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    writer: Option<String>,
+) -> Response {
     (
         status,
         Json(ErrorResponse {

@@ -20,16 +20,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python3 -m unittest scripts/test_ci.py
+      - run: python3 -m unittest discover -s scripts -p 'test_*.py'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
         with:
           cache-targets: false
+      - run: python3 scripts/test_cache.py guard
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets --profile workspace-test -- -D warnings
+      - run: cargo nextest run --workspace --cargo-profile workspace-test -E 'not (test(=db_traversal_matches_oracle) | test(=traversal_invariant_under_flush))'
+        env:
+          PROPTEST_CASES: "10000"
+      - run: env -u PROPTEST_CASES cargo nextest run --workspace --cargo-profile workspace-test -E 'test(=db_traversal_matches_oracle) | test(=traversal_invariant_under_flush)'
+      - run: cargo test --workspace --doc --profile workspace-test
+        env:
+          PROPTEST_CASES: "10000"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

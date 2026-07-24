@@ -17,6 +17,10 @@ __pycache__/
 /.agents/skills
 /skills-lock.json
 
+# Local planning/design docs (kept on disk, not tracked)
+docs/plans/
+docs/superpowers/
+
 # mdBook build output
 docs/book/book/
 .kata.local.toml

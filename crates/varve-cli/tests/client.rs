@@ -104,6 +104,7 @@ async fn remote_client_executes_query_status_and_admin_ops_over_http() {
             readiness: readiness_channel().0,
         },
         max_body_bytes: 8 * 1024 * 1024,
+        ingest: varve_server::IngestConfig::default(),
     };
     let router = http_router(context);
     let listener = TcpListener::bind("127.0.0.1:0")

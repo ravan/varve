@@ -295,6 +295,8 @@ fn person_put(id: i64) -> NodePut {
     NodePut {
         labels: vec!["Person".to_string()],
         doc,
+        valid_from: None,
+        valid_to: None,
     }
 }
 
@@ -304,6 +306,8 @@ fn knows_put(src: i64, dst: i64) -> EdgePut {
         src: Value::Int(src),
         dst: Value::Int(dst),
         doc: Doc::new(),
+        valid_from: None,
+        valid_to: None,
     }
 }
 

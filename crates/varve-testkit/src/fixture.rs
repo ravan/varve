@@ -89,6 +89,37 @@ impl SocialGraph {
         out
     }
 
+    /// The whole fixture as a bulk-ingest NDJSON stream (BI-5): one
+    /// `{"type":"node",…}` line per Person (`_id` the integer id, `name`
+    /// `p{id}`, label `Person`), then one `{"type":"edge",…}` line per KNOWS
+    /// edge (`src`/`dst` the integer endpoint ids). This loads the identical
+    /// graph as [`SocialGraph::node_statements`] + [`SocialGraph::edge_programs`]
+    /// but through `POST /v1/ingest` in a SINGLE request instead of one GQL
+    /// transaction per statement — the Compose demo's fast-path loader.
+    pub fn ndjson_records(&self) -> String {
+        let mut out = String::new();
+        for id in 0..self.people as i64 {
+            let record = serde_json::json!({
+                "type": "node",
+                "labels": ["Person"],
+                "props": {"_id": id, "name": format!("p{id}")},
+            });
+            out.push_str(&record.to_string());
+            out.push('\n');
+        }
+        for &(src, dst) in &self.edges {
+            let record = serde_json::json!({
+                "type": "edge",
+                "label": "KNOWS",
+                "src": src,
+                "dst": dst,
+            });
+            out.push_str(&record.to_string());
+            out.push('\n');
+        }
+        out
+    }
+
     /// One `MATCH (a:Person {_id: s}), (b:Person {_id: d}) INSERT
     /// (a)-[:KNOWS]->(b)` statement per edge — the v1 mutation surface
     /// (multi-edge INSERT bodies land with slice 7's statement blocks), so
@@ -188,6 +219,26 @@ mod tests {
         assert_eq!(a.node_statements(1000).len(), 10);
         assert_eq!(a.edge_statements().len(), 60_000);
         assert_eq!(a.edge_programs(EDGE_PROGRAM_BATCH).len(), 600);
+    }
+
+    #[test]
+    fn ndjson_records_decode_to_one_node_per_person_and_one_edge_per_friendship() {
+        let graph = social_graph(10, 20, 42);
+        let ndjson = graph.ndjson_records();
+        let ops = varve_server::api::bulk::decode_ndjson_lines(&ndjson)
+            .expect("fixture NDJSON must decode through the ingest path");
+        let nodes = ops
+            .iter()
+            .filter(|op| matches!(op, varve_server::api::bulk::BulkOp::Node(_)))
+            .count();
+        let edges = ops
+            .iter()
+            .filter(|op| matches!(op, varve_server::api::bulk::BulkOp::Edge(_)))
+            .count();
+        assert_eq!(nodes, 10);
+        assert_eq!(edges, graph.edges.len());
+        // Deterministic fixture ⇒ deterministic stream.
+        assert_eq!(ndjson, social_graph(10, 20, 42).ndjson_records());
     }
 
     #[test]

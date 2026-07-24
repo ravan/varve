@@ -67,6 +67,7 @@ async fn spawn_node(db: Db, counters: Arc<RouteCounters>) -> Url {
             readiness: readiness_channel().0,
         },
         max_body_bytes: 8 * 1024 * 1024,
+        ingest: varve_server::IngestConfig::default(),
     };
     let router: Router = http_router(context).layer(middleware::from_fn(move |req, next| {
         let counters = counters.clone();

@@ -1548,6 +1548,22 @@ impl Db {
         nodes: Vec<NodePut>,
         edges: Vec<EdgePut>,
     ) -> Result<TxReceipt, EngineError> {
+        // Embedded/trusted caller: empty user ⇒ no write enforcement, the
+        // pre-security behavior.
+        self.ingest_as("", nodes, edges).await
+    }
+
+    /// Bulk ingest attributed to `user` (BI-4): under `[security] enabled`,
+    /// the submitter's write grants are enforced against every affected
+    /// label/edge-type exactly as a GQL INSERT would be. An empty `user` is
+    /// the trusted embedded caller and bypasses enforcement (see
+    /// [`SecurityEnforcer`]). This is the server's `/v1/ingest` write path.
+    pub async fn ingest_as(
+        &self,
+        user: &str,
+        nodes: Vec<NodePut>,
+        edges: Vec<EdgePut>,
+    ) -> Result<TxReceipt, EngineError> {
         self.require_role(NodeRole::Writer)?;
         if nodes.is_empty() && edges.is_empty() {
             return Err(EngineError::NotAMutation);
@@ -1558,13 +1574,54 @@ impl Db {
                 .submit(Submission {
                     payload: Payload::Ingest { nodes, edges },
                     graph: DEFAULT_GRAPH.to_string(),
-                    user: String::new(),
+                    user: user.to_string(),
                     ack,
                 })
                 .await?;
             rx.await.map_err(|_| EngineError::WriterUnavailable)?
         }
-        .instrument(tracing::info_span!("varve.ingest"))
+        .instrument(tracing::info_span!("varve.ingest", user = %user))
+        .await
+    }
+
+    /// Snapshot EVERY live node in the data graph at the current
+    /// system+valid time, regardless of label — the whole-graph read
+    /// `varve export --format ndjson` (BI-5) turns into bulk NDJSON. Unlike
+    /// the GQL query surface, where an unlabelled `MATCH (n)` binds nothing,
+    /// this uses the label-blind scan filter (`LabelFilter::All(&[])` matches
+    /// every row) so a faithful export sees nodes of any label. Returns
+    /// `None` when no node is live. Reads only `DEFAULT_GRAPH`, never the
+    /// reserved `__security`/`__meta` graphs.
+    pub async fn snapshot_all_nodes(&self) -> Result<Option<RecordBatch>, EngineError> {
+        self.snapshot_all(TableKind::Nodes).await
+    }
+
+    /// Snapshot every live edge in the data graph at the current
+    /// system+valid time (see [`Self::snapshot_all_nodes`]). The batch
+    /// carries `_src_iid`/`_dst_iid`; the exporter maps those back to the
+    /// endpoints' `_id`s via the node snapshot.
+    pub async fn snapshot_all_edges(&self) -> Result<Option<RecordBatch>, EngineError> {
+        self.snapshot_all(TableKind::Edges).await
+    }
+
+    async fn snapshot_all(&self, kind: TableKind) -> Result<Option<RecordBatch>, EngineError> {
+        let now = self.inner.clock.watermark();
+        let bounds = TemporalBounds {
+            valid: varve_types::TemporalDimension::at(now),
+            system: varve_types::TemporalDimension::at(now),
+        };
+        merged_snapshot(
+            &self.inner.state,
+            &self.inner.store,
+            DEFAULT_GRAPH,
+            kind,
+            // Empty conjunction ⇒ matches every row (label-blind whole-graph
+            // scan), so nodes/edges of any label are exported.
+            LabelFilter::All(&[]),
+            &bounds,
+            &crate::scan::IidSel::All,
+            None,
+        )
         .await
     }
 
@@ -2267,6 +2324,20 @@ impl Db {
     /// string `status().follower_error` would carry.
     pub fn follower_error(&self) -> Option<String> {
         self.inner.progress.borrow().follower_error.clone()
+    }
+
+    /// May `user` pass an admin-only surface (security DDL, `SHOW`, and the
+    /// bulk `/v1/ingest` route)? `true` when `[security]` is disabled, when
+    /// `user` is empty (the embedded process owner, who is never enforced
+    /// against), when `user` is a configured bootstrap admin, or when the
+    /// resolved principal holds `ADMIN`. Resolution is at the clock
+    /// watermark, matching read enforcement and `security_show_stream`.
+    pub async fn is_admin(&self, user: &str) -> Result<bool, EngineError> {
+        let now = self.inner.clock.watermark();
+        self.inner
+            .security
+            .is_admin(&self.inner.state, &self.inner.store, user, now)
+            .await
     }
 
     pub async fn status(&self) -> Result<NodeStatus, EngineError> {

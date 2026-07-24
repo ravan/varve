@@ -35,6 +35,7 @@ async fn arrow_response_is_a_valid_chunked_ipc_stream() {
             readiness,
         },
         max_body_bytes: 1024 * 1024,
+        ingest: varve_server::IngestConfig::default(),
     });
     let response = app
         .oneshot(

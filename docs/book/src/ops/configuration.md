@@ -146,6 +146,15 @@ Tuning for `[server] backend = "http"`.
 | `tls_cert` | path | (none) | PEM certificate path; must be set together with `tls_key`. |
 | `tls_key` | path | (none) | PEM private-key path; must be set together with `tls_cert`. |
 
+## `[ingest]`
+
+Tuning for the bulk `POST /v1/ingest` route (NDJSON / streaming). A top-level section read by `varved`; absent means all defaults.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `chunk_ops` | integer | `10000` | Decoded node/edge ops committed per atomic `Db::ingest` transaction; must be > 0. |
+| `max_line_bytes` | byte size | `"1MiB"` | Largest a single NDJSON line may grow before the stream is rejected, bounding per-line buffering when a newline is missing. |
+
 ## `[auth]`
 
 Authentication backend selection.

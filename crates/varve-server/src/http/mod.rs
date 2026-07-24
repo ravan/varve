@@ -1,5 +1,6 @@
 mod encoding;
 mod handlers;
+mod ingest;
 
 use crate::{FrontendContext, Principal, ProtocolFrontend, ServerError, Shutdown};
 use async_trait::async_trait;
@@ -47,6 +48,40 @@ fn default_max_body_bytes() -> ByteSize {
     DEFAULT_MAX_BODY_BYTES
 }
 
+// `DEFAULT_CHUNK_OPS` / `DEFAULT_MAX_LINE_BYTES` are the bulk-ingest contract
+// defaults; they live (ungated) in `crate::api::bulk` so the CLI's embedded
+// bulk import can share them without the `http` feature. Re-exported at the
+// crate root (see `lib.rs`).
+use crate::api::bulk::{DEFAULT_CHUNK_OPS, DEFAULT_MAX_LINE_BYTES};
+
+fn default_chunk_ops() -> usize {
+    DEFAULT_CHUNK_OPS
+}
+
+fn default_max_line_bytes() -> ByteSize {
+    DEFAULT_MAX_LINE_BYTES
+}
+
+/// `[ingest]` config for the bulk `POST /v1/ingest` route (BI-2). A top-level
+/// section (read by `varved` and threaded into [`HttpContext`]); absent means
+/// all defaults.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct IngestConfig {
+    #[serde(default = "default_chunk_ops")]
+    pub chunk_ops: usize,
+    #[serde(default = "default_max_line_bytes")]
+    pub max_line_bytes: ByteSize,
+}
+
+impl Default for IngestConfig {
+    fn default() -> Self {
+        Self {
+            chunk_ops: DEFAULT_CHUNK_OPS,
+            max_line_bytes: DEFAULT_MAX_LINE_BYTES,
+        }
+    }
+}
+
 pub(crate) struct HttpFrontendFactory;
 
 impl ComponentFactory<dyn ProtocolFrontend> for HttpFrontendFactory {
@@ -89,12 +124,20 @@ impl ComponentFactory<dyn ProtocolFrontend> for HttpFrontendFactory {
             } else {
                 None
             };
+            // `[ingest]` is a top-level section, so `varved` reads it and
+            // inserts an `IngestConfig` into the BuildContext; absent means
+            // defaults (embedded/test callers that never populate it).
+            let ingest = ctx.get::<IngestConfig>().unwrap_or_default();
+            if ingest.chunk_ops == 0 {
+                return Err(std::io::Error::other("[ingest] chunk_ops must be > 0").into());
+            }
             Ok(HttpFrontend {
                 listen,
                 advertised_address,
                 max_body_bytes: config.max_body_bytes.as_usize(),
                 tls_cert: config.tls_cert,
                 tls_key: config.tls_key,
+                ingest,
             })
         })();
         result
@@ -112,7 +155,12 @@ pub struct HttpFrontend {
     advertised_address: Option<String>,
     max_body_bytes: usize,
     tls_cert: Option<PathBuf>,
+    // Only consumed on the TLS serve path; without the `tls` feature the
+    // paired `tls_cert` still gates the "TLS not compiled in" error, but the
+    // key itself is never read.
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
     tls_key: Option<PathBuf>,
+    ingest: IngestConfig,
 }
 
 #[async_trait]
@@ -128,6 +176,7 @@ impl ProtocolFrontend for HttpFrontend {
         let router = http_router(HttpContext {
             frontend: context.clone(),
             max_body_bytes: self.max_body_bytes,
+            ingest: self.ingest,
         });
         let handle = axum_server::Handle::<SocketAddr>::new();
         let listening = handle.clone();
@@ -186,6 +235,7 @@ impl ProtocolFrontend for HttpFrontend {
 pub struct HttpContext {
     pub frontend: FrontendContext,
     pub max_body_bytes: usize,
+    pub ingest: IngestConfig,
 }
 
 pub fn http_router(context: HttpContext) -> Router {
@@ -195,7 +245,8 @@ pub fn http_router(context: HttpContext) -> Router {
             context.clone(),
             observe_health,
         ));
-    let protected = Router::new()
+    // Standard routes share the configured request body cap.
+    let capped = Router::new()
         .route("/v1/query", post(handlers::query))
         .route("/v1/tx", post(handlers::tx))
         .route("/v1/status", get(handlers::status))
@@ -203,7 +254,17 @@ pub fn http_router(context: HttpContext) -> Router {
         .route("/v1/admin/compact", post(handlers::compact))
         .route("/v1/admin/gc", post(handlers::gc))
         .route("/v1/admin/verify", post(handlers::verify))
-        .layer(DefaultBodyLimit::max(context.max_body_bytes))
+        .layer(DefaultBodyLimit::max(context.max_body_bytes));
+    // `/v1/ingest` streams its body (BI-2): a dedicated sub-router with the
+    // body cap disabled (`max_line_bytes`/`chunk_ops` bound memory instead)
+    // and gzip request decompression, so a `Content-Encoding: gzip` body is
+    // transparently inflated before the handler reads it.
+    let ingest = Router::new()
+        .route("/v1/ingest", post(ingest::ingest))
+        .layer(DefaultBodyLimit::disable())
+        .layer(tower_http::decompression::RequestDecompressionLayer::new());
+    let protected = capped
+        .merge(ingest)
         .route_layer(middleware::from_fn_with_state(
             context.clone(),
             authenticate,
@@ -286,6 +347,7 @@ fn static_route(path: &str) -> &'static str {
     match path {
         "/v1/query" => "/v1/query",
         "/v1/tx" => "/v1/tx",
+        "/v1/ingest" => "/v1/ingest",
         "/v1/status" => "/v1/status",
         "/metrics" => "/metrics",
         "/v1/admin/compact" => "/v1/admin/compact",

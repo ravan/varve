@@ -47,10 +47,17 @@ use varve_types::{Doc, Iid, Instant, LogPosition, TemporalBounds, TemporalDimens
 /// upsert keyed by the doc's `_id` (auto-generated when absent, same scheme
 /// as GQL INSERT). The iid derivation is identical to GQL INSERT's, so
 /// bulk-ingested and GQL-ingested data interoperate.
+///
+/// `valid_from`/`valid_to` set the bitemporal valid interval, matching GQL
+/// `INSERT … VALID FROM … TO …` (BI-4): `None` means "valid from now"
+/// (`valid_from = system`, `valid_to = END_OF_TIME`), byte-identical to the
+/// pre-BI-4 behavior.
 #[derive(Clone, Debug)]
 pub struct NodePut {
     pub labels: Vec<String>,
     pub doc: Doc,
+    pub valid_from: Option<Instant>,
+    pub valid_to: Option<Instant>,
 }
 
 /// One edge in a bulk-ingest batch: endpoints are referenced by their node
@@ -58,12 +65,16 @@ pub struct NodePut {
 /// semantics — the whole point of the bulk path is skipping the per-edge
 /// endpoint MATCH). A dangling edge is durable but never matches a
 /// traversal, exactly like an edge whose endpoints were later deleted.
+///
+/// `valid_from`/`valid_to`: same valid-interval semantics as [`NodePut`].
 #[derive(Clone, Debug)]
 pub struct EdgePut {
     pub label: String,
     pub src: Value,
     pub dst: Value,
     pub doc: Doc,
+    pub valid_from: Option<Instant>,
+    pub valid_to: Option<Instant>,
 }
 
 /// What a submission asks the writer to resolve: a parsed GQL program, or a
@@ -684,7 +695,7 @@ async fn resolve_submission(
         Payload::Program { statements, params } => {
             resolve_program(state, statements, &params, graph, user).await
         }
-        Payload::Ingest { nodes, edges } => resolve_ingest(state, nodes, edges, graph, user),
+        Payload::Ingest { nodes, edges } => resolve_ingest(state, nodes, edges, graph, user).await,
     }
 }
 
@@ -706,7 +717,13 @@ async fn resolve_program(
 /// Iids derive from `_id` exactly as GQL INSERT derives them
 /// ([`resolve_insert_node`]); edge endpoints are referenced by node `_id`
 /// and NOT verified to exist (a dangling edge never matches a traversal).
-fn resolve_ingest(
+///
+/// Per-record `valid_from`/`valid_to` set the bitemporal valid interval
+/// exactly as GQL `INSERT … VALID` does (BI-4); `None` defaults to
+/// `(system, END_OF_TIME)`. Under `[security] enabled` with a non-empty
+/// `user`, the submitter's write grants are enforced against every affected
+/// label/type, identical to a GQL INSERT.
+async fn resolve_ingest(
     state: &mut WriterState,
     nodes: Vec<NodePut>,
     edges: Vec<EdgePut>,
@@ -726,17 +743,43 @@ fn resolve_ingest(
         return Err(EngineError::UnknownGraph(graph.to_string()));
     }
 
+    // Resolve the submitter's write grants BEFORE burning a tx id (a denied
+    // batch burns nothing), same as the GQL data path.
+    let gate_now = state.clock.watermark();
+    let enforcement: Option<GraphGrants> = state
+        .security
+        .enforcement_for(&state.state, &state.store, user, graph, gate_now)
+        .await?;
+
     state.next_tx_id += 1;
     let tx_id = state.next_tx_id;
     let system = state.clock.next();
     let span = tracing::info_span!("varve.resolve", tx_id);
     let _entered = span.enter();
-    let valid_from = system;
-    let valid_to = Instant::END_OF_TIME;
+
+    let interval =
+        |from: Option<Instant>, to: Option<Instant>| -> Result<(Instant, Instant), EngineError> {
+            let valid_from = from.unwrap_or(system);
+            let valid_to = to.unwrap_or(Instant::END_OF_TIME);
+            if valid_from >= valid_to {
+                return Err(EngineError::InvalidValidRange {
+                    from: valid_from,
+                    to: valid_to,
+                });
+            }
+            Ok((valid_from, valid_to))
+        };
 
     let mut effects = Effects::default();
     let mut generated_ordinal: usize = 0;
-    for NodePut { labels, mut doc } in nodes {
+    for NodePut {
+        labels,
+        mut doc,
+        valid_from,
+        valid_to,
+    } in nodes
+    {
+        let (valid_from, valid_to) = interval(valid_from, valid_to)?;
         let id = put_id(&mut doc, tx_id, &mut generated_ordinal);
         let iid = Iid::derive(graph, NODES_TABLE, &id.id_bytes()?);
         effects.record_node_create(&labels, &doc);
@@ -755,8 +798,11 @@ fn resolve_ingest(
         src,
         dst,
         mut doc,
+        valid_from,
+        valid_to,
     } in edges
     {
+        let (valid_from, valid_to) = interval(valid_from, valid_to)?;
         let id = put_id(&mut doc, tx_id, &mut generated_ordinal);
         let iid = Iid::derive(graph, EDGES_TABLE, &id.id_bytes()?);
         let src = Iid::derive(graph, NODES_TABLE, &src.id_bytes()?);
@@ -775,6 +821,13 @@ fn resolve_ingest(
             },
         });
     }
+
+    // Write-privilege enforcement (BI-4): every affected label/type must be
+    // write-granted; a denied effect rejects the whole batch before it stages.
+    if let Some(sec) = enforcement.as_ref() {
+        enforce_write_effects(state, graph, &effects, sec, None, system, user).await?;
+    }
+
     seal_effects(tx_id, system, user, graph, effects)
 }
 

@@ -223,6 +223,11 @@ impl MetricsSink for OtlpMetrics {
         self.inner.set_engine(snapshot);
     }
 
+    fn observe_ingest(&self, records: u64, bytes: u64, transactions: u64, elapsed: Duration) {
+        self.inner
+            .observe_ingest(records, bytes, transactions, elapsed);
+    }
+
     fn encode(&self) -> Result<String, ServerError> {
         self.inner.encode()
     }

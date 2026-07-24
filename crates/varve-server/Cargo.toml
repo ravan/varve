@@ -8,7 +8,10 @@ description = "HTTP server (the varved binary) for Varve, the bitemporal graph d
 
 [features]
 default = ["http", "tls", "otel"]
-http = ["dep:axum-server", "dep:url"]
+http = ["dep:axum-server", "dep:url", "dep:tower-http", "bulk"]
+# The Neo4j-dialect CSV decoder (only csv-core). Split out from `http` so the
+# CLI can decode CSV for embedded bulk import without pulling axum/tower.
+bulk = ["dep:csv-core"]
 tls = ["http", "dep:rustls", "axum-server/tls-rustls-no-provider"]
 otel = ["dep:reqwest"]
 
@@ -34,6 +37,8 @@ prometheus = { workspace = true }
 subtle = { workspace = true }
 axum = { workspace = true }
 axum-server = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
+csv-core = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
@@ -48,6 +53,8 @@ datafusion = { workspace = true }
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
 http-body-util = { workspace = true }
+futures = { workspace = true }
+flate2 = "1"
 tempfile = { workspace = true }
 varve-log = { path = "../varve-log" }
 # `varve-testkit` transitively enables the `fault-injection` feature of

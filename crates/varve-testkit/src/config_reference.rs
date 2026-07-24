@@ -431,6 +431,27 @@ fn sections() -> Vec<Section> {
             ],
         },
         Section {
+            name: "ingest",
+            intro: "Tuning for the bulk `POST /v1/ingest` route (NDJSON / streaming). A \
+                    top-level section read by `varved`; absent means all defaults.",
+            entries: vec![
+                Entry {
+                    key: "chunk_ops",
+                    r#type: "integer",
+                    default: code(varve_server::DEFAULT_CHUNK_OPS),
+                    description: "Decoded node/edge ops committed per atomic `Db::ingest` \
+                                  transaction; must be > 0.",
+                },
+                Entry {
+                    key: "max_line_bytes",
+                    r#type: "byte size",
+                    default: iec(varve_server::DEFAULT_MAX_LINE_BYTES.as_usize()),
+                    description: "Largest a single NDJSON line may grow before the stream is \
+                                  rejected, bounding per-line buffering when a newline is missing.",
+                },
+            ],
+        },
+        Section {
             name: "auth",
             intro: "Authentication backend selection.",
             entries: vec![Entry {
@@ -581,6 +602,7 @@ mod tests {
             "[coordinator]",
             "[server]",
             "[server.http]",
+            "[ingest]",
             "[auth]",
             "[auth.static]",
             "[security]",

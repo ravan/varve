@@ -95,6 +95,18 @@ impl CommandClient for FakeClient {
     async fn verify(&self) -> Result<VerifyResponse, CliError> {
         unreachable!("not exercised by transfer tests")
     }
+
+    async fn ingest(
+        &self,
+        _format: varve_cli::BulkFormat,
+        _body: varve_cli::BulkBody,
+    ) -> Result<varve_server::api::bulk::IngestResponse, CliError> {
+        unreachable!("not exercised by transfer tests")
+    }
+
+    async fn snapshot_all(&self) -> Result<(Option<RecordBatch>, Option<RecordBatch>), CliError> {
+        unreachable!("not exercised by transfer tests")
+    }
 }
 
 fn expect_err<T: std::fmt::Debug>(result: Result<T, CliError>) -> CliError {

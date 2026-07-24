@@ -1,0 +1,14 @@
+[profile.default]
+fail-fast = false
+
+[test-groups]
+process-tests = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = """
+binary(process_consistency)
+| binary(process_scale_out)
+| binary(crash_recovery)
+| binary(chaos)
+"""
+test-group = "process-tests"

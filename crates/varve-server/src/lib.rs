@@ -12,8 +12,12 @@ pub use frontend::{
     readiness_channel, FrontendContext, ProtocolFrontend, Readiness, ReadinessReporter, Shutdown,
     ShutdownTrigger,
 };
+// The bulk-ingest defaults live in `api::bulk` (ungated) so the CLI's embedded
+// import can read them without `http`; re-exported here for existing callers
+// (e.g. the generated config reference's `varve_server::DEFAULT_CHUNK_OPS`).
+pub use api::bulk::{DEFAULT_CHUNK_OPS, DEFAULT_MAX_LINE_BYTES};
 #[cfg(feature = "http")]
-pub use http::{http_router, HttpContext, HttpFrontend, DEFAULT_MAX_BODY_BYTES};
+pub use http::{http_router, HttpContext, HttpFrontend, IngestConfig, DEFAULT_MAX_BODY_BYTES};
 #[cfg(feature = "otel")]
 pub use metrics::OtlpMetrics;
 pub use metrics::{MetricsSink, PrometheusMetrics};

@@ -21,6 +21,8 @@ fn person(id: i64) -> NodePut {
     NodePut {
         labels: vec!["Person".to_string()],
         doc,
+        valid_from: None,
+        valid_to: None,
     }
 }
 
@@ -30,6 +32,8 @@ fn knows(src: i64, dst: i64) -> EdgePut {
         src: Value::Int(src),
         dst: Value::Int(dst),
         doc: Doc::new(),
+        valid_from: None,
+        valid_to: None,
     }
 }
 
@@ -164,6 +168,73 @@ async fn empty_bulk_ingest_is_rejected() {
     );
 }
 
+/// BI-4: a bulk put with an explicit valid interval produces exactly the same
+/// bitemporal versions as `INSERT … VALID FROM … TO …` — proven by AS-OF
+/// queries at points inside and outside the interval.
+#[tokio::test]
+async fn bulk_valid_time_matches_gql_insert_valid() {
+    let vf = Instant::parse_rfc3339("2020-01-01T00:00:00Z").unwrap();
+    let vt = Instant::parse_rfc3339("2021-01-01T00:00:00Z").unwrap();
+
+    // Bulk path: node with an explicit valid interval.
+    let bulk = Db::memory();
+    let mut doc = Doc::new();
+    doc.insert("_id".to_string(), Value::Int(1));
+    doc.insert("name".to_string(), Value::Str("Historic".to_string()));
+    bulk.ingest(
+        vec![NodePut {
+            labels: vec!["Person".to_string()],
+            doc,
+            valid_from: Some(vf),
+            valid_to: Some(vt),
+        }],
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+
+    // GQL oracle: the same interval via INSERT … VALID.
+    let gql = Db::memory();
+    gql.execute(
+        "INSERT (:Person {_id: 1, name: 'Historic'}) \
+         VALID FROM TIMESTAMP '2020-01-01T00:00:00Z' TO TIMESTAMP '2021-01-01T00:00:00Z'",
+    )
+    .await
+    .unwrap();
+
+    // Inside the interval: visible on both. Outside: invisible on both.
+    for (as_of, expected) in [("2020-06-01T00:00:00Z", 1), ("2022-06-01T00:00:00Z", 0)] {
+        let q = format!("MATCH (p:Person) FOR VALID_TIME AS OF TIMESTAMP '{as_of}' RETURN p._id");
+        assert_eq!(
+            rows(&bulk.query(&q).await.unwrap()),
+            expected,
+            "bulk AS OF {as_of}"
+        );
+        assert_eq!(
+            rows(&gql.query(&q).await.unwrap()),
+            expected,
+            "gql AS OF {as_of}"
+        );
+    }
+}
+
+/// BI-4: an inverted valid interval (`from >= to`) is rejected, exactly as
+/// `INSERT … VALID` rejects it.
+#[tokio::test]
+async fn bulk_inverted_valid_range_is_rejected() {
+    let vf = Instant::parse_rfc3339("2021-01-01T00:00:00Z").unwrap();
+    let vt = Instant::parse_rfc3339("2020-01-01T00:00:00Z").unwrap();
+    let db = Db::memory();
+    let mut node = person(1);
+    node.valid_from = Some(vf);
+    node.valid_to = Some(vt);
+    let result = db.ingest(vec![node], Vec::new()).await;
+    assert!(
+        matches!(result, Err(EngineError::InvalidValidRange { .. })),
+        "inverted valid range must be rejected, got {result:?}"
+    );
+}
+
 /// Puts without `_id` get distinct generated ids (same scheme as GQL INSERT).
 #[tokio::test]
 async fn bulk_nodes_without_ids_get_distinct_generated_ids() {
@@ -174,6 +245,8 @@ async fn bulk_nodes_without_ids_get_distinct_generated_ids() {
         NodePut {
             labels: vec!["Person".to_string()],
             doc,
+            valid_from: None,
+            valid_to: None,
         }
     };
     db.ingest(vec![anonymous("a"), anonymous("b")], Vec::new())
@@ -202,6 +275,8 @@ async fn bulk_put_of_existing_id_supersedes() {
         vec![NodePut {
             labels: vec!["Person".to_string()],
             doc,
+            valid_from: None,
+            valid_to: None,
         }],
         Vec::new(),
     )

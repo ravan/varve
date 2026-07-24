@@ -4,12 +4,33 @@ fmt:
     cargo fmt --all
 
 check:
+    python3 scripts/test_cache.py guard
     cargo fmt --all --check
-    cargo clippy --workspace --all-targets -- -D warnings
-    cargo test --workspace
+    cargo clippy --workspace --all-targets --profile workspace-test -- -D warnings
+    PROPTEST_CASES=256 cargo nextest run --workspace --cargo-profile workspace-test -E 'not (test(=db_traversal_matches_oracle) | test(=traversal_invariant_under_flush))'
+    env -u PROPTEST_CASES cargo nextest run --workspace --cargo-profile workspace-test -E 'test(=db_traversal_matches_oracle) | test(=traversal_invariant_under_flush)'
+    PROPTEST_CASES=256 cargo test --workspace --doc --profile workspace-test
 
 test:
-    cargo test --workspace
+    python3 scripts/test_cache.py guard
+    PROPTEST_CASES=256 cargo nextest run --workspace --cargo-profile workspace-test -E 'not (test(=db_traversal_matches_oracle) | test(=traversal_invariant_under_flush))'
+    env -u PROPTEST_CASES cargo nextest run --workspace --cargo-profile workspace-test -E 'test(=db_traversal_matches_oracle) | test(=traversal_invariant_under_flush)'
+    PROPTEST_CASES=256 cargo test --workspace --doc --profile workspace-test
+
+test-full:
+    python3 scripts/test_cache.py guard
+    PROPTEST_CASES=10000 cargo nextest run --workspace --cargo-profile workspace-test -E 'not (test(=db_traversal_matches_oracle) | test(=traversal_invariant_under_flush))'
+    env -u PROPTEST_CASES cargo nextest run --workspace --cargo-profile workspace-test -E 'test(=db_traversal_matches_oracle) | test(=traversal_invariant_under_flush)'
+    PROPTEST_CASES=10000 cargo test --workspace --doc --profile workspace-test
+
+cache-status:
+    python3 scripts/test_cache.py status
+
+clean-test-cache:
+    cargo clean --profile workspace-test
+
+clean-debug-cache:
+    cargo clean --profile dev
 
 crash:
     VARVE_CRASH_ITERS=10 cargo test -p varve-testkit --release --test crash_recovery
@@ -18,7 +39,7 @@ chaos secs="60":
     VARVE_CHAOS_SECS={{secs}} cargo test -p varve-testkit --release --test chaos -- --nocapture
 
 s3-matrix backends="garage,seaweedfs,minio":
-    VARVE_S3_BACKENDS={{backends}} cargo test -p varve-testkit --test backend_matrix -- --nocapture
+    VARVE_S3_BACKENDS={{backends}} cargo test -p varve-testkit --profile workspace-test --test backend_matrix -- --nocapture
 
 # Spec §13.7 criterion micro-benches: resolve, trie ops, parse.
 # Per-crate targets required: cargo bench -- --quick without --bench <name> conflicts with libtest unit-test runner.

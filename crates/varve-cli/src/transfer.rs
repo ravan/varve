@@ -18,6 +18,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde_json::Value as JsonValue;
 use varve::BasisToken;
+use varve_server::api::bulk::{write_ndjson, ExportSummary};
 use varve_server::api::{params_from_json, BasisRequest, QueryRequest, TxRequest};
 
 use crate::client::{CliError, CommandClient};
@@ -206,6 +207,23 @@ pub async fn export_jsonl<W: Write>(
     writer.finish()?;
 
     Ok(row_count)
+}
+
+/// Exports the WHOLE data graph as bulk NDJSON (nodes then edges) — the
+/// inverse of [`crate::CommandClient::ingest`] with `BulkFormat::Ndjson`, so
+/// `varve export --format ndjson | varve import` copies a graph Varve→Varve.
+/// Embedded only: [`CommandClient::snapshot_all`] rejects the remote adapter
+/// (there is no HTTP export endpoint). Returns the counts written (and how
+/// many edges were skipped as un-round-trippable).
+pub async fn export_ndjson<W: Write>(
+    client: Arc<dyn CommandClient>,
+    output: W,
+) -> Result<ExportSummary, CliError> {
+    let (nodes, edges) = client.snapshot_all().await?;
+    let mut writer = BufWriter::new(output);
+    let summary = write_ndjson(nodes.as_ref(), edges.as_ref(), &mut writer)?;
+    writer.flush()?;
+    Ok(summary)
 }
 
 /// Encodes a `Binary` array's values as `{"$bytes": "<base64-standard>"}`

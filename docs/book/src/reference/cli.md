@@ -14,8 +14,8 @@ Usage: varve [OPTIONS] <COMMAND>
 
 Commands:
   shell   Start an interactive REPL against the selected connection
-  import  Import newline-delimited JSON objects as one parameterized `INSERT` transaction per line
-  export  Run a GQL query and write results as line-delimited JSON
+  import  Bulk-load a file or stdin through the engine's fast path (`/v1/ingest` / `Db::ingest`); `--format jsonl-legacy` keeps the old one-`INSERT`-per-line mode
+  export  Write the whole graph as bulk NDJSON, or a GQL query's rows as line-delimited JSON (`--format`)
   admin   Node administration: status, compaction, garbage collection, and integrity verification
   help    Print this message or the help of the given subcommand(s)
 
@@ -65,50 +65,64 @@ every returned batch is empty.
 
 ```
 $ varve import --help
-Import newline-delimited JSON objects as one parameterized `INSERT` transaction per line
+Bulk-load a file or stdin through the engine's fast path (`/v1/ingest` / `Db::ingest`); `--format jsonl-legacy` keeps the old one-`INSERT`-per-line mode
 
-Usage: varve import [OPTIONS] --label <LABEL> <FILE>
+Usage: varve import [OPTIONS] <FILE>
 
 Arguments:
-  <FILE>  Path to a JSONL file, or `-` to read from stdin
+  <FILE>  Path to the input file, or `-` to read from stdin
 
 Options:
-      --label <LABEL>  Label applied to every inserted node
-      --graph <GRAPH>  Graph to `USE` before each insert. Omitted entirely (no `USE` clause) when not given
-  -h, --help           Print help
+      --format <FORMAT>  Wire format of the input [default: ndjson] [possible values: ndjson, csv, jsonl-legacy]
+      --label <LABEL>    Label applied to every inserted node. Only valid with `--format jsonl-legacy` (bulk formats carry labels per record)
+      --graph <GRAPH>    Graph to `USE` before each insert. Only valid with `--format jsonl-legacy` (bulk formats load the default graph)
+  -h, --help             Print help
 ```
 
-Each line of the JSONL file becomes one parameterized `INSERT (:<LABEL> {...})` transaction.
-Object keys become `$pN`-style bound parameters (sorted, deterministic), never
-string-interpolated into the GQL, and the resulting statement is validated with
-`varve_gql::parse_program` before any request is sent. Import stops at the first failing line,
-reporting its 1-based line number and how many lines were already committed. JSON object keys
-and the `--label`/`--graph` values are all validated as GQL identifiers (ASCII shape only: first
-byte a letter or `_`, the rest alphanumeric or `_`); the parser is still the sole authority on
-whether the resulting GQL is actually valid (e.g. reserved-word collisions), not this shape
-check.
+`--format` selects the wire format (defaults to `ndjson`):
+
+- **`ndjson` / `csv`** take the engine bulk fast path documented in
+  [Bulk ingest](bulk-ingest.md): with `--url`, the file (or stdin) is **streamed** to
+  `POST /v1/ingest` in one request; with `--dir`, it is decoded and committed in
+  `[ingest] chunk_ops`-sized `Db::ingest` chunks. Neither buffers the whole input. On completion
+  a progress line reports records and records/s; a mid-stream failure reports the committed
+  counts (earlier chunks stay committed — idempotent replay from the start is the retry story).
+  `--label`/`--graph` are **not** used here (records carry their own labels and load the default
+  graph); passing them is a usage error.
+- **`jsonl-legacy`** is the original mode: each line becomes one parameterized
+  `INSERT (:<LABEL> {...})` transaction, validated with `varve_gql::parse_program` before any
+  request is sent (it is the only mode with per-line GQL validation). It requires `--label`;
+  `--graph` prefixes a `USE`. Object keys and the `--label`/`--graph` values are validated as GQL
+  identifiers (ASCII shape; the parser remains the authority on reserved words). Import stops at
+  the first failing line, reporting its 1-based line number and how many lines committed.
 
 ## `export`
 
 ```
 $ varve export --help
-Run a GQL query and write results as line-delimited JSON
+Write the whole graph as bulk NDJSON, or a GQL query's rows as line-delimited JSON (`--format`)
 
-Usage: varve export [OPTIONS] --query <QUERY> <FILE>
+Usage: varve export [OPTIONS] <FILE>
 
 Arguments:
-  <FILE>  Path to write line-delimited JSON to, or `-` to write to stdout
+  <FILE>  Path to write to, or `-` to write to stdout
 
 Options:
-      --query <QUERY>  The GQL query to run
-      --basis <BASIS>  Read basis: a bare transaction id, or `at:<packed-u64>`
-  -h, --help           Print help
+      --format <FORMAT>  Output format [default: jsonl] [possible values: jsonl, ndjson]
+      --query <QUERY>    The GQL query to run. Required for `--format jsonl`; rejected for `--format ndjson` (which exports the whole graph)
+      --basis <BASIS>    Read basis: a bare transaction id, or `at:<packed-u64>`. `--format jsonl` only
+  -h, --help             Print help
 ```
 
-Streams the query's Arrow result to one JSON object per line. Binary column values are encoded
-using the same tagged-bytes convention as the HTTP API: `{"$bytes": "<base64>"}`
-(`TaggedBytesEncoder`), and nulls are written explicitly rather than omitted
-(`with_explicit_nulls(true)`).
+- **`jsonl`** (default) streams a GQL query's Arrow result to one JSON object per line. Binary
+  column values use the tagged-bytes convention `{"$bytes": "<base64>"}` (`TaggedBytesEncoder`)
+  and nulls are written explicitly (`with_explicit_nulls(true)`). `--query` is required; `--basis`
+  selects the read basis.
+- **`ndjson`** writes the **whole data graph** as bulk NDJSON (nodes then edges) at the current
+  system+valid time, so `varve export --format ndjson | varve import` copies a graph
+  Varve→Varve. It is **embedded-only** (`--dir`) — there is no HTTP export endpoint — and
+  `--query`/`--basis` are rejected. See [Bulk ingest](bulk-ingest.md) for the format and the
+  edge-skipping caveat.
 
 ## `admin`
 
@@ -139,9 +153,13 @@ text `none`, never a blank or `null`.
 
 ## JSONL format notes
 
-Every JSONL line (both `import` input and `export` output) is a flat JSON object. Scalar values
-map directly (`null`, `true`/`false`, numbers, and strings; integers must fit `i64`/`u64` and
-floats must be finite, i.e. no `NaN`/`Infinity`); binary values are the single-key `{"$bytes":
-"<base64>"}` form described above; arrays and any other nested-object shape are rejected as
-invalid parameters (the same validation the HTTP API's `params_from_json` enforces, since the
-CLI reuses it directly).
+For `--format jsonl-legacy` import input and `--format jsonl` export output, every line is a
+flat JSON object. Scalar values map directly (`null`, `true`/`false`, numbers, and strings;
+integers must fit `i64`/`u64` and floats must be finite, i.e. no `NaN`/`Infinity`); binary values
+are the single-key `{"$bytes": "<base64>"}` form described above; arrays and any other
+nested-object shape are rejected as invalid parameters (the same validation the HTTP API's
+`params_from_json` enforces, since the CLI reuses it directly).
+
+The bulk `ndjson`/`csv` formats (`type`-tagged node/edge records, valid-time fields, the CSV
+header dialect) are specified on the [Bulk ingest](bulk-ingest.md) page — that is the normative
+contract for both `varve import`/`export` and `POST /v1/ingest`.

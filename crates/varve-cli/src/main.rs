@@ -3,13 +3,11 @@
 //! All grammar, client-selection, and shell logic lives in the library
 //! crate (see `lib.rs`) so integration tests can exercise it directly.
 
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self};
 use std::process::ExitCode;
 
 use clap::Parser;
 use varve_cli::{AdminCommand, Cli, CliError, Command, RustylineInput};
-use varve_server::api::QueryRequest;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -36,28 +34,12 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             varve_cli::run_shell(client, &mut input, &mut lock).await
         }
         Command::Import(args) => {
-            let input = open_input(&args.file)?;
-            let report =
-                varve_cli::import_jsonl(client, input, &args.label, args.graph.as_deref()).await?;
-            eprintln!("committed {} row(s)", report.committed);
-            Ok(())
+            let mut stderr = io::stderr();
+            varve_cli::run_import(client, args, &mut stderr).await
         }
         Command::Export(args) => {
-            let basis = args
-                .basis
-                .as_deref()
-                .map(varve_cli::parse_basis)
-                .transpose()?;
-            let request = QueryRequest {
-                gql: args.query,
-                params: std::collections::BTreeMap::new(),
-                basis,
-                basis_timeout_ms: None,
-            };
-            let output = open_output(&args.file)?;
-            let rows = varve_cli::export_jsonl(client, request, output).await?;
-            eprintln!("exported {rows} row(s)");
-            Ok(())
+            let mut stderr = io::stderr();
+            varve_cli::run_export(client, args, &mut stderr).await
         }
         Command::Admin(args) => {
             let stdout = io::stdout();
@@ -77,23 +59,5 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 }
             }
         }
-    }
-}
-
-/// Opens `path` for buffered reading, or stdin when `path` is `-`.
-fn open_input(path: &str) -> Result<Box<dyn BufRead>, CliError> {
-    if path == "-" {
-        Ok(Box::new(BufReader::new(io::stdin())))
-    } else {
-        Ok(Box::new(BufReader::new(File::open(path)?)))
-    }
-}
-
-/// Opens `path` for writing, or stdout when `path` is `-`.
-fn open_output(path: &str) -> Result<Box<dyn Write>, CliError> {
-    if path == "-" {
-        Ok(Box::new(io::stdout()))
-    } else {
-        Ok(Box::new(File::create(path)?))
     }
 }

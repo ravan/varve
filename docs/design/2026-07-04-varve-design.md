@@ -257,6 +257,47 @@ Edge events are thus persisted under three tries (primary `_iid`, forward `_src_
 - **Meta files** carry per-page min/max for `_system_from`/`_valid_from`/`_valid_to`, per-column min/max + bloom filters, and HLL sketches — the scan prunes files and pages by IID range, temporal bounds, and predicates before touching data.
 - **The manifest write is the atomic commit** of a block; a data file without its manifest entry is invisible garbage (cleaned by GC).
 
+### Capacity-planning estimate
+
+The following figures are **analytical estimates, not measured `du` results**. They model the
+deterministic `social_bench` fixture: one version each of 10,000 `Person` nodes and 60,000
+`KNOWS` edges, small node properties (`_id` and `name`), and propertyless edges. The estimate
+includes the active block store, Arrow metadata, and a retained encoded write-log copy. It
+excludes the executable, disk cache, backups, filesystem snapshots, and superseded files
+awaiting GC.
+
+For a similarly shaped graph, a useful central estimate is:
+
+```text
+active MiB ≈ (0.25 KiB × nodes + 0.55 KiB × edges) / 1024
+```
+
+Use `(0.20 × nodes + 0.40 × edges) / 1024` MiB as a low estimate and
+`(0.30 × nodes + 0.70 × edges) / 1024` MiB as a high estimate. Edges cost
+more because the block store persists the primary, outgoing-adjacency, and
+incoming-adjacency copies; the write log can temporarily retain a fourth
+encoded copy.
+
+| Nodes | Edges | Estimated active database | Suggested provision |
+|---:|---:|---:|---:|
+| 10,000 | 60,000 | 25–45 MiB (about 35 MiB central) | 100–150 MiB |
+| 100,000 | 600,000 | 250–440 MiB | 1–1.5 GiB |
+| 1,000,000 | 6,000,000 | 2.5–4.3 GiB | 10–15 GiB |
+| 10,000,000 | 60,000,000 | 25–43 GiB | 100–150 GiB |
+
+The provisioned column allows roughly 2× active space for compaction and up
+to 3× when GC is delayed or snapshots are retained. Property-heavy data
+needs additional allowance: before Arrow and metadata overhead, each node
+payload is represented approximately twice (log plus primary store) and
+each edge payload approximately four times (log plus three block-store
+indexes). Bitemporal updates also add event versions, so production sizing
+must use total retained versions rather than only the current node and edge
+counts.
+
+The `social_bench` executable size is unrelated to these database figures:
+the executable generates the fixture at runtime and stores it in a temporary
+directory that is removed when the benchmark exits.
+
 ### Compaction
 
 Deterministic and coordination-free (XTDB's key operational property): job selection is a pure function of the trie inventory, and output files are **byte-identical** regardless of which node runs the job — duplicate work is wasted CPU, never corruption.
