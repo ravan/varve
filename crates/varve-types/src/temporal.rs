@@ -20,6 +20,18 @@ impl Instant {
         self.0
     }
 
+    /// Whether a calendar renderer can format this instant. The sentinels sit
+    /// outside chrono's range, so both `Display` here and the JSON row encoder
+    /// (`varve::rows`) fall back to raw µs for them — callers that must produce
+    /// a date, or choose a spelling, ask this first.
+    pub fn is_calendar_renderable(self) -> bool {
+        self.as_calendar().is_some()
+    }
+
+    fn as_calendar(self) -> Option<chrono::DateTime<chrono::Utc>> {
+        chrono::DateTime::<chrono::Utc>::from_timestamp_micros(self.0)
+    }
+
     /// RFC 3339 timestamp, e.g. `2020-01-01T00:00:00Z`; offsets normalized to UTC.
     pub fn parse_rfc3339(s: &str) -> Result<Self, TypeError> {
         chrono::DateTime::parse_from_rfc3339(s)
@@ -46,7 +58,7 @@ impl Instant {
 impl fmt::Display for Instant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Sentinels and instants beyond chrono's range render as raw µs.
-        match chrono::DateTime::<chrono::Utc>::from_timestamp_micros(self.0) {
+        match self.as_calendar() {
             Some(dt) => write!(
                 f,
                 "{}",
@@ -177,6 +189,37 @@ mod tests {
     fn sentinels_display_without_panicking() {
         assert!(!Instant::END_OF_TIME.to_string().is_empty());
         assert!(!Instant::MIN.to_string().is_empty());
+    }
+
+    /// Callers pick a spelling from `is_calendar_renderable` and expect `Display`
+    /// to agree — the JSON row encoder masks exactly the cells this rejects, so a
+    /// disagreement would either corrupt a response or drop a real date.
+    #[test]
+    fn calendar_renderability_agrees_with_display() {
+        for instant in [
+            Instant::MIN,
+            Instant::END_OF_TIME,
+            us(0),
+            us(-1),
+            us(1_639_131_300_000_000),
+            Instant::from_micros(i64::MAX / 2),
+            Instant::from_micros(i64::MIN / 2),
+        ] {
+            let rendered = instant.to_string();
+            assert_eq!(
+                instant.is_calendar_renderable(),
+                !rendered.ends_with("us"),
+                "{} rendered as {rendered}",
+                instant.as_micros()
+            );
+        }
+    }
+
+    #[test]
+    fn sentinels_are_not_calendar_renderable() {
+        assert!(!Instant::END_OF_TIME.is_calendar_renderable());
+        assert!(!Instant::MIN.is_calendar_renderable());
+        assert!(us(1_639_131_300_000_000).is_calendar_renderable());
     }
 
     #[test]

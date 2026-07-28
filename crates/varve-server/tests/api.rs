@@ -1,5 +1,5 @@
-use arrow::array::{Int64Array, StringArray};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::array::{Int64Array, StringArray, TimestampMicrosecondArray};
+use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -117,6 +117,29 @@ fn arrow_batches_become_explicit_null_json_rows() {
             .unwrap()
             .clone()]
     );
+}
+
+/// The HTTP query path must survive an open-ended fact. `valid_to(x)` on one
+/// yields `Instant::END_OF_TIME`, which arrow-json cannot render as a date; left
+/// to itself it corrupts the response into an opaque 500 rather than failing.
+#[test]
+fn arrow_batches_with_end_of_time_instants_still_become_json() {
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "vt",
+        DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+        false,
+    )]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![Arc::new(
+            TimestampMicrosecondArray::from(vec![Instant::END_OF_TIME.as_micros()])
+                .with_timezone("UTC"),
+        )],
+    )
+    .unwrap();
+
+    let response = batches_to_json(&[batch]).expect("end-of-time must not fail the response");
+    assert_eq!(response.rows[0]["vt"], json!("9223372036854775807us"));
 }
 
 #[test]
