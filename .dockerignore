@@ -17,5 +17,11 @@ __pycache__/
 docs/
 fuzz/
 resources/
+# Gallery demos are orchestration (compose files, TOMLs, SBOM fixtures) that the
+# varved image never needs. Excluding them keeps editing a gallery from
+# invalidating the COPY layer and forcing a full `cargo build --release` — a
+# ~4-minute penalty per compose/corpus tweak, which the blast-radius corpus
+# (~1 MB of .gz fixtures) triggered constantly.
+gallery/
 .DS_Store
 skills-lock.json

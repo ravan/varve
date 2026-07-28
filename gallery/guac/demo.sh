@@ -56,8 +56,13 @@ wait_http() {
 wait_gql() {
   i=0
   while [ "$i" -lt 120 ]; do
+    # `|| echo 000` is load-bearing: under `set -eu` a failing command
+    # substitution aborts the script, so without it a curl exit 7 (refused,
+    # container not listening yet) or 56 (reset, listening but not serving yet)
+    # kills the demo instead of retrying — the loop could never do its job.
     code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$GQL/query" \
-      -H "Content-Type: application/json" -d '{"query":"{__typename}"}' 2>/dev/null)
+      -H "Content-Type: application/json" -d '{"query":"{__typename}"}' 2>/dev/null \
+      || echo 000)
     if [ "$code" = "200" ]; then echo "  guacgql ready"; return 0; fi
     i=$((i + 1)); sleep 1
   done
