@@ -73,8 +73,12 @@ impl CommandClient for EmbeddedClient {
         Ok(StatusResponse::from_engine(&status, &self.probe))
     }
 
-    async fn compact(&self) -> Result<CompactionResponse, CliError> {
-        let report = self.db.compact_once().await?;
+    async fn compact(&self, full: bool) -> Result<CompactionResponse, CliError> {
+        let report = if full {
+            self.db.compact_full_once().await?
+        } else {
+            self.db.compact_once().await?
+        };
         Ok(CompactionResponse::from_report(&report))
     }
 

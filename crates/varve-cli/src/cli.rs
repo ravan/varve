@@ -132,7 +132,15 @@ pub enum AdminCommand {
     /// Report node role(s), applied progress, and probe verdict.
     Status,
     /// Run compaction.
-    Compact,
+    Compact {
+        /// Run full-sweep compaction, repeating until no jobs remain. Also
+        /// drains L0 groups below the `log_limit` gate, leaving no
+        /// full-iid-space L0 trie for anchored point/set lookups to scan --
+        /// the shape a bulk load should be compacted into before serving.
+        /// Slower and more memory-hungry than the default incremental pass.
+        #[arg(long)]
+        full: bool,
+    },
     /// Run garbage collection.
     Gc,
     /// Verify manifest/trie/log integrity.

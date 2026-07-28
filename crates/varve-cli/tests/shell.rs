@@ -100,7 +100,7 @@ impl CommandClient for FakeClient {
         })
     }
 
-    async fn compact(&self) -> Result<CompactionResponse, CliError> {
+    async fn compact(&self, _full: bool) -> Result<CompactionResponse, CliError> {
         Ok(CompactionResponse {
             jobs: 0,
             input_tries: 0,

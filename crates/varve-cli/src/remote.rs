@@ -8,8 +8,8 @@ use serde::{de::DeserializeOwned, Serialize};
 use url::Url;
 use varve_server::api::bulk::{IngestErrorResponse, IngestResponse};
 use varve_server::api::{
-    CompactionResponse, ErrorResponse, GcResponse, QueryRequest, StatusResponse, TxRequest,
-    TxResponse, VerifyResponse, ARROW_STREAM_CONTENT_TYPE,
+    CompactRequest, CompactionResponse, ErrorResponse, GcResponse, QueryRequest, StatusResponse,
+    TxRequest, TxResponse, VerifyResponse, ARROW_STREAM_CONTENT_TYPE,
 };
 
 use crate::client::{BulkBody, BulkFormat, CliError, CommandClient};
@@ -235,8 +235,9 @@ impl CommandClient for RemoteClient {
         }
     }
 
-    async fn compact(&self) -> Result<CompactionResponse, CliError> {
-        self.send_mutation("/v1/admin/compact", &()).await
+    async fn compact(&self, full: bool) -> Result<CompactionResponse, CliError> {
+        self.send_mutation("/v1/admin/compact", &CompactRequest { full })
+            .await
     }
 
     async fn gc(&self) -> Result<GcResponse, CliError> {

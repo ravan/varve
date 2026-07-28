@@ -592,3 +592,63 @@ async fn security_enforcement_maps_to_403_and_filters_queries() {
     let body = json_body(response).await;
     assert_eq!(body["rows"][0]["role"], "reader");
 }
+
+/// `POST /v1/admin/compact` grew an optional body carrying `full`. The bodies
+/// that pre-date it -- absent, empty, and a bare `null` -- must all still mean
+/// an ordinary incremental compaction, because `varve admin compact` and the
+/// gallery scripts post exactly those.
+#[tokio::test]
+async fn compact_accepts_the_legacy_bodyless_form_and_the_full_flag() {
+    for body in [
+        None,
+        Some(json!(null)),
+        Some(json!({})),
+        Some(json!({"full": false})),
+    ] {
+        let response = call(
+            router_with_db(varve::Db::memory()),
+            Method::POST,
+            "/v1/admin/compact",
+            body.clone(),
+            true,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "body {body:?}");
+        // Shape is unchanged, so existing parsers keep working.
+        assert_eq!(json_body(response).await["jobs"], json!(0), "body {body:?}");
+    }
+
+    let full = call(
+        router_with_db(varve::Db::memory()),
+        Method::POST,
+        "/v1/admin/compact",
+        Some(json!({"full": true})),
+        true,
+    )
+    .await;
+    assert_eq!(full.status(), StatusCode::OK);
+    assert_eq!(json_body(full).await["jobs"], json!(0));
+}
+
+/// A misspelled flag must not silently downgrade to an incremental pass -- that
+/// would look like a successful full sweep and quietly leave the L0 tries that
+/// anchored lookups then have to scan.
+#[tokio::test]
+async fn compact_rejects_a_malformed_body_rather_than_ignoring_it() {
+    for body in [json!({"ful": true}), json!({"full": "yes"}), json!([1, 2])] {
+        let response = call(
+            router_with_db(varve::Db::memory()),
+            Method::POST,
+            "/v1/admin/compact",
+            Some(body.clone()),
+            true,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "body {body:?}");
+        assert_eq!(
+            json_body(response).await["code"],
+            json!("invalid_request"),
+            "body {body:?}"
+        );
+    }
+}

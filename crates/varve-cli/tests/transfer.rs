@@ -84,7 +84,7 @@ impl CommandClient for FakeClient {
         unreachable!("not exercised by transfer tests")
     }
 
-    async fn compact(&self) -> Result<CompactionResponse, CliError> {
+    async fn compact(&self, _full: bool) -> Result<CompactionResponse, CliError> {
         unreachable!("not exercised by transfer tests")
     }
 

@@ -58,7 +58,7 @@ async fn assert_client_parity(client: &dyn CommandClient) {
     assert!(status.roles.iter().any(|role| role == "compactor"));
 
     client
-        .compact()
+        .compact(false)
         .await
         .unwrap_or_else(|error| panic!("compact must succeed: {error}"));
     client

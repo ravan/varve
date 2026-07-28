@@ -179,6 +179,22 @@ impl ProbeResponse {
     }
 }
 
+/// Body of `POST /v1/admin/compact`. Absent, empty and `null` bodies all mean
+/// `full: false`, so pre-existing callers that post nothing keep working.
+///
+/// `full` selects [`varve_engine::Db::compact_full_once`] instead of
+/// `compact_once`: it also drains L0 groups below the `log_limit` gate, which is
+/// what leaves no full-iid-space L0 trie behind for anchored point/set lookups
+/// to prune against. One request runs one job; loop until `jobs` is 0 (that is
+/// what `varve admin compact --full` does) rather than holding one request open
+/// for the whole sweep.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CompactRequest {
+    #[serde(default)]
+    pub full: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CompactionResponse {
     pub jobs: usize,

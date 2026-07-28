@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
@@ -17,6 +17,8 @@ use varve_server::api::{
 struct FakeClient {
     status_calls: AtomicU64,
     compact_calls: AtomicU64,
+    /// `full` as seen by the most recent `compact` call.
+    compact_full: AtomicBool,
     gc_calls: AtomicU64,
     verify_calls: AtomicU64,
 }
@@ -26,6 +28,7 @@ impl FakeClient {
         Self {
             status_calls: AtomicU64::new(0),
             compact_calls: AtomicU64::new(0),
+            compact_full: AtomicBool::new(false),
             gc_calls: AtomicU64::new(0),
             verify_calls: AtomicU64::new(0),
         }
@@ -60,10 +63,14 @@ impl CommandClient for FakeClient {
         })
     }
 
-    async fn compact(&self) -> Result<CompactionResponse, CliError> {
-        self.compact_calls.fetch_add(1, Ordering::SeqCst);
+    async fn compact(&self, full: bool) -> Result<CompactionResponse, CliError> {
+        let n = self.compact_calls.fetch_add(1, Ordering::SeqCst);
+        self.compact_full.store(full, Ordering::SeqCst);
+        // A full sweep is driven to exhaustion, so report work twice and then
+        // nothing; otherwise `run_admin_compact(full)` would never terminate.
+        let jobs = if full && n >= 2 { 0 } else { 1 };
         Ok(CompactionResponse {
-            jobs: 1,
+            jobs,
             input_tries: 2,
             output_tries: 1,
             input_rows: 100,
@@ -157,7 +164,7 @@ async fn admin_status_json_emits_exact_server_dto() {
 async fn admin_compact_calls_client_once_and_human_output_has_every_field() {
     let client = FakeClient::new();
     let mut output = Vec::new();
-    run_admin_compact(&client, false, &mut output)
+    run_admin_compact(&client, false, false, &mut output)
         .await
         .unwrap_or_else(|error| panic!("admin compact must succeed: {error}"));
     assert_eq!(client.compact_calls.load(Ordering::SeqCst), 1);
@@ -177,7 +184,7 @@ async fn admin_compact_calls_client_once_and_human_output_has_every_field() {
 async fn admin_compact_json_emits_exact_server_dto() {
     let client = FakeClient::new();
     let mut output = Vec::new();
-    run_admin_compact(&client, true, &mut output)
+    run_admin_compact(&client, true, false, &mut output)
         .await
         .unwrap_or_else(|error| panic!("admin compact must succeed: {error}"));
     assert_eq!(client.compact_calls.load(Ordering::SeqCst), 1);
@@ -250,4 +257,37 @@ async fn admin_verify_json_emits_exact_server_dto() {
     assert_eq!(value["pages_checked"], json!(5));
     assert_eq!(value["events_checked"], json!(6));
     assert_eq!(value["log_records_checked"], json!(7));
+}
+
+/// `varve admin compact --full` must drive the sweep to exhaustion: the whole
+/// point of the full-sweep variant is to leave no full-iid-space L0 trie
+/// behind, and one job does not guarantee that. The rendered totals are the sum
+/// across the jobs, so the report describes the sweep and not just its last job.
+#[tokio::test]
+async fn admin_compact_full_loops_until_no_jobs_remain_and_sums_the_reports() {
+    let client = FakeClient::new();
+    let mut output = Vec::new();
+    run_admin_compact(&client, false, true, &mut output)
+        .await
+        .unwrap_or_else(|error| panic!("admin compact --full must succeed: {error}"));
+    // Two reports with work, then the zero-job report that ends the loop.
+    assert_eq!(client.compact_calls.load(Ordering::SeqCst), 3);
+    assert!(client.compact_full.load(Ordering::SeqCst));
+    let text = text_of(output);
+    for field in ["jobs: 2", "input_tries: 4", "input_rows: 200"] {
+        assert!(text.contains(field), "missing {field:?} in {text:?}");
+    }
+}
+
+/// Without `--full` it stays a single incremental job, and `full` reaches the
+/// client as false.
+#[tokio::test]
+async fn admin_compact_without_full_issues_one_incremental_job() {
+    let client = FakeClient::new();
+    let mut output = Vec::new();
+    run_admin_compact(&client, false, false, &mut output)
+        .await
+        .unwrap_or_else(|error| panic!("admin compact must succeed: {error}"));
+    assert_eq!(client.compact_calls.load(Ordering::SeqCst), 1);
+    assert!(!client.compact_full.load(Ordering::SeqCst));
 }

@@ -136,11 +136,36 @@ pub(super) async fn metrics(State(c): State<HttpContext>) -> Response {
         Err(e) => mapped(e.into()),
     }
 }
-pub(super) async fn compact(State(c): State<HttpContext>) -> Response {
+// Taken as a raw String rather than `Json<CompactRequest>` so that the callers
+// that predate the body — which post an empty body or a bare `null` — keep
+// working. A body that is present but malformed is still a 400: silently
+// downgrading `{"ful": true}` to an incremental compaction would be worse than
+// rejecting it.
+pub(super) async fn compact(State(c): State<HttpContext>, body: String) -> Response {
+    let req = if body.trim().is_empty() || body.trim() == "null" {
+        CompactRequest::default()
+    } else {
+        match serde_json::from_str::<CompactRequest>(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    &format!("invalid compact body: {e}"),
+                    None,
+                )
+            }
+        }
+    };
     if !c.frontend.db.roles().contains(NodeRole::Compactor) {
         return redirect(&c).await;
     }
-    match c.frontend.db.compact_once().await {
+    let report = if req.full {
+        c.frontend.db.compact_full_once().await
+    } else {
+        c.frontend.db.compact_once().await
+    };
+    match report {
         Ok(v) => Json(CompactionResponse::from_report(&v)).into_response(),
         Err(e) => mapped(e.into()),
     }

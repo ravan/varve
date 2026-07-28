@@ -92,7 +92,10 @@ pub trait CommandClient: Send + Sync {
     async fn query(&self, request: QueryRequest) -> Result<Vec<RecordBatch>, CliError>;
     async fn execute(&self, request: TxRequest) -> Result<TxResponse, CliError>;
     async fn status(&self) -> Result<StatusResponse, CliError>;
-    async fn compact(&self) -> Result<CompactionResponse, CliError>;
+    /// One compaction job. `full` selects the full-sweep variant, which also
+    /// drains L0 groups below the `log_limit` gate; callers loop until the
+    /// report's `jobs` is 0.
+    async fn compact(&self, full: bool) -> Result<CompactionResponse, CliError>;
     async fn gc(&self) -> Result<GcResponse, CliError>;
     async fn verify(&self) -> Result<VerifyResponse, CliError>;
 

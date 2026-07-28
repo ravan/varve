@@ -182,7 +182,7 @@ fn admin_subcommand_is_recognized() {
 fn admin_subcommand_accepts_json_flag_for_every_action() {
     for (action, expected) in [
         ("status", AdminCommand::Status),
-        ("compact", AdminCommand::Compact),
+        ("compact", AdminCommand::Compact { full: false }),
         ("gc", AdminCommand::Gc),
         ("verify", AdminCommand::Verify),
     ] {

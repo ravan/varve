@@ -48,8 +48,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 AdminCommand::Status => {
                     varve_cli::run_admin_status(client.as_ref(), args.json, &mut lock).await
                 }
-                AdminCommand::Compact => {
-                    varve_cli::run_admin_compact(client.as_ref(), args.json, &mut lock).await
+                AdminCommand::Compact { full } => {
+                    varve_cli::run_admin_compact(client.as_ref(), args.json, full, &mut lock).await
                 }
                 AdminCommand::Gc => {
                     varve_cli::run_admin_gc(client.as_ref(), args.json, &mut lock).await
