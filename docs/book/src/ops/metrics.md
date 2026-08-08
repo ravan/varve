@@ -41,6 +41,8 @@ is a true `IntCounterVec`.
 | `varve_live_bytes` | gauge | (none) | Unflushed approximate bytes across all graphs (drives the memory-watermark early flush) | `varve_live_bytes`, compare against the configured watermark |
 | `varve_persisted_tries` | gauge | (none) | Persisted tries across all scopes | `varve_persisted_tries` |
 | `varve_compaction_debt_tries` | gauge | (none) | I/O-free compaction-debt proxy: Σ over scopes of `max(0, tries(scope) − 1)` (each scope with more than one persisted trie has debt equal to all but its newest) | `varve_compaction_debt_tries`; caveat: this is a count of extra tries, computed without any I/O, and approximates compaction debt but does not measure bytes-to-rewrite or read amplification directly |
+| `varve_block_pages_read_total` | gauge, monotone-by-construction | (none) | Block data pages read by the read paths, after page pruning | see events-per-page below |
+| `varve_block_events_decoded_total` | gauge, monotone-by-construction | (none) | Events materialized from those pages. An anchored decode filters on the page's key column before building a row, so rows it rejects are not counted | see events-per-page below |
 | `varve_cache_hits_total` | gauge vec, monotone-by-construction | `tier` | Cache-tier hits | see cache hit ratio below |
 | `varve_cache_misses_total` | gauge vec, monotone-by-construction | `tier` | Cache-tier misses | see cache hit ratio below |
 
@@ -52,6 +54,28 @@ varve_cache_hits_total / (varve_cache_hits_total + varve_cache_misses_total)
 
 (group/sum `by (tier)` if multiple tiers are configured via `[cache] tiers`,
 composed outermost-first, default `["memory"]`.)
+
+**Events per page — the degree-bound read check:**
+
+```promql
+rate(varve_block_events_decoded_total[5m]) / rate(varve_block_pages_read_total[5m])
+```
+
+A page holds up to `PAGE_LIMIT` (1024) rows. An **anchored** lookup — a point
+`_id` read, or a traversal hop off an anchor — should materialize a handful of
+rows out of each page it reads, because the decode filters on the page's key
+column before building a row. A ratio approaching 1024 on an anchored workload
+means whole pages are being materialized to answer point questions, which is
+worth roughly an order of magnitude of query latency (it cost the blast-radius
+gallery's 8-hop query 460 ms instead of 35 ms). An unanchored `MATCH (n:Label)`
+scan legitimately sits near 1024 — it wants every row — so read this ratio
+against the shape of the traffic, not as an absolute threshold.
+
+**Latency needs residency.** Always read a traversal latency next to
+`varve_live_bytes`. Rows start in the writer's unflushed live table and move to
+flushed blocks on any restart or when `flush_interval_ms` fires; the same query
+on the same store can measure several times apart across that boundary, with
+nothing else to explain it.
 
 ## 2. Tracing spans and OpenTelemetry export
 

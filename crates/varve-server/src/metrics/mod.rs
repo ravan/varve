@@ -55,6 +55,8 @@ pub struct PrometheusMetrics {
     live_bytes: IntGauge,
     persisted_tries: IntGauge,
     compaction_debt_tries: IntGauge,
+    block_pages_read: IntGauge,
+    block_events_decoded: IntGauge,
     cache_hits: IntGaugeVec,
     cache_misses: IntGaugeVec,
     ingest_records: IntCounter,
@@ -131,6 +133,16 @@ impl PrometheusMetrics {
             "I/O-free compaction-debt proxy: sum of (tries - 1) per scope",
         )
         .map_err(protocol)?;
+        let block_pages_read = IntGauge::new(
+            "varve_block_pages_read_total",
+            "Block data pages read by the read paths, after page pruning",
+        )
+        .map_err(protocol)?;
+        let block_events_decoded = IntGauge::new(
+            "varve_block_events_decoded_total",
+            "Events materialized from those pages, after the key filter: read              against varve_block_pages_read_total, an anchored lookup should              decode its own degree, not a whole page",
+        )
+        .map_err(protocol)?;
         let cache_hits = IntGaugeVec::new(
             Opts::new("varve_cache_hits_total", "Cache-tier hits"),
             &["tier"],
@@ -181,6 +193,8 @@ impl PrometheusMetrics {
             Box::new(live_bytes.clone()),
             Box::new(persisted_tries.clone()),
             Box::new(compaction_debt_tries.clone()),
+            Box::new(block_pages_read.clone()),
+            Box::new(block_events_decoded.clone()),
             Box::new(cache_hits.clone()),
             Box::new(cache_misses.clone()),
             Box::new(ingest_records.clone()),
@@ -211,6 +225,8 @@ impl PrometheusMetrics {
             live_bytes,
             persisted_tries,
             compaction_debt_tries,
+            block_pages_read,
+            block_events_decoded,
             cache_hits,
             cache_misses,
             ingest_records,
@@ -282,6 +298,10 @@ impl MetricsSink for PrometheusMetrics {
             .set(saturating_i64(snapshot.persisted_tries));
         self.compaction_debt_tries
             .set(saturating_i64(snapshot.compaction_debt_tries));
+        self.block_pages_read
+            .set(saturating_i64(snapshot.block_pages_read));
+        self.block_events_decoded
+            .set(saturating_i64(snapshot.block_events_decoded));
         for tier in &snapshot.cache_tiers {
             self.cache_hits
                 .with_label_values(&[tier.tier.as_str()])

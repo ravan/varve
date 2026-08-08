@@ -702,9 +702,11 @@ impl std::fmt::Debug for Db {
 /// when `plan_fast_path` returns `None`, `query` uses the full scan verbatim.
 pub(crate) enum FastPath {
     /// Fixed homogeneous path (all hops `Edge`, one label + direction, no
-    /// inline edge props, no edge var referenced): the shared reachable-edge
-    /// batch (or `None` when nothing is reachable) fed to EVERY `Edge` spec,
-    /// plus the reachable node set pruning every non-anchor `Node` spec.
+    /// bare edge var projected): the shared reachable-edge batch (or `None`
+    /// when nothing is reachable) fed to EVERY `Edge` spec, plus the reachable
+    /// node set pruning every non-anchor `Node` spec. Inline edge props and
+    /// `WHERE`/`RETURN` references to an edge property are re-applied per
+    /// element over this shared batch, so they do not disable it.
     FixedEdges {
         batch: Option<RecordBatch>,
         nodes: Arc<BTreeSet<Iid>>,
@@ -737,6 +739,70 @@ fn const_props(
         .iter()
         .map(|(k, v)| const_value(v, params).map(|value| (k.clone(), value)))
         .collect()
+}
+
+/// Whether a `RETURN` item is one the anchor-pruned edge batch cannot serve
+/// identically to a full scan, and so must decline the fast path.
+///
+/// Pruning narrows which ROWS the shared batch holds; it never changes the
+/// values of a row it keeps. An expression over those values therefore evaluates
+/// identically pruned or not, whatever its shape — including `e.prop`, which
+/// `lower_expr` lowers to a NULL literal when the narrower batch has no such
+/// column, matching the present-but-null column a full scan yields for those
+/// same (reachable) rows.
+///
+/// There are only two exceptions, and they sit at DIFFERENT DEPTHS:
+///
+///  * At the TOP LEVEL, a bare edge variable (`RETURN e`) is an ELEMENT
+///    projection. `project_bare_element` emits one output column per doc column
+///    the batch HAS, so a narrower schema changes the result's COLUMN SET rather
+///    than a value — `note`, carried only by an unreachable edge, would silently
+///    vanish from the projection.
+///
+///    Nested anywhere else, a bare edge variable is consumed as a VALUE and
+///    yields a single column, so it is fine. `valid_from(e)` is the case that
+///    matters: `lower_temporal_fn` does require its structural column to be
+///    PRESENT (it errors rather than lowering to NULL the way a doc property
+///    does), but the pruned batch carries the structural columns, and an anchor
+///    reaching no edge binds no rows and short-circuits before the expression is
+///    ever lowered. Both are covered by
+///    `returning_a_temporal_fn_on_an_edge_var_still_answers`. Every other
+///    function lowers a bare element variable to `UnknownVariable` on the full
+///    scan too, so pruning cannot change those either.
+///
+///  * At ANY depth, `EXISTS` carries a nested pattern with its own elements,
+///    which this aid does not reason about — declined as unexamined rather than
+///    as known-unsafe.
+fn needs_full_edge_schema(item: &Expr, is_edge_var: &dyn Fn(&str) -> bool) -> bool {
+    if let Expr::Var(var) = item {
+        if is_edge_var(var) {
+            return true;
+        }
+    }
+    contains_exists(item)
+}
+
+/// Whether `EXISTS` appears anywhere in `expr`, at any depth.
+fn contains_exists(expr: &Expr) -> bool {
+    match expr {
+        Expr::Exists { .. } => true,
+        Expr::Literal(_) | Expr::Param(_) | Expr::Prop { .. } | Expr::Var(_) | Expr::Star => false,
+        Expr::List(items) => items.iter().any(contains_exists),
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => contains_exists(expr),
+        Expr::Binary { lhs, rhs, .. } => contains_exists(lhs) || contains_exists(rhs),
+        Expr::FnCall { args, .. } => args.iter().any(contains_exists),
+        Expr::Case {
+            operand,
+            whens,
+            otherwise,
+        } => {
+            operand.as_deref().is_some_and(contains_exists)
+                || whens
+                    .iter()
+                    .any(|(when, then)| contains_exists(when) || contains_exists(then))
+                || otherwise.as_deref().is_some_and(contains_exists)
+        }
+    }
 }
 
 #[derive(Default)]
@@ -2034,10 +2100,15 @@ impl Db {
     /// edges that can lie on a qualifying path, and if so build the pruned
     /// input. Returns `None` — the caller then uses the full-scan path
     /// verbatim — for anything not confidently covered (unanchored start, a
-    /// heterogeneous fixed path, a mix of fixed and quantified hops, an edge
-    /// element whose properties the query references, …). Correctness over
-    /// speed: the fast path is a layer over the unchanged, already-correct
-    /// scan, never a replacement, so an unsure verdict simply falls back.
+    /// heterogeneous fixed path, a mix of fixed and quantified hops, a bare
+    /// edge variable in `RETURN`, …). Correctness over speed: the fast path is
+    /// a layer over the unchanged, already-correct scan, never a replacement,
+    /// so an unsure verdict simply falls back.
+    ///
+    /// Each bail is a silent downgrade to a full scan, so they are worth
+    /// keeping few and keeping justified: several are unrelated to which nodes
+    /// the anchor reaches, and "it's anchored, so it prunes" should be
+    /// measured rather than assumed.
     ///
     /// Under active (non-wildcard) enforcement the pruned inputs carry the
     /// same security semantics as the filtered full scan: node visibility is
@@ -2070,7 +2141,17 @@ impl Db {
         else {
             return Ok(None);
         };
-        let query = varve_plan::exec::degenerate_query(q)?;
+        // `match_shape`, not `degenerate_query`: pruning only needs the MATCH
+        // structure, and `RETURN` modifiers (`DISTINCT`/`ORDER BY`/`SKIP`/
+        // `LIMIT`) are applied after the pattern binds, so they cannot change
+        // what the anchor reaches. Using `degenerate_query` here rejected those
+        // shapes — which first failed the statement outright, and would
+        // otherwise have silently downgraded every such query to a full scan.
+        // A shape this aid genuinely cannot read (union, multi-clause) is a
+        // "no fast path" verdict, never a query error.
+        let Ok(query) = varve_plan::exec::match_shape(q) else {
+            return Ok(None);
+        };
         let anchor = *anchor;
         let Some(path) = query.paths.first() else {
             return Ok(None);
@@ -2190,14 +2271,15 @@ impl Db {
                 _ => return Ok(None),
             }
         }
-        // Homogeneous label + direction across all hops (so the global
-        // `expanded` dedup in the BFS is sound, and one batch under one label
-        // serves every `Edge` element).
-        let (_, first_label, first_dir) = edge_specs[0];
-        if !edge_specs
-            .iter()
-            .all(|(_, l, d)| *l == first_label && *d == first_dir)
-        {
+        // One LABEL across all hops, so a single batch under that label serves
+        // every `Edge` element. Directions may differ: `reachable_edges` drives
+        // level `i` from `hops[i]`, and falls back to per-level dedup when the
+        // families differ so a node expanded under one direction is still
+        // expanded under another (see its dedup note). The batch itself is
+        // direction-agnostic — it carries `_src_iid` and `_dst_iid`, and each
+        // hop's join picks the side its own direction calls for.
+        let (_, first_label, _) = edge_specs[0];
+        if !edge_specs.iter().all(|(_, l, _)| *l == first_label) {
             return Ok(None);
         }
         // Non-granted edge label: the full path feeds every `Edge` spec an
@@ -2212,59 +2294,67 @@ impl Db {
                 }));
             }
         }
-        // No inline edge props, and no edge element referenced by WHERE or
-        // RETURN. Otherwise the reachable subset's (possibly narrower)
-        // doc-column schema could differ from the full scan's, turning an
-        // empty result into an `UnknownColumn` error (not result-identical).
-        // The structural join/temporal columns are always present, so a query
-        // that touches no edge doc property is safe.
-        if path.hops.iter().any(|(edge, _)| !edge.props.is_empty()) {
+        // Referencing an edge DOC PROPERTY is fine — whether as an inline
+        // `{k: v}`, a `WHERE` conjunct, or a `RETURN` item. This used to bail,
+        // on the grounds that the reachable subset's doc-column schema can be
+        // narrower than the full scan's (a property only non-reachable edges
+        // carry has no column here), turning an empty result into an
+        // `UnknownColumn` error. Two things make that safe:
+        //
+        //  * A missing doc column is not an error. `lower_expr` lowers an
+        //    absent `{var}__{prop}` to a NULL literal, so a filter on it
+        //    yields no rows and a projection of it yields NULL — which is
+        //    precisely what the full scan's present-but-all-null column gives
+        //    for those same (reachable) rows. Values are identical.
+        //  * The narrowing is already accepted for NODES. Every non-anchor
+        //    node element of a fast-pathed pattern scans under
+        //    `IidSel::Set(reachable)`, and `merged_snapshot` computes its
+        //    column plan from the selected rows only — so node doc columns
+        //    already narrow exactly this way on this path.
+        //
+        // A `WHERE` clause needs no check at all. It only ever REMOVES rows, so
+        // whatever its shape it cannot make the anchor reach further than the
+        // MATCH structure already says, and it projects nothing, so it cannot
+        // depend on the batch's column SET either. (The shapes that do need a
+        // present column — `valid_from(e)` and a bare `e` — are unsupported in
+        // `WHERE` on every path, pruned or not; see
+        // `temporal_fn_in_where_never_yields_a_wrong_answer_when_pruned`.)
+        // `RETURN` items are checked below, where the column set is decided.
+        let references_edge_var = |var: &str| edge_specs.iter().any(|(v, _, _)| *v == var);
+        if query
+            .ret
+            .items
+            .iter()
+            .any(|(expr, _alias)| needs_full_edge_schema(expr, &references_edge_var))
+        {
             return Ok(None);
         }
-        let references_edge_var = |var: &str| edge_specs.iter().any(|(v, _, _)| *v == var);
-        if let Some(where_clause) = query.where_clause {
-            for expr in where_clause.conjuncts() {
-                let Some((var, _, _)) = expr.as_prop_eq() else {
-                    return Ok(None);
-                };
-                if references_edge_var(var) {
-                    return Ok(None);
-                }
-            }
-        }
-        for (expr, _alias) in &query.ret.items {
-            match expr {
-                varve_gql::ast::Expr::Prop { var, .. } | varve_gql::ast::Expr::Var(var) => {
-                    if references_edge_var(var) {
-                        return Ok(None);
-                    }
-                }
-                varve_gql::ast::Expr::FnCall { args, .. } => {
-                    for arg in args {
-                        match arg {
-                            varve_gql::ast::Expr::Var(var)
-                            | varve_gql::ast::Expr::Prop { var, .. } => {
-                                if references_edge_var(var) {
-                                    return Ok(None);
-                                }
-                            }
-                            _ => return Ok(None),
-                        }
-                    }
-                }
-                _ => return Ok(None),
-            }
-        }
 
-        // Build the shared reachable-edge batch: level i follows hop i (all the
-        // same label + direction). Props are ignored in the BFS (a wider, still
-        // correct, superset) and re-applied per element by
-        // `apply_element_predicates`.
+        // Build the shared reachable-edge batch: level i follows hop i.
+        //
+        // Hop `i`'s own inline props are applied AT level `i`, which keeps the
+        // frontier narrow. Ignoring them would also be correct (a wider
+        // superset) but is badly so: over a long path the prop-blind frontier
+        // fans out across every edge family at once, and the per-node lookups
+        // it costs can exceed a single full scan of the edge table — which is
+        // what the fast path is supposed to beat. Applying them is still a
+        // superset for every hop: a qualifying path's `ei` satisfies hop `i`'s
+        // props by definition, so it is collected at level `i`, and the shared
+        // batch is the UNION over levels — so each `Edge` element finds its own
+        // qualifying edges in it even when hops filter on different values.
+        // `apply_element_predicates` re-applies them per element regardless, so
+        // this narrows work, never results.
+        let hop_props = path
+            .hops
+            .iter()
+            .map(|(edge, _)| const_props(&edge.props, params))
+            .collect::<Result<Vec<_>, _>>()?;
         let hops: Vec<crate::scan::HopSpec> = edge_specs
             .iter()
-            .map(|(_, _, direction)| crate::scan::HopSpec {
+            .zip(&hop_props)
+            .map(|((_, _, direction), props)| crate::scan::HopSpec {
                 label: first_label,
-                props: &[],
+                props,
                 direction: dir_to_adj(*direction),
             })
             .collect();
@@ -2376,6 +2466,7 @@ impl Db {
                 compaction_debt_tries += scope_len.saturating_sub(1) as u64;
             }
         }
+        let scan_stats = std::sync::Arc::clone(&state.scan_stats);
         drop(state);
         let cache_tiers = self
             .inner
@@ -2403,6 +2494,8 @@ impl Db {
             live_bytes,
             persisted_tries,
             compaction_debt_tries,
+            block_pages_read: scan_stats.block_pages_read.load(Ordering::Relaxed),
+            block_events_decoded: scan_stats.block_events_decoded.load(Ordering::Relaxed),
             cache_tiers,
         }
     }

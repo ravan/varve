@@ -38,7 +38,7 @@ use varve_gql::ast::{
     NodePattern, PrivilegeAction, PrivilegeKind, QueryBody, RemoveItem, RemoveStmt, ReturnClause,
     RoleTarget, SecurityStmt, SetItem, SetStmt, SortItem, Statement, TemporalClauses,
 };
-use varve_index::{decode_events, encode_events, visible_events, Event, Op};
+use varve_index::{encode_events, visible_events, Event, Op};
 use varve_log::{Log, LogRecord, TableEffects};
 use varve_storage::{keys, manifest_history, TrieCatalog, TrieEntry};
 use varve_types::{Doc, Iid, Instant, LogPosition, TemporalBounds, TemporalDimension, Value};
@@ -2004,7 +2004,7 @@ async fn visible_payload(
     overlay: Option<&Overlay>,
 ) -> Result<Option<(Vec<String>, Doc)>, EngineError> {
     let table = table_for_binding(kind);
-    let (live_events, tries) = {
+    let (live_events, tries, stats) = {
         let shared = state.state.read().map_err(|_| EngineError::Poisoned)?;
         let graph_state = shared
             .graph(graph)
@@ -2015,7 +2015,11 @@ async fn visible_payload(
             .events_for(&iid)
             .map(|events| vec![(iid, events.to_vec())])
             .unwrap_or_default();
-        (live_events, core.tries.clone())
+        (
+            live_events,
+            core.tries.clone(),
+            std::sync::Arc::clone(&shared.scan_stats),
+        )
     };
     let overlay_events: Vec<(Iid, Vec<Event>)> = overlay
         .and_then(|overlay| {
@@ -2039,7 +2043,15 @@ async fn visible_payload(
                 .store
                 .get_range(&data_key, page.offset..page.offset + page.len)
                 .await?;
-            block_events.extend(decode_events(bytes.as_ref())?);
+            // A single-entity read: materialize only this iid's rows, never the
+            // whole page's docs (see `IidSel::decode_page`).
+            let decoded = varve_index::decode_events_keyed(
+                bytes.as_ref(),
+                varve_index::SortOrder::ByIid,
+                &|key| key == iid,
+            )?;
+            stats.record_page(decoded.len());
+            block_events.extend(decoded);
         }
         if !block_events.is_empty() {
             blocks.push(block_events);

@@ -52,6 +52,20 @@ impl IidSel {
         }
     }
 
+    /// Decodes one primary-table page, materializing only the events this
+    /// selection admits. `All` decodes the page whole; the narrowing variants
+    /// push `admits` down into the codec's `_iid` column pass so a point or
+    /// set lookup never deserializes a non-selected row's doc — the page's
+    /// selected rows, not its rows, bound the cost.
+    fn decode_page(&self, bytes: &[u8]) -> Result<Vec<Event>, varve_index::IndexError> {
+        match self {
+            IidSel::All => decode_events(bytes),
+            _ => varve_index::decode_events_keyed(bytes, varve_index::SortOrder::ByIid, &|iid| {
+                self.admits(&iid)
+            }),
+        }
+    }
+
     /// The selected live/overlay entities: a set probes per member (the set
     /// is anchor-reachable — small — while the table may hold millions).
     fn table_events<'a>(
@@ -89,14 +103,14 @@ pub(crate) async fn merged_snapshot(
     // 1. Atomic snapshot under ONE read lock (decision 8). Live events are
     //    cloned — bounded by max_block_rows; a point lookup clones one
     //    entity, a set only its members. The trie inventory is Arc-cheap.
-    let (live_events, tries) = {
+    let (live_events, tries, stats) = {
         let s = state.read().map_err(|_| EngineError::Poisoned)?;
         let table = s
             .graph(graph)
             .ok_or_else(|| EngineError::UnknownGraph(graph.to_string()))?;
         let core = table.core(kind);
         let live_events = sel.table_events(|iid| core.live.events_for(iid), core.live.entities());
-        (live_events, core.tries.clone())
+        (live_events, core.tries.clone(), Arc::clone(&s.scan_stats))
     };
     let overlay_events: Vec<(Iid, Vec<Event>)> = overlay
         .map(|overlay| {
@@ -119,11 +133,9 @@ pub(crate) async fn merged_snapshot(
             let bytes = store
                 .get_range(&data_key, page.offset..page.offset + page.len)
                 .await?;
-            for event in decode_events(&bytes)? {
-                if sel.admits(&event.iid) {
-                    block_events.push(event);
-                }
-            }
+            let decoded = sel.decode_page(&bytes)?;
+            stats.record_page(decoded.len());
+            block_events.extend(decoded);
         }
         blocks.push(block_events);
     }
@@ -203,7 +215,7 @@ async fn edge_adjacency_impl(
 ) -> Result<(Vec<AdjacencyEntry>, Vec<(Iid, Vec<Event>)>), EngineError> {
     // 1. One read lock: live edge events (narrowed by the live adjacency
     //    views when anchored) + the persisted family's trie list.
-    let (live_events, tries) = {
+    let (live_events, tries, stats) = {
         let s = state.read().map_err(|_| EngineError::Poisoned)?;
         let table = s
             .graph(graph)
@@ -229,7 +241,7 @@ async fn edge_adjacency_impl(
             AdjDirection::Out => table.adj_out.clone(),
             AdjDirection::In => table.adj_in.clone(),
         };
-        (live_events, tries)
+        (live_events, tries, Arc::clone(&s.scan_stats))
     };
     let overlay_events: Vec<(Iid, Vec<Event>)> = overlay
         .map(|overlay| {
@@ -260,6 +272,11 @@ async fn edge_adjacency_impl(
         AdjDirection::Out => varve_storage::ADJ_OUT,
         AdjDirection::In => varve_storage::ADJ_IN,
     };
+    // The family's sort key — and so the column an anchored decode filters on.
+    let sort_key = match direction {
+        AdjDirection::Out => varve_index::SortOrder::BySrc,
+        AdjDirection::In => varve_index::SortOrder::ByDst,
+    };
     let mut blocks: Vec<Vec<Event>> = Vec::new();
     for trie in &tries {
         let key = keys::adj_data_key(graph, EDGES_TABLE, family, &trie.entry.trie_key);
@@ -272,15 +289,18 @@ async fn edge_adjacency_impl(
             let bytes = store
                 .get_range(&key, page.offset..page.offset + page.len)
                 .await?;
-            for event in decode_events(&bytes)? {
-                let key_iid = match direction {
-                    AdjDirection::Out => event.src,
-                    AdjDirection::In => event.dst,
-                };
-                if anchor.is_none() || key_iid == anchor {
-                    block_events.push(event);
-                }
-            }
+            // Page pruning gets the lookup down to the ONE page that can hold
+            // the anchor's run; decoding that page whole would still cost
+            // O(page_rows) doc deserializations for an O(degree) answer, which
+            // is what made a block-resident traversal 30× a live-resident one
+            // (docs/plans/2026-07-28-degree-bound-lookups.md). Push the anchor
+            // into the decode so only its own rows are materialized.
+            let decoded = match anchor {
+                Some(node) => varve_index::decode_events_keyed(&bytes, sort_key, &|k| k == node)?,
+                None => decode_events(&bytes)?,
+            };
+            stats.record_page(decoded.len());
+            block_events.extend(decoded);
         }
         blocks.push(block_events);
     }
@@ -437,20 +457,30 @@ pub(crate) struct ReachableEdges {
 
 /// Anchor-reachable edge pruning (task 12): a bounded BFS from `anchor`
 /// collecting the SUPERSET of every edge that can lie on a qualifying path
-/// within the hop bound. `hops[i]` drives level `i`; the family MUST be
-/// homogeneous across levels (same label + direction + props — the only shape
-/// `Db::query`'s fast path selects), so a node is expanded at most once
-/// (`expanded`) and the collected edge set is independent of visit order.
+/// within the hop bound. `hops[i]` drives level `i`.
 ///
-/// Superset proof (homogeneous hops, `hops.len()` levels): any qualifying path
-/// `anchor = n0 -e0-> n1 … -e_{k-1}-> nk` reaches each `ni` (i < k) at shortest
-/// distance `di ≤ i ≤ hops.len()-1`, so `ni` enters the frontier at level
-/// `di ≤ hops.len()-1` and is expanded (first time), collecting ALL its
-/// matching edges — including `ei`. Thus every edge on a qualifying path is
-/// collected; extra edges are harmless (the join keys + per-element predicates
-/// select the right rows). Each per-node lookup reuses the anchored
-/// `edge_adjacency_impl`, so visibility is resolved at `bounds` exactly as the
-/// full scan resolves it — bitemporal correctness is preserved.
+/// Superset proof (layered, `hops.len()` levels). Let `F0 = {anchor}` and
+/// `F(i+1)` = the endpoints reached by expanding every node of `Fi` under
+/// `hops[i]`. For any qualifying path `anchor = n0 -e0-> n1 … -e_{k-1}-> nk`,
+/// `ni ∈ Fi` by induction: `n0 ∈ F0`, and if `ni ∈ Fi` then `ei` is a
+/// `hops[i]`-matching edge incident to `ni`, so expanding `ni` at level `i`
+/// COLLECTS `ei` and puts `n(i+1)` in `F(i+1)`. Hence every edge on a
+/// qualifying path is collected; extra edges are harmless (the join keys +
+/// per-element predicates select the right rows). Each per-node lookup reuses
+/// the anchored `edge_adjacency_impl`, so visibility is resolved at `bounds`
+/// exactly as the full scan resolves it — bitemporal correctness is preserved.
+///
+/// Dedup, and why it depends on homogeneity. The proof above needs each node of
+/// `Fi` expanded *at level i*. When every hop is the same family (label +
+/// direction + props), expanding a node ONCE collects the same edge set it
+/// would contribute at any later level, so a global `expanded` set is sound and
+/// keeps the walk linear in reachable nodes. When hops differ — the fixed path
+/// `(a)<-[:E]-(b)-[:E]->(c)` mixes directions — a node expanded at an `In`
+/// level would be skipped at a later `Out` level and its outgoing edges lost,
+/// breaking the superset. So heterogeneous hops dedup PER LEVEL instead: a node
+/// may be expanded once per level (bounded by `hops.len()` expansions), which
+/// is the price of supporting the shape at all. `node_budget` counts
+/// expansions either way, so the bound is unchanged.
 ///
 /// `batch_label` selects the single label the batch is built under (all fixed
 /// `Edge` specs share it); pass `None` to skip the batch (a quantified hop
@@ -481,7 +511,16 @@ pub(crate) async fn reachable_edges(
     overlay: Option<&Overlay>,
 ) -> Result<ReachableEdges, EngineError> {
     let mut frontier: Vec<Iid> = vec![anchor];
+    // Sound only when one expansion serves every level — see the dedup note on
+    // this function. `props` compare by value; `HopSpec` is `Copy`, so this is
+    // a cheap scan of at most `hops.len()` entries.
+    let homogeneous = hops.windows(2).all(|w| {
+        w[0].label == w[1].label && w[0].direction == w[1].direction && w[0].props == w[1].props
+    });
     let mut expanded: HashSet<Iid> = HashSet::new();
+    // Expansions across ALL levels, so `node_budget` bounds total work rather
+    // than distinct nodes (identical to `expanded.len()` when homogeneous).
+    let mut expansions: usize = 0;
     let mut entries: Vec<AdjacencyEntry> = Vec::new();
     // One event list per surviving edge, deduped by iid (a homogeneous walk
     // can re-encounter the same edge). `BTreeMap` keeps batch rows in a stable
@@ -494,11 +533,17 @@ pub(crate) async fn reachable_edges(
         }
         let mut next_frontier: Vec<Iid> = Vec::new();
         let mut next_seen: HashSet<Iid> = HashSet::new();
+        // Heterogeneous hops start each level with a fresh dedup set, so a node
+        // already expanded under a DIFFERENT family is expanded again here.
+        if !homogeneous {
+            expanded.clear();
+        }
         for node in std::mem::take(&mut frontier) {
             if !expanded.insert(node) {
                 continue;
             }
-            if expanded.len() > node_budget {
+            expansions += 1;
+            if expansions > node_budget {
                 return Err(traversal_budget_exhausted("node", node_budget));
             }
             let (node_entries, node_edges) = edge_adjacency_impl(
@@ -531,8 +576,13 @@ pub(crate) async fn reachable_edges(
         }
         frontier = next_frontier;
     }
-    // A homogeneous walk expands each node once, so entries are already unique
-    // per edge; sort+dedup keeps the invariant explicit and deterministic.
+    // A homogeneous walk expands each node once, so entries are already unique;
+    // a heterogeneous one can re-collect the same edge at another level (and
+    // with `node`/`neighbor` swapped, if that level runs the other direction).
+    // Sort+dedup makes the output order deterministic either way. `entries`
+    // feeds only the reachable NODE set for a fixed path — where a duplicate or
+    // a swapped orientation is immaterial, both endpoints land in the set — and
+    // the adjacency for a quantified hop, which is always homogeneous.
     entries.sort_by_key(|e| (e.node, e.neighbor, e.edge));
     entries.dedup();
 

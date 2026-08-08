@@ -507,15 +507,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Phase 2d: residency. A traversal timing means nothing without it — the
+    // SAME query on the SAME store measures ~19 ms with its rows in the
+    // writer's live table and ~460 ms with them in flushed blocks, and two
+    // honest reports that omit this read as a contradiction
+    // (docs/plans/2026-07-28-degree-bound-lookups.md). Always cite the state.
+    let residency = db.metrics();
+    println!(
+        "residency: live_rows={} live_bytes={} persisted_tries={} ({})",
+        residency.live_rows,
+        residency.live_bytes,
+        residency.persisted_tries,
+        if residency.live_rows == 0 {
+            "block-resident: every row below is read from flushed blocks"
+        } else {
+            "MIXED: an unflushed live tail serves part of every query below"
+        }
+    );
+
     // Phase 3: 2-hop friend-of-friend — cold once, then warm.
+    let before_two_hop = db.metrics();
     let cold_started = Instant::now();
     let two_hop_rows = two_hop(&db, principal).await?;
     let two_hop_cold = cold_started.elapsed();
     let two_hop_warm = warm_timings(|| two_hop(&db, principal), two_hop_rows, "2-hop").await?;
     let two_hop_warm_avg = avg(&two_hop_warm);
+    let warm_runs = two_hop_warm.len() as u64;
     let two_hop_warm_p50 = p50(two_hop_warm);
     println!(
         "2-hop ({two_hop_rows} rows) cold {two_hop_cold:.2?} warm avg {two_hop_warm_avg:.2?} p50 {two_hop_warm_p50:.2?}"
+    );
+    // Block work for the cold 2-hop plus its warm repeats, per query: events
+    // per page is the degree-bound check — an anchored lookup should decode a
+    // handful of rows out of each ~1024-row page, not the whole page.
+    let after_two_hop = db.metrics();
+    let queries = 1 + warm_runs;
+    println!(
+        "2-hop block work: {:.1} pages/query, {:.1} events/query ({:.1} events/page)",
+        (after_two_hop.block_pages_read - before_two_hop.block_pages_read) as f64 / queries as f64,
+        (after_two_hop.block_events_decoded - before_two_hop.block_events_decoded) as f64
+            / queries as f64,
+        (after_two_hop.block_events_decoded - before_two_hop.block_events_decoded) as f64
+            / (after_two_hop.block_pages_read - before_two_hop.block_pages_read).max(1) as f64,
     );
 
     // Phase 4: -[:KNOWS]->{1,3} — same shape.

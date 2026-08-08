@@ -68,7 +68,16 @@ pub struct DegenerateQuery<'a> {
     pub ret: &'a ReturnClause,
 }
 
-pub fn degenerate_query(stmt: &QueryStmt) -> Result<DegenerateQuery<'_>, PlanError> {
+/// The MATCH-shape subset of [`degenerate_query`]: one non-optional `MATCH`,
+/// no unions — but **tolerant of `RETURN` modifiers**.
+///
+/// `DISTINCT`, `ORDER BY`, `SKIP` and `LIMIT` are applied after the pattern has
+/// been matched, so they cannot change which entities the pattern binds.
+/// Callers that only need the pattern structure (the anchored pruning aid in
+/// `plan_fast_path`, temporal-bound derivation) must use this; callers that
+/// will *execute* the whole statement through a path that would silently drop
+/// those modifiers must use [`degenerate_query`].
+pub fn match_shape(stmt: &QueryStmt) -> Result<DegenerateQuery<'_>, PlanError> {
     if !stmt.unions.is_empty() {
         return Err(PlanError::Unsupported(PIPELINE_UNSUPPORTED.into()));
     }
@@ -81,18 +90,23 @@ pub fn degenerate_query(stmt: &QueryStmt) -> Result<DegenerateQuery<'_>, PlanErr
     else {
         return Err(PlanError::Unsupported(PIPELINE_UNSUPPORTED.into()));
     };
-    let ret = &stmt.first.ret;
-    if ret.distinct || !ret.order_by.is_empty() || ret.skip.is_some() || ret.limit.is_some() {
-        return Err(PlanError::Unsupported(PIPELINE_UNSUPPORTED.into()));
-    }
 
     Ok(DegenerateQuery {
         query_temporal: &stmt.first.temporal,
         match_temporal: temporal,
         paths,
         where_clause,
-        ret,
+        ret: &stmt.first.ret,
     })
+}
+
+pub fn degenerate_query(stmt: &QueryStmt) -> Result<DegenerateQuery<'_>, PlanError> {
+    let query = match_shape(stmt)?;
+    let ret = query.ret;
+    if ret.distinct || !ret.order_by.is_empty() || ret.skip.is_some() || ret.limit.is_some() {
+        return Err(PlanError::Unsupported(PIPELINE_UNSUPPORTED.into()));
+    }
+    Ok(query)
 }
 
 pub fn effective_bounds(stmt: &QueryStmt, now: Instant) -> Result<TemporalBounds, PlanError> {

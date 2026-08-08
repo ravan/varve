@@ -47,5 +47,16 @@ pub struct EngineMetricsSnapshot {
     /// each scope (a table's primary tries, or an adjacency family) with
     /// more than one persisted trie has debt equal to all but its newest.
     pub compaction_debt_tries: u64,
+    /// Block data pages read since start, after page pruning. Counts pages the
+    /// read paths actually fetched, hit or miss in the block cache.
+    pub block_pages_read: u64,
+    /// Events materialized from those pages: an anchored decode filters on the
+    /// key column before building a row, so rows it rejects are not counted.
+    /// Together with `block_pages_read` this is the degree-bound signal — an
+    /// anchored lookup averaging ~`PAGE_LIMIT` events per page is scanning
+    /// whole pages to answer a point question, which is what makes a
+    /// block-resident traversal cost many times a live-resident one. Pair it
+    /// with `live_bytes` when reading traversal latency.
+    pub block_events_decoded: u64,
     pub cache_tiers: Vec<CacheTierStats>,
 }

@@ -4,6 +4,7 @@
 //! structs (dense unions) arrive with slice 8's compaction meta (slice-4 plan,
 //! decision 2: blocks reuse this payload codec).
 
+use crate::block::SortOrder;
 use crate::event::{Event, Op};
 use crate::live::IndexError;
 use arrow::array::{
@@ -390,8 +391,42 @@ pub(crate) fn catch_arrow_panic<T>(decode: impl FnOnce() -> T) -> std::thread::R
 }
 
 pub fn decode_events(bytes: &[u8]) -> Result<Vec<Event>, IndexError> {
+    decode_events_where(bytes, None)
+}
+
+/// Decodes ONLY the events whose sort key `admits`, without materializing the
+/// rest — the degree-bound read path for anchored lookups.
+///
+/// `key` names the column the caller's key lives in, spelled as a
+/// [`SortOrder`] because for a block page the two coincide: the primary table
+/// is `_iid`-sorted and anchored by `_iid`, the adjacency families are
+/// `_src_iid`/`_dst_iid`-sorted and anchored by the same endpoint. Nothing here
+/// depends on the page actually being sorted. The filter runs against the raw
+/// Arrow key column: a rejected row costs one 16-byte compare, while an
+/// admitted row pays the full `Event` build including `decode_put_payload`.
+/// That is the whole point — a single-anchor lookup against a
+/// [`crate::DEFAULT_PAGE_ROWS`]-row page used to deserialize every doc in the
+/// page to find the two rows it wanted (~313 µs/page measured), and now pays
+/// only a bytes-only pass plus its own degree.
+///
+/// A null `_src_iid`/`_dst_iid` has no key and is never admitted, matching the
+/// `key == Some(anchor)` test the anchored callers used to apply after decoding.
+/// The column pass is linear rather than a binary search deliberately: at 1024
+/// rows it costs ~1 µs against the ~12 µs of Arrow IPC framing around it, and a
+/// linear scan stays correct if a page's sortedness invariant is ever broken.
+pub fn decode_events_keyed(
+    bytes: &[u8],
+    key: SortOrder,
+    admits: &dyn Fn(Iid) -> bool,
+) -> Result<Vec<Event>, IndexError> {
+    decode_events_where(bytes, Some((key, admits)))
+}
+
+type KeyFilter<'a> = Option<(SortOrder, &'a dyn Fn(Iid) -> bool)>;
+
+fn decode_events_where(bytes: &[u8], filter: KeyFilter<'_>) -> Result<Vec<Event>, IndexError> {
     validate_ipc_framing(bytes)?;
-    match catch_arrow_panic(|| decode_events_uncaught(bytes)) {
+    match catch_arrow_panic(|| decode_events_uncaught(bytes, filter)) {
         Ok(result) => result,
         Err(_) => Err(IndexError::Codec(
             "arrow IPC decode panicked (corrupt input)".into(),
@@ -399,7 +434,31 @@ pub fn decode_events(bytes: &[u8]) -> Result<Vec<Event>, IndexError> {
     }
 }
 
-fn decode_events_uncaught(bytes: &[u8]) -> Result<Vec<Event>, IndexError> {
+/// The key column's value for one row, or `None` when the column is null
+/// there (nodes carry no endpoints).
+fn key_at(
+    row: usize,
+    key: SortOrder,
+    iids: &FixedSizeBinaryArray,
+    src_col: &FixedSizeBinaryArray,
+    dst_col: &FixedSizeBinaryArray,
+) -> Option<Iid> {
+    let col = match key {
+        SortOrder::ByIid => iids,
+        SortOrder::BySrc => src_col,
+        SortOrder::ByDst => dst_col,
+    };
+    if col.is_null(row) {
+        return None;
+    }
+    let mut b = [0u8; 16];
+    // A 16-byte column: any other width is a schema violation `downcast`
+    // would already have rejected.
+    b.copy_from_slice(col.value(row));
+    Some(Iid::from_bytes(b))
+}
+
+fn decode_events_uncaught(bytes: &[u8], filter: KeyFilter<'_>) -> Result<Vec<Event>, IndexError> {
     let reader = StreamReader::try_new(std::io::Cursor::new(bytes), None)?;
     if reader.schema() != event_schema() {
         return Err(codec_err("event batch schema mismatch"));
@@ -416,6 +475,12 @@ fn decode_events_uncaught(bytes: &[u8]) -> Result<Vec<Event>, IndexError> {
         let ops = downcast::<UInt8Array>(&batch, 6)?;
         let payloads = downcast::<BinaryArray>(&batch, 7)?;
         for row in 0..batch.num_rows() {
+            if let Some((key, admits)) = filter {
+                match key_at(row, key, iids, src_col, dst_col) {
+                    Some(k) if admits(k) => {}
+                    _ => continue,
+                }
+            }
             let iid_bytes: [u8; 16] = iids
                 .value(row)
                 .try_into()
@@ -818,6 +883,79 @@ mod tests {
             let bytes = encode_events(&events).unwrap();
             prop_assert_eq!(decode_events(&bytes).unwrap(), events);
         }
+
+        /// The degree-bound contract: a keyed decode is EXACTLY the whole-page
+        /// decode filtered on the key column. Anything else would make an
+        /// anchored lookup disagree with the unanchored scan it must match.
+        #[test]
+        fn keyed_decode_equals_filtered_full_decode(
+            events in proptest::collection::vec(keyed_event_strategy(), 0..24),
+            wanted in 0..4u8,
+        ) {
+            let bytes = encode_events(&events).unwrap();
+            let want = Iid::derive("g", "nodes", &[wanted]);
+            for key in [SortOrder::ByIid, SortOrder::BySrc, SortOrder::ByDst] {
+                let expected: Vec<Event> = decode_events(&bytes)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|e| {
+                        let k = match key {
+                            SortOrder::ByIid => Some(e.iid),
+                            SortOrder::BySrc => e.src,
+                            SortOrder::ByDst => e.dst,
+                        };
+                        k == Some(want)
+                    })
+                    .collect();
+                let keyed = decode_events_keyed(&bytes, key, &|k| k == want).unwrap();
+                prop_assert_eq!(keyed, expected);
+            }
+        }
+    }
+
+    /// Like [`event_strategy`] but with iids and endpoints drawn from a small
+    /// shared pool, so a keyed decode actually hits — and with endpoints
+    /// sometimes null, the case a keyed decode must treat as a non-match.
+    fn keyed_event_strategy() -> impl Strategy<Value = Event> {
+        (
+            event_strategy(),
+            0..4u8,
+            proptest::option::of(0..4u8),
+            proptest::option::of(0..4u8),
+        )
+            .prop_map(|(event, entity, src, dst)| Event {
+                iid: Iid::derive("g", "nodes", &[entity]),
+                src: src.map(|n| Iid::derive("g", "nodes", &[n])),
+                dst: dst.map(|n| Iid::derive("g", "nodes", &[n])),
+                ..event
+            })
+    }
+
+    #[test]
+    fn keyed_decode_never_admits_a_null_endpoint() {
+        // A nodes-table page has null src/dst: an adjacency-keyed decode of it
+        // must yield nothing rather than treating "no key" as a wildcard.
+        let events = vec![Event {
+            src: None,
+            dst: None,
+            ..edge_event(1)
+        }];
+        let bytes = encode_events(&events).unwrap();
+        let any = Iid::derive("g", "nodes", &[1]);
+        assert!(decode_events_keyed(&bytes, SortOrder::BySrc, &|_| true)
+            .unwrap()
+            .is_empty());
+        assert!(decode_events_keyed(&bytes, SortOrder::ByDst, &|_| true)
+            .unwrap()
+            .is_empty());
+        // ... while the same page keyed by its real sort column still resolves.
+        assert_eq!(
+            decode_events_keyed(&bytes, SortOrder::ByIid, &|k| k == events[0].iid).unwrap(),
+            events
+        );
+        assert!(decode_events_keyed(&bytes, SortOrder::ByIid, &|k| k == any)
+            .unwrap()
+            .is_empty());
     }
 
     fn edge_event(n: u8) -> Event {

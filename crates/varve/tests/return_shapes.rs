@@ -360,6 +360,95 @@ async fn return_distinct_dedupes() {
     assert_eq!(string_column(&batches, "city"), vec!["London", "Paris"]);
 }
 
+/// B1 (gallery blast-radius spike, 2026-07-28): `RETURN DISTINCT` over a
+/// pattern anchored on `_id` equality failed with a bare internal error, while
+/// the same projection over an unanchored scan — or the same anchor without
+/// `DISTINCT` — worked. `_id` anchoring plus `DISTINCT` is an everyday shape.
+#[tokio::test]
+async fn return_distinct_works_with_id_anchored_match() {
+    let db = people_db().await;
+
+    let batches = db
+        .query("MATCH (n:Person {_id: 1}) RETURN DISTINCT n.city AS city")
+        .await
+        .unwrap();
+
+    assert_eq!(string_column(&batches, "city"), vec!["London"]);
+}
+
+#[tokio::test]
+async fn return_distinct_works_with_id_equality_in_where() {
+    let db = people_db().await;
+
+    let batches = db
+        .query("MATCH (n:Person) WHERE n._id = 1 RETURN DISTINCT n.city AS city")
+        .await
+        .unwrap();
+
+    assert_eq!(string_column(&batches, "city"), vec!["London"]);
+}
+
+/// Same root cause as [`return_distinct_works_with_id_anchored_match`]: the
+/// anchored fast path bails on any shape `degenerate_query` refuses, and
+/// `LIMIT`/`ORDER BY`/`SKIP` are on that list. An `_id` lookup with `LIMIT` is
+/// about as common as queries get.
+#[tokio::test]
+async fn limit_works_with_id_anchored_match() {
+    let db = people_db().await;
+
+    let batches = db
+        .query("MATCH (n:Person {_id: 1}) RETURN n.city AS city LIMIT 10")
+        .await
+        .unwrap();
+
+    assert_eq!(string_column(&batches, "city"), vec!["London"]);
+}
+
+#[tokio::test]
+async fn order_by_works_with_id_anchored_match() {
+    let db = people_db().await;
+
+    let batches = db
+        .query("MATCH (n:Person {_id: 1}) RETURN n.city AS city ORDER BY city")
+        .await
+        .unwrap();
+
+    assert_eq!(string_column(&batches, "city"), vec!["London"]);
+}
+
+#[tokio::test]
+async fn skip_works_with_id_anchored_match() {
+    let db = people_db().await;
+
+    let batches = db
+        .query("MATCH (n:Person {_id: 1}) RETURN n.city AS city SKIP 0")
+        .await
+        .unwrap();
+
+    assert_eq!(string_column(&batches, "city"), vec!["London"]);
+}
+
+/// The anchored fast path only engages when the pattern has at least one hop,
+/// so the traversal shape must keep working too — this is the gallery
+/// blast-radius query in miniature.
+#[tokio::test]
+async fn distinct_and_limit_work_with_id_anchored_traversal() {
+    let db = Db::memory();
+    db.execute("INSERT (:Person {_id: 1, name: 'Ada'})-[:KNOWS {_id: 10}]->(:Person {_id: 2, name: 'Bob', city: 'Paris'})")
+        .await
+        .unwrap();
+
+    let batches = db
+        .query(
+            "MATCH (a:Person {_id: 1})-[:KNOWS]->(b:Person) \
+             RETURN DISTINCT b.city AS city LIMIT 5",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(string_column(&batches, "city"), vec!["Paris"]);
+}
+
 #[tokio::test]
 async fn order_by_multi_key_asc_desc_with_skip_limit() {
     let db = people_db().await;

@@ -268,6 +268,70 @@ async fn anchored_fast_path_keeps_enforcement_fixed_hops() {
     assert_eq!(rows(&batches), 0);
 }
 
+/// Edge-PROPERTY shapes reach the fixed-hop fast path too (they used to bail
+/// to the full scan, so enforcement over the pruned edge batch was never
+/// exercised for them). The pruned batch is built under the same `Visible`
+/// filter as the full edge scan, and endpoint visibility still comes from the
+/// node elements' own filtered scans — so both spellings must agree with the
+/// unpruned form, including when the qualifying chain runs through the
+/// invisible `Person:Secret` intermediate.
+#[tokio::test]
+async fn anchored_fast_path_keeps_enforcement_with_edge_props() {
+    let db = secured_db().await;
+    seed_chain(&db).await;
+    grant_reader(&db).await;
+
+    // `e3` is p1→d, whose far endpoint `d` is dual-labeled and so invisible to
+    // a Person-only grant; `e1` is p1→p2, fully visible.
+    let anchored_where = "MATCH (a:Person {_id: 'p1'})-[e:KNOWS]->(x:Person)-[:KNOWS]->(c:Person) \
+                          WHERE e._id = 'e3' RETURN c.name";
+    let full_where = "MATCH (a:Person)-[e:KNOWS]->(x:Person)-[:KNOWS]->(c:Person) \
+                      WHERE a.name = 'P1' AND e._id = 'e3' RETURN c.name";
+
+    // Admin control: the chain through `d` reaches P4.
+    let batches = query_as(&db, "root", anchored_where).await.unwrap();
+    assert_eq!(strings(&batches, "c.name"), vec!["P4"]);
+
+    // Person-only grant: `d` is invisible, so the chain is cut — identically
+    // on the pruned and the full path.
+    let batches = query_as(&db, "ada", anchored_where).await.unwrap();
+    assert_eq!(rows(&batches), 0);
+    let batches = query_as(&db, "ada", full_where).await.unwrap();
+    assert_eq!(rows(&batches), 0);
+
+    // The inline-map spelling of a visible chain, both paths.
+    let anchored_inline =
+        "MATCH (a:Person {_id: 'p1'})-[:KNOWS {_id: 'e1'}]->(x:Person)-[:KNOWS]->(c:Person) \
+         RETURN c.name";
+    let full_inline = "MATCH (a:Person)-[:KNOWS {_id: 'e1'}]->(x:Person)-[:KNOWS]->(c:Person) \
+                       WHERE a.name = 'P1' RETURN c.name";
+    let batches = query_as(&db, "ada", anchored_inline).await.unwrap();
+    assert_eq!(strings(&batches, "c.name"), vec!["P3"]);
+    let batches = query_as(&db, "ada", full_inline).await.unwrap();
+    assert_eq!(strings(&batches, "c.name"), vec!["P3"]);
+
+    // Projecting an edge property of a non-granted type leaks nothing: the
+    // plan short-circuits to an empty batch before the BFS.
+    let batches = query_as(
+        &db,
+        "ada",
+        "MATCH (a:Person {_id: 'p1'})-[e:MANAGES]->(b:Person) RETURN e._id",
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows(&batches), 0);
+
+    // ...and filtering on one cannot resurrect it.
+    let batches = query_as(
+        &db,
+        "ada",
+        "MATCH (a:Person {_id: 'p1'})-[:MANAGES {_id: 'e5'}]->(b:Person) RETURN b.name",
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows(&batches), 0);
+}
+
 /// Same cross-check for the quantified-hop fast path (`QuantifiedAdjacency`):
 /// endpoint visibility is enforced on the pruned adjacency itself, computed
 /// over the anchor-reachable set instead of the whole graph.

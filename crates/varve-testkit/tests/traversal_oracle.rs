@@ -251,6 +251,98 @@ proptest! {
     }
 }
 
+/// All end nodes of a FIXED path whose hop `i` runs in `dirs[i]`, enumerated
+/// with multiplicity — one entry per distinct path, which is what a chain of
+/// joins produces. Written from scratch over `GraphOracle::neighbors` (it does
+/// not call `expand_paths`, and unlike `walk` it takes a per-hop direction).
+fn fixed_path_ends(
+    oracle: &GraphOracle,
+    start: Iid,
+    label: &str,
+    dirs: &[OracleDir],
+    valid: Instant,
+    system: Instant,
+) -> Vec<Iid> {
+    let mut frontier = vec![start];
+    for dir in dirs {
+        let mut next = Vec::new();
+        for node in &frontier {
+            for (neighbor, _edge) in oracle.neighbors(*node, label, *dir, valid, system) {
+                next.push(neighbor);
+            }
+        }
+        frontier = next;
+    }
+    frontier
+}
+
+/// `(n0:P)<-[:K]-(n1:P)-[:K]->(n2:P)` for `dirs = [In, Out]`, anchored on `n0`.
+fn fixed_path_gql(dirs: &[OracleDir], anchor_id: i64) -> String {
+    let mut gql = "MATCH (n0:P)".to_string();
+    for (i, dir) in dirs.iter().enumerate() {
+        gql.push_str(match dir {
+            OracleDir::Out => "-[:K]->",
+            OracleDir::In => "<-[:K]-",
+        });
+        gql.push_str(&format!("(n{}:P)", i + 1));
+    }
+    gql.push_str(&format!(
+        " WHERE n0._id = {anchor_id} RETURN n{}._id AS _id",
+        dirs.len()
+    ));
+    gql
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(e2e_cases()))]
+
+    /// Mixed-direction FIXED paths must match the oracle. This is the shape the
+    /// anchored fast path newly prunes: hops share a label but may differ in
+    /// direction, so the BFS dedupes per level rather than globally. A global
+    /// dedup silently drops edges here (a node expanded at an `In` level would
+    /// be skipped at a later `Out` level), which shows up as a MISSING row
+    /// rather than an error — hence a property test rather than examples.
+    #[test]
+    fn db_mixed_direction_fixed_path_matches_oracle(
+        graph in varve_testkit::oracle::arb_graph(DB_E2E_MAX_NODES, DB_E2E_MAX_EDGES),
+        anchor_pick in any::<prop::sample::Index>(),
+        dirs in prop::collection::vec(
+            prop::bool::ANY.prop_map(|out| if out { OracleDir::Out } else { OracleDir::In }),
+            1..=3,
+        ),
+    ) {
+        let _guard = DB_PROPERTY_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        db_runtime().block_on(async {
+            let db = varve::Db::memory();
+            for program in batched_programs(&graph.inserts, DB_FIXTURE_PROGRAM_BATCH) {
+                db.execute(&program).await.unwrap();
+            }
+            let anchor_id = graph.node_ids[anchor_pick.index(graph.node_ids.len())];
+            let anchor = Iid::derive(
+                "default",
+                "nodes",
+                &varve_types::Value::Int(anchor_id).id_bytes().unwrap(),
+            );
+
+            let gql = fixed_path_gql(&dirs, anchor_id);
+            let mut got: Vec<i64> = column_i64(&db.query(&gql).await.unwrap(), "_id");
+            got.sort_unstable();
+
+            let (valid, system) = probe_at(None);
+            let mut want: Vec<i64> =
+                fixed_path_ends(&graph.oracle, anchor, "K", &dirs, valid, system)
+                    .into_iter()
+                    .map(|end| graph.node_id(end))
+                    .collect();
+            want.sort_unstable();
+            prop_assert_eq!(got, want, "gql {}", gql);
+            Ok(())
+        })?;
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(flush_cases()))]
 

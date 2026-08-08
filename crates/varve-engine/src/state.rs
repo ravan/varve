@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use varve_index::block::PageMeta;
 use varve_index::LiveTable;
@@ -106,6 +107,31 @@ impl TableState {
     }
 }
 
+/// Block read-path counters: how much a query actually pulled out of flushed
+/// blocks. `block_pages_read` counts data pages that survived page pruning;
+/// `block_events_decoded` counts the events those pages MATERIALIZED — an
+/// anchored decode applies its key filter inside the decode, so a rejected row
+/// is never built and never counted. The ratio between the two is therefore
+/// the degree-bound invariant: an anchored lookup materializes its own degree,
+/// not [`varve_types::PAGE_LIMIT`] rows per page
+/// (`docs/plans/2026-07-28-degree-bound-lookups.md`). Plain `Relaxed` atomics,
+/// read under the same lock queries already take, so they cost nothing and
+/// never touch the object store.
+#[derive(Debug, Default)]
+pub(crate) struct ScanStats {
+    pub block_pages_read: AtomicU64,
+    pub block_events_decoded: AtomicU64,
+}
+
+impl ScanStats {
+    /// Records one page read that yielded `events` materialized events.
+    pub fn record_page(&self, events: usize) {
+        self.block_pages_read.fetch_add(1, Ordering::Relaxed);
+        self.block_events_decoded
+            .fetch_add(events as u64, Ordering::Relaxed);
+    }
+}
+
 pub(crate) struct GraphsState {
     pub graphs: BTreeMap<String, TableState>,
     pub catalog_graphs: BTreeMap<Iid, String>,
@@ -113,6 +139,9 @@ pub(crate) struct GraphsState {
     /// (writer apply and follower replay alike) — the exact invalidation key
     /// for the per-subject [`crate::security::SecurityContext`] cache.
     pub security_epoch: u64,
+    /// Shared out of the read lock (never reset) so every read path can count
+    /// its block work without a new parameter on the scan signatures.
+    pub scan_stats: Arc<ScanStats>,
 }
 
 impl GraphsState {
@@ -128,6 +157,7 @@ impl GraphsState {
             graphs,
             catalog_graphs: BTreeMap::new(),
             security_epoch: 0,
+            scan_stats: Arc::new(ScanStats::default()),
         }
     }
 
