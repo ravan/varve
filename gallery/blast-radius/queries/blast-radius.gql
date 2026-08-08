@@ -1,0 +1,10 @@
+MATCH (vid:VulnID {_id: 'vuln:osv/cve-2021-44228'})
+        <-[:E {kind: 'CertifyVulnVulnerability'}]- (cv:CertifyVuln)
+        <-[:E {kind: 'CertifyVulnSubject'}]-       (bad:PkgVersion)
+        <-[:E {kind: 'IsDependencyObject'}]-       (d:IsDependency)
+        <-[:E {kind: 'IsDependencySubject'}]-      (product:PkgVersion)
+         -[:E {kind: 'IsOccurrenceSubject'}]->     (occ:IsOccurrence)
+         -[:E {kind: 'IsOccurrenceArtifact'}]->    (art:Artifact)
+         -[:E {kind: 'HasSbomSubject'}]->          (s:HasSBOM)
+RETURN DISTINCT product._id AS product, s.uri AS sbom
+ORDER BY product

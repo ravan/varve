@@ -27,3 +27,7 @@ docs/book/book/
 /.agentenv
 /.kata.toml
 /explore/.playwright-cli
+/gallery/blast-radius/corpus/expanded/
+/gallery/blast-radius/corpus/raw/
+# T_ship handoff from demo.sh --keep to explore.sh; describes live volumes only.
+/gallery/blast-radius/.demo-state

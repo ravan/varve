@@ -1,0 +1,171 @@
+# Blast-radius gallery. A single-node Garage (S3) cluster backs a varve writer +
+# one query-only node over a shared object-store log. GUAC's guacgql runs its
+# in-tree `varve` backend against the writer, and guacone (baked into the same
+# image) ingests a 12-image SBOM corpus and then a CVE-2021-44228 attestation
+# backdated to ship day. `demo.sh` orchestrates the flow.
+#
+# All tokens/credentials here are DEMO-ONLY (see deploy/*.toml, gallery *.toml).
+#
+# TWO guacgql SERVICES, ON PURPOSE. The varve backend lives inside the GraphQL
+# *server*, so `--varve-valid-from` is a property of the running server process,
+# not of a request. `guacone` is only a client choosing a `--gql-addr`. So:
+#
+#   :8020  guacgql       --varve-valid-from=2021-12-08  -> corpus, ship day
+#   :8022  guacgql-past  --varve-valid-from=2021-12-10  -> CVE facts, CVE pub day
+#
+# BOTH are backdated, and the two dates are the whole demo. The images were
+# built and shipped before Log4Shell was public, so the corpus is valid from
+# 2021-12-08 and the CVE only becomes valid at 2021-12-10T10:15Z. Sweeping
+# valid-time across that gap is what makes the blast radius appear, and it is
+# what `explore.sh` drives from Varve Explorer's timeline. Ingesting the corpus
+# at valid-from = now instead would make Q4 return zero rows for the wrong
+# reason: nothing at all would have been valid in 2021, rather than
+# specifically "the CVE was not true yet".
+#
+# NOT 8021: on macOS that port is held by a launchd socket-activated service
+# (the FTP proxy), so Docker fails with "bind: address already in use" while
+# `lsof` shows nothing — launchd holds the socket and needs sudo to reveal it.
+#
+# Both write to the SAME writer and the same graph. Running two servers is
+# cheaper and less fragile than restarting one mid-demo with a different flag.
+#
+# HOST PORTS ARE DELIBERATELY DISJOINT from ../guac (8080/8081/8010) so both
+# galleries can be up at once; the compose project name differs too (directory
+# name), so containers and volumes never collide.
+
+x-garage-image: &garage_image dxflrs/garage:v1.0.1
+
+# Shared build for the two varved nodes: built once from the repo root so the
+# image carries the current engine, tagged, and reused.
+x-varved: &varved
+  build:
+    context: ../..
+    dockerfile: Dockerfile
+  image: varve:blast-radius
+  command: ["--config", "/etc/varve/varve.toml"]
+  environment:
+    RUST_LOG: info
+  depends_on:
+    garage-init:
+      condition: service_completed_successfully
+  restart: "no"
+
+# Shared definition for the two guacgql servers. They differ ONLY in `command`
+# (the valid-from flag) and the published port, so the image builds once.
+x-guacgql: &guacgql
+  # Dockerfile is SHARED with ../guac (both build the same guacgql+guacone pair
+  # from the same fork); only the TOMLs are copied. Path is relative to context.
+  build:
+    context: ../../refs/guac
+    dockerfile: ../../gallery/guac/Dockerfile.guac
+  image: guac-varve:blast-radius
+  volumes:
+    - ./corpus/expanded:/corpus:ro
+    - ./cve:/cve:ro
+  healthcheck:
+    # guacgql serves only POST /query (no GET / playground in this build).
+    test:
+      - "CMD"
+      - "curl"
+      - "-fsS"
+      - "-X"
+      - "POST"
+      - "http://localhost:8010/query"
+      - "-H"
+      - "Content-Type: application/json"
+      - "-d"
+      - '{"query":"{__typename}"}'
+    interval: 3s
+    timeout: 3s
+    retries: 30
+  depends_on:
+    garage-init:
+      condition: service_completed_successfully
+    writer:
+      condition: service_started
+  restart: "no"
+
+services:
+  garage:
+    image: *garage_image
+    volumes:
+      - ../../deploy/garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+    restart: "no"
+
+  # One-shot: forms the single-node layout, creates bucket `varve`, imports the
+  # fixed demo key, grants it, writes /shared/ready, then exits 0.
+  garage-init:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.garage-init
+      args:
+        GARAGE_IMAGE: *garage_image
+    image: varve-garage-init:blast-radius
+    volumes:
+      - ../../deploy/garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - shared:/shared
+    depends_on:
+      garage:
+        condition: service_started
+    restart: "no"
+
+  writer:
+    <<: *varved
+    volumes:
+      - ./varve-writer.toml:/etc/varve/varve.toml:ro
+    ports:
+      - "8090:8080"
+
+  query-1:
+    <<: *varved
+    volumes:
+      - ./varve-query.toml:/etc/varve/varve.toml:ro
+    ports:
+      - "8091:8080"
+    depends_on:
+      garage-init:
+        condition: service_completed_successfully
+      writer:
+        condition: service_started
+
+  # Corpus ingest, backdated to SHIP DAY. 2021-12-08 is the last full day before
+  # Log4Shell went public, and late enough that every image in corpus/MANIFEST
+  # already existed — the newest are the Elastic 7.16.0 images, released earlier
+  # that same month. So "we shipped these, and did not yet know" is literally
+  # true of the corpus's valid interval. The date is asserted by this demo, not
+  # derived from the SBOMs (README caveat 6). This is also the server demo.sh
+  # execs guacone from. Keep in step with demo.sh's CORPUS_VALID_FROM.
+  guacgql:
+    <<: *guacgql
+    command:
+      - "--gql-backend=varve"
+      - "--varve-addr=http://writer:8080"
+      - "--varve-token=varve-demo-token"
+      - "--gql-listen-port=8010"
+      - "--varve-valid-from=2021-12-08T00:00:00Z"
+    ports:
+      - "8020:8010"
+
+  # CVE ingest: same backend, same writer, but every statement it emits carries
+  # `VALID FROM TIMESTAMP '2021-12-10T10:15:00Z'`. That is what makes Q2 ("what
+  # did we know on ship day") differ from Q3 ("what was true on ship day").
+  # 2021-12-10 is CVE-2021-44228's publication date; it must stay in step with
+  # cve/cve-2021-44228.json's scanStartedOn (see cve/README.md).
+  guacgql-past:
+    <<: *guacgql
+    command:
+      - "--gql-backend=varve"
+      - "--varve-addr=http://writer:8080"
+      - "--varve-token=varve-demo-token"
+      - "--gql-listen-port=8010"
+      - "--varve-valid-from=2021-12-10T10:15:00Z"
+    ports:
+      - "8022:8010"
+
+volumes:
+  garage-meta:
+  garage-data:
+  shared:

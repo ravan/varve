@@ -1,0 +1,4 @@
+MATCH (a:Artifact) -[hss:E {kind: 'HasSbomSubject'}]-> (s:HasSBOM)
+RETURN a._iid, a._labels, a.digest,
+       hss._iid, hss._labels, hss._src_iid, hss._dst_iid, hss.kind,
+       s._iid, s._labels, s.uri

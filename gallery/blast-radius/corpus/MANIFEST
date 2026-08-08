@@ -1,0 +1,28 @@
+# varve blast-radius demo corpus
+#
+# Regenerate with: sh gallery/blast-radius/refresh-corpus.sh
+# syft 1.49.0, platform linux/amd64, SPDX files/ stripped.
+#
+# The AFFECTED/CONTROL column is derived from the log4j-core version
+# syft found inside each image, not from its tag. CVE-2021-44228
+# affects 2.0-beta9 through 2.14.1.
+#
+# The sha256 column is reproducible: re-running refresh-corpus.sh with the
+# same syft version yields byte-identical files. syft's per-run
+# documentNamespace UUID and creationInfo.created are normalised away to
+# make that true -- created reads 1970-01-01T00:00:00Z in every document
+# and is a placeholder, not a timestamp.
+#
+# file	sha256	image@index-digest	packages	log4j-core	verdict
+solr-8.11.0.spdx.json.gz	c11467ca12451083b06e0e1bd35384b8463aa3dc9c6ea1bf55a82cde16d26091	solr@sha256:66fe2feeba8c4afdea12c78a4f11218fadd81befc43f223a2f9267bf605a25d1	505	2.14.1	AFFECTED
+flink-1.14.0.spdx.json.gz	cb392b9fc4ed8054bc34466cff73025bcfb1e68eacc4755b15e1514c5fc6570e	flink@sha256:e8372e92cd7fa81bba9eda5c4b5eff18754acfca0ec1427a174a113fcfe36909	227	2.14.1	AFFECTED
+logstash-7.16.0.spdx.json.gz	39f624eab995f9b35962a3ff7abc003fa124de0a469fa7b91176d9d6c9127550	docker.elastic.co/logstash/logstash@sha256:f777d1b84ec679b64717087bdf9617785b05cc3414689e7bdef53d5d46528bc6	629	2.14.0,2.9.1	AFFECTED
+elasticsearch-7.16.0.spdx.json.gz	14d44686a6b84ba185c862224c68e59ca8a6a6cca2a1546880730b419ca63c77	docker.elastic.co/elasticsearch/elasticsearch@sha256:2cdefcb9754028f0b2c860cf9ec52be15c026f3aa23c22ec181e321c427aadc7	431	2.11.1	AFFECTED
+sonarqube-9.2.2.spdx.json.gz	8798f1c454800b972dfcdc3cd69385e7e1347ab2532eccb1aa0694b3be4a0be8	sonarqube@sha256:d5128e042b63b96ab3a580e51ae68d8f3c215ecd345f9c1d4cc65651126572fb	458	2.11.1	AFFECTED
+neo4j-4.4.0.spdx.json.gz	9ec0779c55ef64ce8feaef6da71f7fd886f6a0368a12e0878ffea98e5b982bb2	neo4j@sha256:d0f73347c6093e474580cecf2bf3fef8988cd219d749336d513f2605b3d19d56	367	2.14.1	AFFECTED
+druid-0.22.0.spdx.json.gz	64c55fcde35b8aa05299fba8da18931b32d3317128bdb008e09203c29f0500f7	apache/druid@sha256:626fd96a997361dce8452c68b28e935a2453153f0d743cf208a0b4355a4fc2c3	951	2.8.2	AFFECTED
+kibana-7.16.0.spdx.json.gz	b1b025a71f8d9e4b510c409c85fe0dedc96d1d09473d58b520fb8865d5b81ed5	docker.elastic.co/kibana/kibana@sha256:5817d0a144507fe6957615fc0ccb6b8254addcfdabeff958432f65ac6377d632	1422	-	CONTROL
+odoo-15.0.spdx.json.gz	e867b36b79ee9b9a6edc4e1a3e6b7fa28cd859c6c995d996d1b29f04ecaa7908	odoo@sha256:9843efa8a0c8fba20f81a97fd04339fe0cc49c3162485c3e8bc0447295434ac1	888	-	CONTROL
+jenkins-2.319.1.spdx.json.gz	9bd962148ad535dcdcf35a09d3d56e23dec91d422f064552ad387077e83de917	jenkins/jenkins@sha256:c1d02293a08ba69483992f541935f7639fb10c6c322785bdabaf7fa94cd5e732	442	-	CONTROL
+tomcat-9.0.55-jdk11.spdx.json.gz	03a9043118a135fa71ed5893654550489de5e229ec0f19bad9ba493f7bee4a95	tomcat@sha256:f80d091e4a086fc1253cdc04011b5cd3c6820e8df5ff3047b0175e105435ba68	230	-	CONTROL
+nginx-1.21.4.spdx.json.gz	2f5110966239285d1189a748eb76c2f2b3bc535b080b1ac728fc891df2829be4	nginx@sha256:366e9f1ddebdb844044c2fafd13b75271a9f620819370f8971220c2b330a9254	144	-	CONTROL

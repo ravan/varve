@@ -1,0 +1,17 @@
+MATCH (vid:VulnID {_id: 'vuln:osv/cve-2021-44228'})
+        <-[cvv:E {kind: 'CertifyVulnVulnerability'}]- (cv:CertifyVuln)
+        <-[cvs:E {kind: 'CertifyVulnSubject'}]-       (bad:PkgVersion)
+        <-[ido:E {kind: 'IsDependencyObject'}]-       (d:IsDependency)
+        <-[ids:E {kind: 'IsDependencySubject'}]-      (product:PkgVersion)
+         -[ios:E {kind: 'IsOccurrenceSubject'}]->     (occ:IsOccurrence)
+         -[ioa:E {kind: 'IsOccurrenceArtifact'}]->    (art:Artifact)
+         -[hss:E {kind: 'HasSbomSubject'}]->          (s:HasSBOM)
+RETURN vid, bad, product, s._iid, s._labels, s.uri,
+       cv._iid, cv._labels, d._iid, d._labels,
+       occ._iid, occ._labels, art._iid, art._labels,
+       cvv._iid, cvv._src_iid, cvv._dst_iid, cvs._iid, cvs._src_iid, cvs._dst_iid,
+       ido._iid, ido._src_iid, ido._dst_iid, ids._iid, ids._src_iid, ids._dst_iid,
+       ios._iid, ios._src_iid, ios._dst_iid, ioa._iid, ioa._src_iid, ioa._dst_iid,
+       hss._iid, hss._src_iid, hss._dst_iid,
+       valid_from(cv) AS cve_valid_from,
+       valid_from(product) AS product_valid_from

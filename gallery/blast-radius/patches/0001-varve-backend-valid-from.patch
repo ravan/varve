@@ -1,0 +1,277 @@
+diff --git a/pkg/assembler/backends/varve/backend.go b/pkg/assembler/backends/varve/backend.go
+index 92e3ce83..416a8833 100644
+--- a/pkg/assembler/backends/varve/backend.go
++++ b/pkg/assembler/backends/varve/backend.go
+@@ -21,6 +21,7 @@ package varve
+ import (
+ 	"context"
+ 	"fmt"
++	"time"
+ 
+ 	"github.com/guacsec/guac/pkg/assembler/backends"
+ 	"github.com/spf13/cobra"
+@@ -36,9 +37,10 @@ const defaultChunkBudget = 3 << 20 // 3 MiB
+ 
+ // flags holds the command-line flags for varve configuration.
+ var flags = struct {
+-	addr  string
+-	token string
+-	graph string
++	addr      string
++	token     string
++	graph     string
++	validFrom string
+ }{}
+ 
+ // varveConfig is the parsed backend configuration (backends.BackendArgs).
+@@ -46,12 +48,18 @@ type varveConfig struct {
+ 	Addr  string
+ 	Token string
+ 	Graph string
++	// ValidFrom backdates the valid-time of everything this process ingests.
++	// The zero time (the default) means valid-from = commit time.
++	ValidFrom time.Time
+ }
+ 
+ // varveBackend implements backends.Backend against a varve HTTP endpoint.
+ type varveBackend struct {
+ 	c           *client
+ 	chunkBudget int
++	// validFrom is applied to every statement of every batch this backend
++	// sends; see validFromClause. Zero means "no clause".
++	validFrom time.Time
+ }
+ 
+ func init() {
+@@ -64,6 +72,9 @@ func registerFlags(cmd *cobra.Command) error {
+ 	flagSet.StringVar(&flags.addr, "varve-addr", "http://localhost:8080", "varve writer HTTP address")
+ 	flagSet.StringVar(&flags.token, "varve-token", "", "varve bearer token")
+ 	flagSet.StringVar(&flags.graph, "varve-graph", "guac", "varve database/graph name")
++	flagSet.StringVar(&flags.validFrom, "varve-valid-from", "",
++		"backdate the valid-time of everything ingested in this run, as RFC3339 "+
++			"(e.g. 2021-12-10T10:15:00Z); empty means valid-from = commit time")
+ 
+ 	if err := viper.BindPFlags(flagSet); err != nil {
+ 		return fmt.Errorf("failed to bind flags: %w", err)
+@@ -72,17 +83,33 @@ func registerFlags(cmd *cobra.Command) error {
+ 	flags.addr = viper.GetString("varve-addr")
+ 	flags.token = viper.GetString("varve-token")
+ 	flags.graph = viper.GetString("varve-graph")
++	flags.validFrom = viper.GetString("varve-valid-from")
+ 
+ 	return nil
+ }
+ 
+-// parseFlags returns the varve configuration from parsed flags.
++// parseFlags returns the varve configuration from parsed flags. --varve-valid-from
++// is parsed here rather than at render time so a malformed timestamp fails at
++// startup with a clear message, instead of producing a GQL literal that only
++// errors part-way through an ingest.
+ func parseFlags(ctx context.Context) (backends.BackendArgs, error) {
+-	return &varveConfig{
++	cfg := &varveConfig{
+ 		Addr:  flags.addr,
+ 		Token: flags.token,
+ 		Graph: flags.graph,
+-	}, nil
++	}
++	if flags.validFrom != "" {
++		t, err := time.Parse(time.RFC3339, flags.validFrom)
++		if err != nil {
++			return nil, fmt.Errorf("--varve-valid-from %q is not RFC3339: %w", flags.validFrom, err)
++		}
++		if t.IsZero() {
++			return nil, fmt.Errorf("--varve-valid-from %q is the zero time, which means "+
++				"'no backdating'; omit the flag instead", flags.validFrom)
++		}
++		cfg.ValidFrom = t
++	}
++	return cfg, nil
+ }
+ 
+ func getBackend(ctx context.Context, args backends.BackendArgs) (backends.Backend, error) {
+@@ -94,7 +121,7 @@ func getBackend(ctx context.Context, args backends.BackendArgs) (backends.Backen
+ 	if err := c.ping(ctx); err != nil {
+ 		return nil, fmt.Errorf("varve backend: unable to reach %s: %w", cfg.Addr, err)
+ 	}
+-	return &varveBackend{c: c, chunkBudget: defaultChunkBudget}, nil
++	return &varveBackend{c: c, chunkBudget: defaultChunkBudget, validFrom: cfg.ValidFrom}, nil
+ }
+ 
+ // Compile-time assertion that varveBackend satisfies the full Backend
+diff --git a/pkg/assembler/backends/varve/batch.go b/pkg/assembler/backends/varve/batch.go
+index 3da4dd0c..17cbacc7 100644
+--- a/pkg/assembler/backends/varve/batch.go
++++ b/pkg/assembler/backends/varve/batch.go
+@@ -18,6 +18,7 @@ package varve
+ import (
+ 	"context"
+ 	"strings"
++	"time"
+ )
+ 
+ // kv is a single property (key + Go value) used to render a GQL node's inline
+@@ -122,20 +123,38 @@ func (t *txBatch) reset() {
+ 	t.size = 0
+ }
+ 
++// validFromClause renders the ` VALID FROM TIMESTAMP '…'` suffix that backdates
++// a statement's valid-time, or "" for the zero time — the default, meaning
++// valid-from = commit time and therefore a program byte-identical to one from
++// before this option existed. varve accepts the clause on both `INSERT …` and
++// `MATCH … INSERT …`, which is why program() can append it uniformly to every
++// statement it renders. The timestamp goes through Lit, so it is escaped and
++// normalised to UTC RFC3339Nano whatever offset the operator supplied.
++func validFromClause(validFrom time.Time) string {
++	if validFrom.IsZero() {
++		return ""
++	}
++	return " VALID FROM TIMESTAMP " + Lit(validFrom)
++}
++
+ // program renders the chunk as a single ';'-separated GQL program: one INSERT
+ // over the deduped standalone nodes and trie paths, then the deduped edge
+-// statements.
+-func (t *txBatch) program() string {
++// statements. A non-zero validFrom backdates every statement's valid-time; the
++// zero time renders no clause. The suffix has to go on each statement rather
++// than once at the end, because the program is ';'-separated and the trailing
++// statements are the per-edge `MATCH … INSERT …` forms.
++func (t *txBatch) program(validFrom time.Time) string {
++	suffix := validFromClause(validFrom)
+ 	patterns := append(dedup(t.nodes), dedup(t.paths)...)
+-	prog := insertStmt(patterns)
+ 	edges := dedup(t.edges)
+-	if len(edges) > 0 {
+-		if prog != "" {
+-			prog += ";\n"
+-		}
+-		prog += strings.Join(edges, ";\n")
++	stmts := make([]string, 0, 1+len(edges))
++	if ins := insertStmt(patterns); ins != "" {
++		stmts = append(stmts, ins+suffix)
++	}
++	for _, e := range edges {
++		stmts = append(stmts, e+suffix)
+ 	}
+-	return prog
++	return strings.Join(stmts, ";\n")
+ }
+ 
+ // sendBatch flushes a non-empty batch as one atomic tx and resets it. A nil or
+@@ -144,7 +163,7 @@ func (b *varveBackend) sendBatch(ctx context.Context, batch *txBatch) error {
+ 	if batch.empty() {
+ 		return nil
+ 	}
+-	if _, err := b.c.Tx(ctx, batch.program(), nil); err != nil {
++	if _, err := b.c.Tx(ctx, batch.program(b.validFrom), nil); err != nil {
+ 		return err
+ 	}
+ 	batch.reset()
+diff --git a/pkg/assembler/backends/varve/bench_test.go b/pkg/assembler/backends/varve/bench_test.go
+index 42dc2b03..3bdd7b36 100644
+--- a/pkg/assembler/backends/varve/bench_test.go
++++ b/pkg/assembler/backends/varve/bench_test.go
+@@ -48,7 +48,7 @@ func TestBenchIngest(t *testing.T) {
+ 	for _, p := range pkgs {
+ 		b.addPackage(&batch, p.PackageInput)
+ 	}
+-	program := batch.program()
++	program := batch.program(time.Time{})
+ 	buildDur := time.Since(buildStart)
+ 	programBytes := len(program)
+ 
+diff --git a/pkg/assembler/backends/varve/gql_test.go b/pkg/assembler/backends/varve/gql_test.go
+index 42aa9a7e..af499724 100644
+--- a/pkg/assembler/backends/varve/gql_test.go
++++ b/pkg/assembler/backends/varve/gql_test.go
+@@ -181,7 +181,7 @@ func TestBatchProgramNodesAndPaths(t *testing.T) {
+ 		pnode{"pkg:ns:golang/x", "PkgNamespace", []kv{{"namespace", "x"}}},
+ 	))
+ 	b.edge("PkgVersion", "pkg:v:1", "IsOccurrenceSubject", "IsOccurrence", "occ:1")
+-	prog := b.program()
++	prog := b.program(time.Time{})
+ 	if !strings.HasPrefix(prog, "INSERT (:Artifact {_id: 'art:sha256:ab'") {
+ 		t.Fatalf("program should start with INSERT of standalone node: %q", prog)
+ 	}
+@@ -192,3 +192,59 @@ func TestBatchProgramNodesAndPaths(t *testing.T) {
+ 		t.Fatalf("program should append edge MATCH...INSERT after the INSERT: %q", prog)
+ 	}
+ }
++
++// batchWithTwoEdges builds a batch holding one standalone node and two edge
++// statements, so a suffix assertion can prove it lands on EVERY statement of the
++// ';'-separated program rather than only the leading INSERT.
++func batchWithTwoEdges() *txBatch {
++	var b txBatch
++	b.node("Artifact", kv{"_id", "art:sha256:ab"}, kv{"algorithm", "sha256"})
++	b.edge("PkgVersion", "pkg:v:1", "IsOccurrenceSubject", "IsOccurrence", "occ:1")
++	b.edge("IsOccurrence", "occ:1", "IsOccurrenceArtifact", "Artifact", "art:sha256:ab")
++	return &b
++}
++
++// TestBatchProgramValidFromDefaultIsUnchanged pins the back-compatibility
++// guarantee for --varve-valid-from: the zero time must render a program with no
++// VALID FROM clause anywhere, byte-identical to one from before the option
++// existed. gallery/guac depends on this.
++func TestBatchProgramValidFromDefaultIsUnchanged(t *testing.T) {
++	prog := batchWithTwoEdges().program(time.Time{})
++	if strings.Contains(prog, "VALID FROM") {
++		t.Fatalf("zero validFrom must render no VALID FROM clause, got %q", prog)
++	}
++	// Every statement ends where the next begins — no stray suffix or separator.
++	if got, want := strings.Count(prog, ";\n"), 2; got != want {
++		t.Fatalf("expected %d statement separators, got %d in %q", want, got, prog)
++	}
++}
++
++// TestBatchProgramValidFromSuffixesEveryStatement asserts the clause is appended
++// to the leading INSERT *and* to each per-edge MATCH...INSERT, and that the
++// timestamp is normalised to UTC RFC3339 whatever offset was supplied.
++func TestBatchProgramValidFromSuffixesEveryStatement(t *testing.T) {
++	// 10:15:00 at +01:00 is 09:15:00Z — asserts normalisation, not just escaping.
++	validFrom, err := time.Parse(time.RFC3339, "2021-12-10T10:15:00+01:00")
++	if err != nil {
++		t.Fatalf("parsing the fixture timestamp: %v", err)
++	}
++	prog := batchWithTwoEdges().program(validFrom)
++
++	const want = " VALID FROM TIMESTAMP '2021-12-10T09:15:00Z'"
++	stmts := strings.Split(prog, ";\n")
++	if len(stmts) != 3 {
++		t.Fatalf("expected 3 statements (1 INSERT + 2 edges), got %d: %q", len(stmts), prog)
++	}
++	for i, s := range stmts {
++		if !strings.HasSuffix(s, want) {
++			t.Errorf("statement %d does not end with %q:\n%q", i, want, s)
++		}
++	}
++	if got := strings.Count(prog, "VALID FROM"); got != 3 {
++		t.Errorf("expected exactly 3 VALID FROM clauses, got %d in %q", got, prog)
++	}
++	// The clause must follow the INSERT, not sit inside the pattern.
++	if !strings.HasPrefix(stmts[0], "INSERT (:Artifact") {
++		t.Errorf("clause must not disturb the INSERT pattern: %q", stmts[0])
++	}
++}
+diff --git a/pkg/assembler/backends/varve/pkg_test.go b/pkg/assembler/backends/varve/pkg_test.go
+index b6ea7197..b7d4f673 100644
+--- a/pkg/assembler/backends/varve/pkg_test.go
++++ b/pkg/assembler/backends/varve/pkg_test.go
+@@ -18,6 +18,7 @@ package varve
+ import (
+ 	"strings"
+ 	"testing"
++	"time"
+ 
+ 	"github.com/guacsec/guac/pkg/assembler/graphql/model"
+ )
+@@ -58,7 +59,7 @@ func TestAddPackageProgram(t *testing.T) {
+ 		t.Fatalf("version id = %q, want %q", ids.PackageVersionID, wantVID)
+ 	}
+ 
+-	prog := batch.program()
++	prog := batch.program(time.Time{})
+ 	for _, want := range []string{
+ 		"INSERT (:PkgType {_id: 'pkg:t:golang', type: 'golang'})",
+ 		"(:PkgNamespace {_id: 'pkg:ns:golang/github.com/foo', namespace: 'github.com/foo'})",

@@ -1,0 +1,5 @@
+MATCH (cv:CertifyVuln)
+RETURN cv._id AS fact,
+       valid_from(cv) AS became_true,
+       system_from(cv) AS we_recorded_it
+ORDER BY fact
