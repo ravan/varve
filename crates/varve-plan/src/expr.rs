@@ -8,7 +8,7 @@ use varve_gql::ast::{BinaryOp, CastType, Expr, Literal, PathPattern, UnaryOp};
 use varve_types::{Iid, Value};
 
 use crate::exec::to_df_literal;
-use crate::functions::{temporal_column, FunctionRegistry, ScalarFn};
+use crate::functions::{coincide_column, temporal_column, FunctionRegistry, ScalarFn};
 use crate::pattern::{col_exact, mangled};
 use crate::PlanError;
 
@@ -194,6 +194,9 @@ fn lower_fn_call(
             "aggregate function {name} is only supported in RETURN"
         )));
     }
+    if let Some((suffix, is_lower)) = coincide_column(name) {
+        return lower_coincide_fn(name, args, scope, suffix, is_lower);
+    }
     let Some(function) = functions.scalar(name) else {
         return Err(PlanError::UnknownFunction(name.to_string()));
     };
@@ -211,6 +214,44 @@ fn call_scalar(function: &ScalarFn, args: Vec<DfExpr>) -> Result<DfExpr, PlanErr
     match function {
         ScalarFn::Udf(udf) => Ok(udf.call(args)),
         ScalarFn::Builder(builder) => builder(args),
+    }
+}
+
+/// Nullary coincidence projection: the `max` (lower bound) or `min` (upper
+/// bound) of `{var}__{suffix}` over every element in scope that carries the
+/// column. Nullary because the subject is the match, not any one variable. A
+/// quantified hop's element carries the columns only under a range window on
+/// that axis (its walk interval), so under a point window it simply doesn't
+/// constrain the projection — every fixed element always does.
+fn lower_coincide_fn(
+    name: &str,
+    args: &[Expr],
+    scope: &Scope<'_>,
+    suffix: &str,
+    is_lower: bool,
+) -> Result<DfExpr, PlanError> {
+    if !args.is_empty() {
+        return Err(PlanError::Unsupported(format!(
+            "{name} takes no arguments: it reads the match's coincidence interval"
+        )));
+    }
+    let mut cols = Vec::new();
+    for (var, element) in &scope.elements {
+        let col = mangled(var, suffix);
+        if element.has_column(&col) {
+            cols.push(col_exact(col));
+        }
+    }
+    match cols.len() {
+        0 => Err(PlanError::Unsupported(format!(
+            "{name} requires at least one matched element in scope"
+        ))),
+        1 => Ok(cols.remove(0)),
+        _ => Ok(if is_lower {
+            datafusion::functions::expr_fn::greatest(cols)
+        } else {
+            datafusion::functions::expr_fn::least(cols)
+        }),
     }
 }
 

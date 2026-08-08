@@ -22,7 +22,7 @@
 
 use proptest::prelude::*;
 use std::sync::{Mutex, OnceLock};
-use varve_plan::expand::{expand_paths, AdjEdge, EdgeAdjacency};
+use varve_plan::expand::{expand_paths, AdjEdge, EdgeAdjacency, WalkInterval};
 use varve_testkit::oracle::{column_i64, micros_to_rfc3339, GraphOracle, OracleDir};
 use varve_types::{Iid, Instant};
 
@@ -64,7 +64,7 @@ proptest! {
         let mut entries = Vec::new();
         for (k, (s, d)) in edges.iter().enumerate() {
             let e = Iid::derive("g", "edges", &[k as u8]);
-            entries.push((node(*s), AdjEdge { neighbor: node(*d), edge: e }));
+            entries.push((node(*s), AdjEdge::unbounded(node(*d), e)));
             oracle.append_edge(varve_index::Event {
                 iid: e,
                 system_from: Instant::from_micros(k as i64),
@@ -79,7 +79,14 @@ proptest! {
             });
         }
         let adj = EdgeAdjacency::from_entries(entries);
-        let got = expand_paths(&adj, node(start), min, max);
+        let expanded = expand_paths(&adj, node(start), min, max);
+        let mut got = Vec::with_capacity(expanded.len());
+        for (end, path, interval) in expanded {
+            // Unbounded edges ⇒ the walk's intersection stays unbounded, so
+            // interval pruning must never fire on this suite.
+            prop_assert_eq!(interval, WalkInterval::unbounded());
+            got.push((end, path));
+        }
         let want = oracle.walk(
             node(start),
             "K",

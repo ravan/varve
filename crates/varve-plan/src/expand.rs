@@ -19,10 +19,10 @@ use std::sync::Arc;
 
 use datafusion::arrow::array::{
     Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, ListBuilder, RecordBatch,
-    UInt32Array,
+    TimestampMicrosecondBuilder, UInt32Array,
 };
 use datafusion::arrow::compute::take;
-use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
 use datafusion::common::{
     DFSchema, DFSchemaRef, DataFusionError, Result as DfResult, TableReference,
 };
@@ -42,13 +42,92 @@ use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, Phy
 use futures::StreamExt;
 
 use crate::PlanError;
-use varve_types::Iid;
+use varve_types::{Iid, Instant};
 
-/// One traversable edge from a node (bounds already applied by the engine).
+/// One traversable edge *version* from a node: the engine emits one entry per
+/// visible version at the query bounds, carrying that version's bitemporal
+/// rectangle so ranged expansion can intersect validity along a walk
+/// (docs/plans/2026-07-29-interval-results.md task 2). Under point bounds an
+/// edge has at most one visible version, so this is one entry per edge there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdjEdge {
     pub neighbor: Iid,
     pub edge: Iid,
+    pub valid_from: Instant,
+    pub valid_to: Instant,
+    pub system_from: Instant,
+    pub system_to: Instant,
+}
+
+impl AdjEdge {
+    /// An edge whose version validity is unconstrained — the identity for walk
+    /// intersection. Test/synthetic adjacencies that don't care about time use
+    /// this so the walk interval stays unbounded.
+    pub fn unbounded(neighbor: Iid, edge: Iid) -> Self {
+        Self {
+            neighbor,
+            edge,
+            valid_from: Instant::MIN,
+            valid_to: Instant::END_OF_TIME,
+            system_from: Instant::MIN,
+            system_to: Instant::END_OF_TIME,
+        }
+    }
+}
+
+/// Which temporal axes a plan must intersect across pattern elements: an axis
+/// is on exactly when some `MATCH` clause's resolved window on it is a range
+/// (`FROM … TO` / `BETWEEN` / `ALL`). Point windows (`AS OF`, and every omitted
+/// clause) imply coincidence row-by-row, so both-off — the shipped default —
+/// must leave plans byte-identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct CoincidenceAxes {
+    pub valid: bool,
+    pub system: bool,
+}
+
+impl CoincidenceAxes {
+    pub fn any(self) -> bool {
+        self.valid || self.system
+    }
+}
+
+/// The running bitemporal intersection of a walk's edge versions. Starts
+/// unbounded (a zero-hop walk constrains nothing) and only ever narrows, so an
+/// empty intersection prunes the whole subtree at the frontier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalkInterval {
+    pub valid_from: Instant,
+    pub valid_to: Instant,
+    pub system_from: Instant,
+    pub system_to: Instant,
+}
+
+impl WalkInterval {
+    pub fn unbounded() -> Self {
+        Self {
+            valid_from: Instant::MIN,
+            valid_to: Instant::END_OF_TIME,
+            system_from: Instant::MIN,
+            system_to: Instant::END_OF_TIME,
+        }
+    }
+
+    pub fn intersect(self, edge: &AdjEdge) -> Self {
+        Self {
+            valid_from: self.valid_from.max(edge.valid_from),
+            valid_to: self.valid_to.min(edge.valid_to),
+            system_from: self.system_from.max(edge.system_from),
+            system_to: self.system_to.min(edge.system_to),
+        }
+    }
+
+    /// Empty on either axis means the walk's edges never coexisted. Under
+    /// point bounds every edge version contains the query instant, so this is
+    /// never true there and pruning on it cannot change point-window results.
+    pub fn is_empty(&self) -> bool {
+        self.valid_from >= self.valid_to || self.system_from >= self.system_to
+    }
 }
 
 /// Node → outgoing (or incoming, per the hop's direction — the engine builds
@@ -67,7 +146,7 @@ impl EdgeAdjacency {
             map.entry(node).or_default().push(edge);
         }
         for v in map.values_mut() {
-            v.sort_by_key(|a| (a.neighbor, a.edge));
+            v.sort_by_key(|a| (a.neighbor, a.edge, a.valid_from, a.system_from));
             v.dedup();
         }
         EdgeAdjacency { map }
@@ -82,30 +161,40 @@ impl EdgeAdjacency {
 
 /// Pure WALK-semantics breadth-wise expansion (the exec's core; also the
 /// property-test surface). Returns, for the start node, every path of
-/// `min..=max` hops as `(end_iid, interleaved [n0, e1, n1, …] path)`.
-/// Depth 0 (when `min == 0`) yields `(start, [start])`.
+/// `min..=max` hops as `(end_iid, interleaved [n0, e1, n1, …] path, interval)`,
+/// where `interval` is the intersection of the walk's edge versions — equal to
+/// folding [`WalkInterval::intersect`] over the path's edges, never wider than
+/// any prefix's interval. Walks whose intersection empties are pruned AT THE
+/// FRONTIER, before they multiply: their edges never coexisted, so no
+/// extension can be a real answer (intersection only narrows). Depth 0 (when
+/// `min == 0`) yields `(start, [start], unbounded)`.
 pub fn expand_paths(
     adjacency: &EdgeAdjacency,
     start: Iid,
     min: u32,
     max: u32,
-) -> Vec<(Iid, Vec<Iid>)> {
+) -> Vec<(Iid, Vec<Iid>, WalkInterval)> {
     let mut out = Vec::new();
-    let mut frontier: Vec<(Iid, Vec<Iid>)> = vec![(start, vec![start])];
+    let mut frontier: Vec<(Iid, Vec<Iid>, WalkInterval)> =
+        vec![(start, vec![start], WalkInterval::unbounded())];
     if min == 0 {
-        out.push((start, vec![start]));
+        out.push((start, vec![start], WalkInterval::unbounded()));
     }
     for depth in 1..=max {
         let mut next = Vec::new();
-        for (node, path) in &frontier {
+        for (node, path, interval) in &frontier {
             for adj in adjacency.neighbors(node) {
+                let interval = interval.intersect(adj);
+                if interval.is_empty() {
+                    continue;
+                }
                 let mut p = path.clone();
                 p.push(adj.edge);
                 p.push(adj.neighbor);
                 if depth >= min {
-                    out.push((adj.neighbor, p.clone()));
+                    out.push((adj.neighbor, p.clone(), interval));
                 }
-                next.push((adj.neighbor, p));
+                next.push((adj.neighbor, p, interval));
             }
         }
         if next.is_empty() {
@@ -172,6 +261,7 @@ struct PathExpandBatchOptions {
     min: u32,
     max: u32,
     has_path: bool,
+    interval_axes: CoincidenceAxes,
     limits: PathExpandLimits,
 }
 
@@ -188,7 +278,7 @@ fn expand_paths_limited(
     min: u32,
     max: u32,
     row_limit: usize,
-) -> DfResult<Vec<(Iid, Vec<Iid>)>> {
+) -> DfResult<Vec<(Iid, Vec<Iid>, WalkInterval)>> {
     expand_paths_with_limits(
         adjacency,
         start,
@@ -208,24 +298,41 @@ fn expand_paths_with_limits(
     min: u32,
     max: u32,
     limits: PathExpandLimits,
-) -> DfResult<Vec<(Iid, Vec<Iid>)>> {
+) -> DfResult<Vec<(Iid, Vec<Iid>, WalkInterval)>> {
     validate_path_expand_hops(max, limits.hop_limit)?;
     let mut out = Vec::new();
-    let mut frontier: Vec<(Iid, Vec<Iid>)> = vec![(start, vec![start])];
+    let mut frontier: Vec<(Iid, Vec<Iid>, WalkInterval)> =
+        vec![(start, vec![start], WalkInterval::unbounded())];
     if min == 0 {
-        push_limited(&mut out, limits.row_limit, (start, vec![start]))?;
+        push_limited(
+            &mut out,
+            limits.row_limit,
+            (start, vec![start], WalkInterval::unbounded()),
+        )?;
     }
     for depth in 1..=max {
         let mut next = Vec::new();
-        for (node, path) in &frontier {
+        for (node, path, interval) in &frontier {
             for adj in adjacency.neighbors(node) {
+                let interval = interval.intersect(adj);
+                if interval.is_empty() {
+                    continue;
+                }
                 let mut p = path.clone();
                 p.push(adj.edge);
                 p.push(adj.neighbor);
                 if depth >= min {
-                    push_limited(&mut out, limits.row_limit, (adj.neighbor, p.clone()))?;
+                    push_limited(
+                        &mut out,
+                        limits.row_limit,
+                        (adj.neighbor, p.clone(), interval),
+                    )?;
                 }
-                push_frontier_limited(&mut next, limits.frontier_limit, (adj.neighbor, p))?;
+                push_frontier_limited(
+                    &mut next,
+                    limits.frontier_limit,
+                    (adj.neighbor, p, interval),
+                )?;
             }
         }
         if next.is_empty() {
@@ -246,9 +353,9 @@ fn validate_path_expand_hops(max: u32, hop_limit: u32) -> DfResult<()> {
 }
 
 fn push_limited(
-    out: &mut Vec<(Iid, Vec<Iid>)>,
+    out: &mut Vec<(Iid, Vec<Iid>, WalkInterval)>,
     row_limit: usize,
-    row: (Iid, Vec<Iid>),
+    row: (Iid, Vec<Iid>, WalkInterval),
 ) -> DfResult<()> {
     if out.len() >= row_limit {
         return Err(DataFusionError::ResourcesExhausted(format!(
@@ -260,9 +367,9 @@ fn push_limited(
 }
 
 fn push_frontier_limited(
-    frontier: &mut Vec<(Iid, Vec<Iid>)>,
+    frontier: &mut Vec<(Iid, Vec<Iid>, WalkInterval)>,
     row_limit: usize,
-    row: (Iid, Vec<Iid>),
+    row: (Iid, Vec<Iid>, WalkInterval),
 ) -> DfResult<()> {
     if frontier.len() >= row_limit {
         return Err(DataFusionError::ResourcesExhausted(format!(
@@ -275,14 +382,43 @@ fn push_frontier_limited(
 
 // ---- DataFusion custom operator ---------------------------------------------
 
+/// The walk-interval output columns of a `PathExpand`, one `(from, to)` pair
+/// per coincidence-enabled axis (`None` = axis off, no columns). The caller
+/// names them like any element's mangled temporal columns so the generic
+/// coincidence filter treats the quantified hop as one more bound element.
+/// Both-`None` — every point-window plan — adds nothing, keeping those plans
+/// byte-identical.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct WalkIntervalCols {
+    pub valid: Option<(String, String)>,
+    pub system: Option<(String, String)>,
+}
+
+impl WalkIntervalCols {
+    fn any(&self) -> bool {
+        self.valid.is_some() || self.system.is_some()
+    }
+}
+
+fn walk_ts_field(name: &str) -> Field {
+    Field::new(
+        name,
+        DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+        false,
+    )
+}
+
 /// Output schema of a `PathExpand`: the input's fields, then `end_col`
 /// (`FixedSizeBinary(16)`, non-null), then optionally `path_col`
 /// (`List<FixedSizeBinary(16)>`, non-null list, nullable item to match what
-/// `ListBuilder<FixedSizeBinaryBuilder>` produces).
+/// `ListBuilder<FixedSizeBinaryBuilder>` produces), then the walk-interval
+/// pairs of `interval_cols` (UTC-microsecond timestamps, non-null; valid axis
+/// first).
 fn path_expand_schema(
     input: &LogicalPlan,
     end_col: &str,
     path_col: Option<&str>,
+    interval_cols: &WalkIntervalCols,
 ) -> DfResult<DFSchemaRef> {
     let mut fields: Vec<(Option<TableReference>, Arc<Field>)> = input
         .schema()
@@ -312,6 +448,13 @@ fn path_expand_schema(
             )),
         ));
     }
+    for pair in [&interval_cols.valid, &interval_cols.system]
+        .into_iter()
+        .flatten()
+    {
+        fields.push((None, Arc::new(walk_ts_field(&pair.0))));
+        fields.push((None, Arc::new(walk_ts_field(&pair.1))));
+    }
     Ok(Arc::new(DFSchema::new_with_metadata(
         fields,
         HashMap::new(),
@@ -328,6 +471,7 @@ pub struct PathExpandNode {
     start_col: String,
     end_col: String,
     path_col: Option<String>,
+    interval_cols: WalkIntervalCols,
     min: u32,
     max: u32,
     limits: PathExpandLimits,
@@ -353,6 +497,7 @@ impl PathExpandNode {
             start_col,
             end_col,
             path_col,
+            WalkIntervalCols::default(),
             min,
             max,
             PathExpandLimits::default(),
@@ -366,17 +511,19 @@ impl PathExpandNode {
         start_col: String,
         end_col: String,
         path_col: Option<String>,
+        interval_cols: WalkIntervalCols,
         min: u32,
         max: u32,
         limits: PathExpandLimits,
     ) -> Result<Self, PlanError> {
-        let schema = path_expand_schema(&input, &end_col, path_col.as_deref())?;
+        let schema = path_expand_schema(&input, &end_col, path_col.as_deref(), &interval_cols)?;
         Ok(Self {
             input,
             adjacency,
             start_col,
             end_col,
             path_col,
+            interval_cols,
             min,
             max,
             limits,
@@ -394,6 +541,7 @@ impl PartialEq for PathExpandNode {
         self.start_col == other.start_col
             && self.end_col == other.end_col
             && self.path_col == other.path_col
+            && self.interval_cols == other.interval_cols
             && self.min == other.min
             && self.max == other.max
             && self.limits == other.limits
@@ -407,6 +555,7 @@ impl std::hash::Hash for PathExpandNode {
         self.start_col.hash(state);
         self.end_col.hash(state);
         self.path_col.hash(state);
+        self.interval_cols.hash(state);
         self.min.hash(state);
         self.max.hash(state);
         self.limits.hash(state);
@@ -419,6 +568,7 @@ impl PartialOrd for PathExpandNode {
         (
             &self.start_col,
             &self.end_col,
+            &self.interval_cols,
             self.min,
             self.max,
             self.limits,
@@ -426,6 +576,7 @@ impl PartialOrd for PathExpandNode {
             .partial_cmp(&(
                 &other.start_col,
                 &other.end_col,
+                &other.interval_cols,
                 other.min,
                 other.max,
                 other.limits,
@@ -455,7 +606,16 @@ impl UserDefinedLogicalNodeCore for PathExpandNode {
             f,
             "PathExpand: {} -[{},{}]-> {}",
             self.start_col, self.min, self.max, self.end_col
-        )
+        )?;
+        if self.interval_cols.any() {
+            write!(
+                f,
+                ", coincide=[valid:{}, system:{}]",
+                self.interval_cols.valid.is_some(),
+                self.interval_cols.system.is_some()
+            )?;
+        }
+        Ok(())
     }
 
     fn with_exprs_and_inputs(
@@ -470,13 +630,19 @@ impl UserDefinedLogicalNodeCore for PathExpandNode {
             )));
         }
         let input = inputs.swap_remove(0);
-        let schema = path_expand_schema(&input, &self.end_col, self.path_col.as_deref())?;
+        let schema = path_expand_schema(
+            &input,
+            &self.end_col,
+            self.path_col.as_deref(),
+            &self.interval_cols,
+        )?;
         Ok(Self {
             input,
             adjacency: Arc::clone(&self.adjacency),
             start_col: self.start_col.clone(),
             end_col: self.end_col.clone(),
             path_col: self.path_col.clone(),
+            interval_cols: self.interval_cols.clone(),
             min: self.min,
             max: self.max,
             limits: self.limits,
@@ -487,8 +653,9 @@ impl UserDefinedLogicalNodeCore for PathExpandNode {
 
 /// Runs [`expand_paths`] over one input batch, producing the output batch:
 /// each input row is repeated once per produced path (via `take`), with
-/// `end_col` and optional `path_col` appended. A zero-total-paths batch yields
-/// an empty batch with the output schema.
+/// `end_col`, optional `path_col`, and the enabled walk-interval pairs
+/// appended. A zero-total-paths batch yields an empty batch with the output
+/// schema.
 fn expand_batch_limited(
     batch: &RecordBatch,
     schema: &SchemaRef,
@@ -503,9 +670,14 @@ fn expand_batch_limited(
             DataFusionError::Internal("PathExpand start column is not FixedSizeBinary(16)".into())
         })?;
 
+    let ts_builder = || TimestampMicrosecondBuilder::new().with_timezone("UTC");
     let mut indices: Vec<u32> = Vec::new();
     let mut ends = FixedSizeBinaryBuilder::new(16);
     let mut paths = ListBuilder::new(FixedSizeBinaryBuilder::new(16));
+    let mut valid_froms = ts_builder();
+    let mut valid_tos = ts_builder();
+    let mut system_froms = ts_builder();
+    let mut system_tos = ts_builder();
 
     for row in 0..batch.num_rows() {
         let bytes: [u8; 16] = start.value(row).try_into().map_err(|_| {
@@ -523,7 +695,7 @@ fn expand_batch_limited(
                         options.limits.row_limit
                     ))
                 })?;
-        for (end, path) in expand_paths_with_limits(
+        for (end, path, interval) in expand_paths_with_limits(
             adjacency,
             start_iid,
             options.min,
@@ -543,6 +715,14 @@ fn expand_batch_limited(
                 }
                 paths.append(true);
             }
+            if options.interval_axes.valid {
+                valid_froms.append_value(interval.valid_from.as_micros());
+                valid_tos.append_value(interval.valid_to.as_micros());
+            }
+            if options.interval_axes.system {
+                system_froms.append_value(interval.system_from.as_micros());
+                system_tos.append_value(interval.system_to.as_micros());
+            }
         }
     }
 
@@ -559,6 +739,14 @@ fn expand_batch_limited(
     if options.has_path {
         columns.push(Arc::new(paths.finish()));
     }
+    if options.interval_axes.valid {
+        columns.push(Arc::new(valid_froms.finish()));
+        columns.push(Arc::new(valid_tos.finish()));
+    }
+    if options.interval_axes.system {
+        columns.push(Arc::new(system_froms.finish()));
+        columns.push(Arc::new(system_tos.finish()));
+    }
     Ok(RecordBatch::try_new(Arc::clone(schema), columns)?)
 }
 
@@ -572,6 +760,7 @@ pub(crate) struct PathExpandExec {
     min: u32,
     max: u32,
     has_path: bool,
+    interval_axes: CoincidenceAxes,
     limits: PathExpandLimits,
     cache: Arc<PlanProperties>,
 }
@@ -599,6 +788,10 @@ impl PathExpandExec {
             min: node.min,
             max: node.max,
             has_path: node.path_col.is_some(),
+            interval_axes: CoincidenceAxes {
+                valid: node.interval_cols.valid.is_some(),
+                system: node.interval_cols.system.is_some(),
+            },
             limits: node.limits,
             cache,
         })
@@ -660,6 +853,7 @@ impl ExecutionPlan for PathExpandExec {
             min: self.min,
             max: self.max,
             has_path: self.has_path,
+            interval_axes: self.interval_axes,
             limits: self.limits,
             cache: Arc::clone(&self.cache),
         }))
@@ -673,11 +867,12 @@ impl ExecutionPlan for PathExpandExec {
         let stream = self.input.execute(partition, context)?;
         let schema = Arc::clone(&self.schema);
         let adjacency = Arc::clone(&self.adjacency);
-        let (start_idx, min, max, has_path, limits) = (
+        let (start_idx, min, max, has_path, interval_axes, limits) = (
             self.start_idx,
             self.min,
             self.max,
             self.has_path,
+            self.interval_axes,
             self.limits,
         );
         let out = stream.map(move |batch| {
@@ -691,6 +886,7 @@ impl ExecutionPlan for PathExpandExec {
                     min,
                     max,
                     has_path,
+                    interval_axes,
                     limits,
                 },
             )
@@ -764,28 +960,27 @@ mod tests {
     fn line() -> EdgeAdjacency {
         // 1 -e1-> 2 -e2-> 3 -e3-> 4
         EdgeAdjacency::from_entries([
-            (
-                n(1),
-                AdjEdge {
-                    neighbor: n(2),
-                    edge: e(1),
-                },
-            ),
-            (
-                n(2),
-                AdjEdge {
-                    neighbor: n(3),
-                    edge: e(2),
-                },
-            ),
-            (
-                n(3),
-                AdjEdge {
-                    neighbor: n(4),
-                    edge: e(3),
-                },
-            ),
+            (n(1), AdjEdge::unbounded(n(2), e(1))),
+            (n(2), AdjEdge::unbounded(n(3), e(2))),
+            (n(3), AdjEdge::unbounded(n(4), e(3))),
         ])
+    }
+
+    /// `line()` with each edge valid over `[from, to)` months of 2021 (system
+    /// axis unbounded), for the walk-interval tests.
+    fn timed_line(windows: [(i64, i64); 3]) -> EdgeAdjacency {
+        let month = |m: i64| Instant::from_micros(m * 1_000_000);
+        EdgeAdjacency::from_entries(windows.into_iter().enumerate().map(|(i, (from, to))| {
+            let i = i as u8;
+            (
+                n(i + 1),
+                AdjEdge {
+                    valid_from: month(from),
+                    valid_to: month(to),
+                    ..AdjEdge::unbounded(n(i + 2), e(i + 1))
+                },
+            )
+        }))
     }
 
     fn start_batch(starts: &[Iid]) -> (RecordBatch, SchemaRef) {
@@ -806,7 +1001,7 @@ mod tests {
     #[test]
     fn expands_min_to_max_hops() {
         let paths = expand_paths(&line(), n(1), 1, 3);
-        let ends: Vec<Iid> = paths.iter().map(|(end, _)| *end).collect();
+        let ends: Vec<Iid> = paths.iter().map(|(end, _, _)| *end).collect();
         assert_eq!(ends, vec![n(2), n(3), n(4)]); // breadth order: depth 1, 2, 3
         assert_eq!(paths[1].1, vec![n(1), e(1), n(2), e(2), n(3)]);
     }
@@ -814,7 +1009,7 @@ mod tests {
     #[test]
     fn zero_length_includes_start() {
         let paths = expand_paths(&line(), n(1), 0, 1);
-        assert_eq!(paths[0], (n(1), vec![n(1)]));
+        assert_eq!(paths[0], (n(1), vec![n(1)], WalkInterval::unbounded()));
         assert_eq!(paths.len(), 2);
     }
 
@@ -822,24 +1017,69 @@ mod tests {
     fn walk_semantics_allow_cycles_capped_by_max() {
         // 1 -e1-> 2 -e2-> 1 (cycle)
         let adj = EdgeAdjacency::from_entries([
-            (
-                n(1),
-                AdjEdge {
-                    neighbor: n(2),
-                    edge: e(1),
-                },
-            ),
-            (
-                n(2),
-                AdjEdge {
-                    neighbor: n(1),
-                    edge: e(2),
-                },
-            ),
+            (n(1), AdjEdge::unbounded(n(2), e(1))),
+            (n(2), AdjEdge::unbounded(n(1), e(2))),
         ]);
         let paths = expand_paths(&adj, n(1), 1, 4);
         assert_eq!(paths.len(), 4); // one path per depth 1..=4, repeats allowed
         assert_eq!(paths[3].1.len(), 9);
+    }
+
+    #[test]
+    fn walk_interval_is_the_fold_of_edge_intersections_and_never_widens() {
+        // Overlapping windows: [1,6) ∩ [2,8) ∩ [3,7) narrows to [3,6).
+        let adj = timed_line([(1, 6), (2, 8), (3, 7)]);
+        let paths = expand_paths(&adj, n(1), 1, 3);
+        assert_eq!(paths.len(), 3);
+        let mut prev = WalkInterval::unbounded();
+        for (i, (_, path, interval)) in paths.iter().enumerate() {
+            // Fold equality: the interval is exactly the edge-wise intersection.
+            let edges: Vec<AdjEdge> = path
+                .iter()
+                .skip(1)
+                .step_by(2)
+                .map(|edge| {
+                    adj.map
+                        .values()
+                        .flatten()
+                        .find(|adj| adj.edge == *edge)
+                        .copied()
+                        .unwrap()
+                })
+                .collect();
+            let folded = edges
+                .iter()
+                .fold(WalkInterval::unbounded(), |acc, edge| acc.intersect(edge));
+            assert_eq!(*interval, folded, "walk {i}");
+            // Monotonicity: extending a walk never widens its interval.
+            assert!(interval.valid_from >= prev.valid_from);
+            assert!(interval.valid_to <= prev.valid_to);
+            prev = *interval;
+        }
+        let last = paths.last().unwrap().2;
+        assert_eq!(last.valid_from, Instant::from_micros(3_000_000));
+        assert_eq!(last.valid_to, Instant::from_micros(6_000_000));
+    }
+
+    #[test]
+    fn walks_with_empty_intersection_are_pruned_at_the_frontier() {
+        // Adjacent pairs overlap ([1,3)∩[2,5), [2,5)∩[4,6)) but the triple is
+        // empty, so the two-hop walk survives and the three-hop walk is pruned
+        // — coincidence is not adjacent-pairwise (plan §2.1).
+        let adj = timed_line([(1, 3), (2, 5), (4, 6)]);
+        let paths = expand_paths(&adj, n(1), 1, 3);
+        let ends: Vec<Iid> = paths.iter().map(|(end, _, _)| *end).collect();
+        assert_eq!(ends, vec![n(2), n(3)]); // n(4) pruned: [2,3) ∩ [4,6) = ∅
+    }
+
+    #[test]
+    fn disjoint_consecutive_edges_prune_the_whole_subtree() {
+        // A January edge chained to a November edge never coexisted; the
+        // frontier drops the walk before it can multiply.
+        let adj = timed_line([(1, 2), (11, 12), (11, 12)]);
+        let paths = expand_paths(&adj, n(1), 1, 3);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].0, n(2));
     }
 
     #[test]
@@ -850,34 +1090,10 @@ mod tests {
     #[test]
     fn limited_batch_row_budget_is_shared_across_input_rows() {
         let adj = EdgeAdjacency::from_entries([
-            (
-                n(1),
-                AdjEdge {
-                    neighbor: n(2),
-                    edge: e(1),
-                },
-            ),
-            (
-                n(1),
-                AdjEdge {
-                    neighbor: n(3),
-                    edge: e(2),
-                },
-            ),
-            (
-                n(4),
-                AdjEdge {
-                    neighbor: n(5),
-                    edge: e(3),
-                },
-            ),
-            (
-                n(4),
-                AdjEdge {
-                    neighbor: n(6),
-                    edge: e(4),
-                },
-            ),
+            (n(1), AdjEdge::unbounded(n(2), e(1))),
+            (n(1), AdjEdge::unbounded(n(3), e(2))),
+            (n(4), AdjEdge::unbounded(n(5), e(3))),
+            (n(4), AdjEdge::unbounded(n(6), e(4))),
         ]);
         let (batch, schema) = start_batch(&[n(1), n(4)]);
 
@@ -890,6 +1106,7 @@ mod tests {
                 min: 1,
                 max: 1,
                 has_path: false,
+                interval_axes: CoincidenceAxes::default(),
                 limits: PathExpandLimits {
                     row_limit: 3,
                     frontier_limit: 10,
@@ -925,34 +1142,10 @@ mod tests {
     #[test]
     fn limited_expansion_errors_before_materializing_unbounded_walks() {
         let adj = EdgeAdjacency::from_entries([
-            (
-                n(1),
-                AdjEdge {
-                    neighbor: n(1),
-                    edge: e(1),
-                },
-            ),
-            (
-                n(1),
-                AdjEdge {
-                    neighbor: n(2),
-                    edge: e(2),
-                },
-            ),
-            (
-                n(2),
-                AdjEdge {
-                    neighbor: n(1),
-                    edge: e(3),
-                },
-            ),
-            (
-                n(2),
-                AdjEdge {
-                    neighbor: n(2),
-                    edge: e(4),
-                },
-            ),
+            (n(1), AdjEdge::unbounded(n(1), e(1))),
+            (n(1), AdjEdge::unbounded(n(2), e(2))),
+            (n(2), AdjEdge::unbounded(n(1), e(3))),
+            (n(2), AdjEdge::unbounded(n(2), e(4))),
         ]);
 
         let err = expand_paths_limited(&adj, n(1), 1, 8, 10).unwrap_err();
@@ -963,34 +1156,10 @@ mod tests {
     #[test]
     fn limited_expansion_errors_before_frontier_grows_unbounded() {
         let adj = EdgeAdjacency::from_entries([
-            (
-                n(1),
-                AdjEdge {
-                    neighbor: n(1),
-                    edge: e(1),
-                },
-            ),
-            (
-                n(1),
-                AdjEdge {
-                    neighbor: n(2),
-                    edge: e(2),
-                },
-            ),
-            (
-                n(2),
-                AdjEdge {
-                    neighbor: n(1),
-                    edge: e(3),
-                },
-            ),
-            (
-                n(2),
-                AdjEdge {
-                    neighbor: n(2),
-                    edge: e(4),
-                },
-            ),
+            (n(1), AdjEdge::unbounded(n(1), e(1))),
+            (n(1), AdjEdge::unbounded(n(2), e(2))),
+            (n(2), AdjEdge::unbounded(n(1), e(3))),
+            (n(2), AdjEdge::unbounded(n(2), e(4))),
         ]);
 
         let err = expand_paths_limited(&adj, n(1), 8, 8, 10).unwrap_err();

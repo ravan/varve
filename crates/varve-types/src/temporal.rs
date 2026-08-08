@@ -112,6 +112,15 @@ impl TemporalDimension {
     pub fn intersects(&self, lower: Instant, upper: Instant) -> bool {
         self.lower < upper && lower < self.upper
     }
+
+    /// A one-microsecond window — what [`Self::at`] builds, and what every
+    /// omitted `FOR` clause defaults to. Worth naming because a point window
+    /// makes coincidence across a pattern free: anything passing the per-row
+    /// temporal filter necessarily coexisted with everything else that did,
+    /// so the pattern needs no cross-element intersection.
+    pub fn is_point(&self) -> bool {
+        self.upper.0 == self.lower.0.saturating_add(1)
+    }
 }
 
 impl Default for TemporalDimension {

@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, RwLock};
 use varve_index::{decode_events, snapshot_entities, Event, LabelFilter, Op, PageMeta};
 use varve_storage::{keys, ObjectStore};
-use varve_types::{Iid, TemporalBounds, Value};
+use varve_types::{Iid, Instant, TemporalBounds, Value};
 
 /// Which entities a merged scan touches: everything, one derived-iid point
 /// (`{_id: …}` / `WHERE v._id = …`), or an explicit set — the anchored fast
@@ -162,14 +162,23 @@ pub(crate) enum AdjDirection {
     In,
 }
 
-/// One traversable edge at the query bounds: `node` is the anchor-side
-/// endpoint (src for `Out`, dst for `In`), `neighbor` the other endpoint,
-/// `edge` the edge's own iid.
+/// One traversable edge *version* at the query bounds: `node` is the
+/// anchor-side endpoint (src for `Out`, dst for `In`), `neighbor` the other
+/// endpoint, `edge` the edge's own iid, and the four instants are the visible
+/// version's bitemporal rectangle (`system_to` derived by resolution). Under
+/// point bounds an edge has at most one visible version, so this stays one
+/// entry per edge there; under a range window each matching version is its own
+/// entry, so ranged expansion can intersect validity along a walk
+/// (docs/plans/2026-07-29-interval-results.md task 2).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct AdjacencyEntry {
     pub node: Iid,
     pub neighbor: Iid,
     pub edge: Iid,
+    pub valid_from: Instant,
+    pub valid_to: Instant,
+    pub system_from: Instant,
+    pub system_to: Instant,
 }
 
 fn traversal_budget_exhausted(kind: &str, budget: usize) -> EngineError {
@@ -320,45 +329,57 @@ async fn edge_adjacency_impl(
         // — the same deny-by-default rule as `LabelFilter::Visible`, so a
         // multi-label edge is invisible to traversal exactly as it is to a
         // scan.
-        let matched = visible.iter().any(|v| match &v.event.op {
-            Op::Put { labels, doc } => {
-                label.is_none_or(|l| labels.iter().any(|x| x == l))
-                    && edge_visible.is_none_or(|allowed| {
-                        !labels.is_empty() && labels.iter().all(|l| allowed.contains(l))
-                    })
-                    && props
-                        .iter()
-                        .all(|(k, want)| doc.get(k).is_some_and(|got| got == want))
+        // One entry per matching VERSION, not per edge: under a range window
+        // an edge can have several visible versions with distinct validity,
+        // and each is its own walk candidate (a point window resolves to at
+        // most one, so this stays one entry per edge there).
+        let mut edge_matched = false;
+        for v in &visible {
+            let matched = match &v.event.op {
+                Op::Put { labels, doc } => {
+                    label.is_none_or(|l| labels.iter().any(|x| x == l))
+                        && edge_visible.is_none_or(|allowed| {
+                            !labels.is_empty() && labels.iter().all(|l| allowed.contains(l))
+                        })
+                        && props
+                            .iter()
+                            .all(|(k, want)| doc.get(k).is_some_and(|got| got == want))
+                }
+                _ => false,
+            };
+            if !matched {
+                continue;
             }
-            _ => false,
-        });
-        if !matched {
-            continue;
-        }
-        let (Some(src), Some(dst)) = (events[0].src, events[0].dst) else {
-            return Err(EngineError::Index(varve_index::IndexError::Codec(
-                "edge event missing endpoints".into(),
-            )));
-        };
-        let (node, neighbor) = match direction {
-            AdjDirection::Out => (src, dst),
-            AdjDirection::In => (dst, src),
-        };
-        if let Some(budget) = adjacency_budget {
-            if entries.len() >= budget {
-                return Err(traversal_budget_exhausted("adjacency", budget));
+            let (Some(src), Some(dst)) = (events[0].src, events[0].dst) else {
+                return Err(EngineError::Index(varve_index::IndexError::Codec(
+                    "edge event missing endpoints".into(),
+                )));
+            };
+            let (node, neighbor) = match direction {
+                AdjDirection::Out => (src, dst),
+                AdjDirection::In => (dst, src),
+            };
+            if let Some(budget) = adjacency_budget {
+                if entries.len() >= budget {
+                    return Err(traversal_budget_exhausted("adjacency", budget));
+                }
             }
+            entries.push(AdjacencyEntry {
+                node,
+                neighbor,
+                edge: *edge,
+                valid_from: v.valid_from,
+                valid_to: v.valid_to,
+                system_from: v.event.system_from,
+                system_to: v.system_to,
+            });
+            edge_matched = true;
         }
-        entries.push(AdjacencyEntry {
-            node,
-            neighbor,
-            edge: *edge,
-        });
-        if collect_events {
+        if edge_matched && collect_events {
             edge_events.push((*edge, events.clone()));
         }
     }
-    entries.sort_by_key(|e| (e.node, e.neighbor, e.edge));
+    entries.sort_by_key(|e| (e.node, e.neighbor, e.edge, e.valid_from, e.system_from));
     Ok((entries, edge_events))
 }
 
@@ -583,7 +604,7 @@ pub(crate) async fn reachable_edges(
     // feeds only the reachable NODE set for a fixed path — where a duplicate or
     // a swapped orientation is immaterial, both endpoints land in the set — and
     // the adjacency for a quantified hop, which is always homogeneous.
-    entries.sort_by_key(|e| (e.node, e.neighbor, e.edge));
+    entries.sort_by_key(|e| (e.node, e.neighbor, e.edge, e.valid_from, e.system_from));
     entries.dedup();
 
     let batch = match batch_label {

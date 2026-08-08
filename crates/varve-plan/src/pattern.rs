@@ -14,7 +14,9 @@
 //! [`crate::functions::session_context`].
 
 use crate::exec::{degenerate_query, PIPELINE_UNSUPPORTED};
-use crate::expand::{EdgeAdjacency, PathExpandLimits, PathExpandNode};
+use crate::expand::{
+    CoincidenceAxes, EdgeAdjacency, PathExpandLimits, PathExpandNode, WalkIntervalCols,
+};
 use crate::expr::{
     iid_from_conjuncts, iid_from_expr, lower_expr, split_conjuncts, ElementCols, ExistsConjunct,
     Scope,
@@ -34,9 +36,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use varve_gql::ast::{
     display_expr, Clause, Direction, EdgePattern, Expr, LabelSpec, Literal, NodePattern,
-    PathPattern, QueryBody, QueryStmt, ReturnClause, SortItem, UnionKind,
+    PathPattern, QueryBody, QueryStmt, ReturnClause, SortItem, TemporalClauses, UnionKind,
 };
-use varve_types::{Iid, Value};
+use varve_types::{Iid, TemporalDimension, Value};
 
 /// v1 single default graph (mirrors the engine's `DEFAULT_GRAPH`) — the graph
 /// component of an entity's derived IID.
@@ -234,7 +236,149 @@ pub fn scan_specs_with_params(
             "first clause must be non-OPTIONAL MATCH".into(),
         ));
     }
+    reject_range_window_over_unsupported_shapes(body, &clauses)?;
     Ok(clauses)
+}
+
+/// Which axes need cross-element coincidence, resolved from the AST exactly as
+/// the engine's `match_bounds` resolves windows: a per-`MATCH` clause wins over
+/// the query-level clause, and an absent clause is the point default (`AS OF
+/// now`). An axis is on when ANY `MATCH` clause's resolved window on it is a
+/// range — with mixed per-clause windows the point-window elements still
+/// participate (their versions carry intervals like any other), which is the
+/// correct semantics: a 2021 version paired with a now-only version never
+/// coexisted either. Both-off is every shipped query, and every write (writes
+/// always pass default clauses), so those plans stay byte-identical.
+pub(crate) fn coincidence_axes(body: &QueryBody) -> CoincidenceAxes {
+    let axis_is_ranged = |axis: fn(&TemporalClauses) -> Option<TemporalDimension>| {
+        body.clauses.iter().any(|clause| match clause {
+            Clause::Match { temporal, .. } => axis(temporal)
+                .or_else(|| axis(&body.temporal))
+                .is_some_and(|dim| !dim.is_point()),
+            _ => false,
+        })
+    };
+    CoincidenceAxes {
+        valid: axis_is_ranged(|temporal| temporal.valid),
+        system: axis_is_ranged(|temporal| temporal.system),
+    }
+}
+
+fn ranged_axis_names(axes: CoincidenceAxes) -> String {
+    let mut names = Vec::new();
+    if axes.valid {
+        names.push("FOR VALID_TIME");
+    }
+    if axes.system {
+        names.push("FOR SYSTEM_TIME");
+    }
+    names.join(" and ")
+}
+
+/// Refuses a range-form temporal window over the two shapes the coincidence
+/// machinery does not cover yet (`docs/plans/2026-07-29-interval-results.md`
+/// tasks 1–2 cover inner-join patterns; these two need the predicate inside
+/// their own join conditions):
+///
+/// - **OPTIONAL MATCH**: a non-coincident optional match must become NULLs,
+///   not drop the row, so the coincidence predicate belongs in the left-join
+///   condition, and the final filter would have to skip optional elements.
+/// - **EXISTS**: the subpattern's columns don't survive its semi-join, so
+///   coincidence with the outer elements must ride the semi-join itself.
+///
+/// Everything else — multi-hop paths, comma patterns, chained `MATCH`,
+/// quantified hops — is answered coincidently by `apply_coincidence_filter`
+/// and the walk-interval pruning in [`crate::expand`]. Point windows are
+/// exempt per axis (see [`TemporalDimension::is_point`]): an omitted `FOR`
+/// clause is `AS OF now`, and at a point coincidence is implied by the per-row
+/// filter.
+fn reject_range_window_over_unsupported_shapes(
+    body: &QueryBody,
+    clauses: &[ClauseSpecs],
+) -> Result<(), PlanError> {
+    let axes = coincidence_axes(body);
+    if !axes.any() {
+        return Ok(());
+    }
+    let shape = if clauses.iter().any(|clause| clause.optional) {
+        Some("OPTIONAL MATCH")
+    } else if clauses.iter().any(|clause| !clause.exists.is_empty()) {
+        Some("EXISTS")
+    } else {
+        None
+    };
+    let Some(shape) = shape else {
+        return Ok(());
+    };
+    Err(PlanError::Unsupported(format!(
+        "{} with a range window (FROM ... TO / BETWEEN / ALL) does not support \
+         {shape}: matched versions are not intersected across its join, so the \
+         result could reflect combinations that never simultaneously existed. \
+         Use AS OF, or drop the {shape}.",
+        ranged_axis_names(axes)
+    )))
+}
+
+/// The coincidence filter (`docs/plans/2026-07-29-interval-results.md` §2.1):
+/// over a range window, a row is a real answer only if every matched element's
+/// validity shares an instant — per ranged axis,
+/// `max(from) < min(to)` over all bound elements. One filter over the joined
+/// frame rather than a per-join predicate, because coincidence is not
+/// adjacent-pairwise: a chain join only ever compares adjacent frames, and
+/// `[1,3), [2,5), [4,6)` passes every adjacent check while the triple shares
+/// no instant. Every element's four temporal columns survive the joins
+/// (`mangle_batch` carries them; a quantified hop contributes its walk-interval
+/// columns), so the global intersection is exact. Point axes contribute no
+/// predicate, so both-point plans — every shipped query — are untouched.
+fn apply_coincidence_filter(
+    df: DataFrame,
+    specs: &[ScanSpec],
+    axes: CoincidenceAxes,
+) -> Result<DataFrame, PlanError> {
+    if !axes.any() {
+        return Ok(df);
+    }
+    let available: BTreeSet<String> = df
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().to_string())
+        .collect();
+    let vars: BTreeSet<&str> = specs.iter().map(|spec| spec.var.as_str()).collect();
+    let mut predicate: Option<DfExpr> = None;
+    for (enabled, from_suffix, to_suffix) in [
+        (axes.valid, "_valid_from", "_valid_to"),
+        (axes.system, "_system_from", "_system_to"),
+    ] {
+        if !enabled {
+            continue;
+        }
+        let mut froms = Vec::new();
+        let mut tos = Vec::new();
+        for var in &vars {
+            let from = mangled(var, from_suffix);
+            let to = mangled(var, to_suffix);
+            if available.contains(&from) && available.contains(&to) {
+                froms.push(col_exact(from));
+                tos.push(col_exact(to));
+            }
+        }
+        // One element (or none) has nothing to intersect; its window filter
+        // already answered the question.
+        if froms.len() < 2 {
+            continue;
+        }
+        let condition = datafusion::functions::expr_fn::greatest(froms)
+            .lt(datafusion::functions::expr_fn::least(tos));
+        predicate = Some(match predicate {
+            Some(existing) => existing.and(condition),
+            None => condition,
+        });
+    }
+    match predicate {
+        Some(predicate) => Ok(df.filter(predicate)?),
+        None => Ok(df),
+    }
 }
 
 /// Validates the statement (single linear path, at most one label per node,
@@ -614,6 +758,9 @@ pub async fn execute_pattern(
         .any(|s| matches!(s.kind, SpecKind::Expand { .. }));
     let forward = has_expand
         || row_counts.first().copied().unwrap_or(0) <= row_counts.last().copied().unwrap_or(0);
+    // Writer/test-helper path: statements here always carry default (point)
+    // clauses, so no coincidence axes apply (reads with range windows flow
+    // through `execute_body*`, which resolves them from the body).
     let df = join_chain(
         frames,
         adjacencies,
@@ -621,6 +768,7 @@ pub async fn execute_pattern(
         path,
         forward,
         PathExpandLimits::default(),
+        CoincidenceAxes::default(),
     )?;
     let df = apply_where(df, query.where_clause, specs, params, functions)?;
 
@@ -714,10 +862,12 @@ fn build_body_frame_with_limits(
     let mut acc: Option<DataFrame> = None;
     let mut all_specs = Vec::new();
     let mut value_vars = BTreeSet::new();
+    let coincidence = coincidence_axes(body);
     let lowering = LoweringContext {
         params,
         functions,
         path_expand_limits,
+        coincidence,
     };
 
     for clause in &body.clauses {
@@ -839,6 +989,7 @@ fn build_body_frame_with_limits(
                             path_df,
                             &shared_vars(&clause_specs_so_far, specs),
                             JoinType::Inner,
+                            coincidence,
                         )?,
                         None => path_df,
                     });
@@ -856,6 +1007,7 @@ fn build_body_frame_with_limits(
                     path_df,
                     &shared_vars(&clause_specs_so_far, specs),
                     JoinType::Inner,
+                    coincidence,
                 )?,
                 None => path_df,
             });
@@ -894,7 +1046,13 @@ fn build_body_frame_with_limits(
                         &lowering,
                     )?
                 } else {
-                    join_dataframes(left, clause_df, &clause_spec.shared_vars, JoinType::Inner)?
+                    join_dataframes(
+                        left,
+                        clause_df,
+                        &clause_spec.shared_vars,
+                        JoinType::Inner,
+                        coincidence,
+                    )?
                 }
             }
             None => {
@@ -924,6 +1082,7 @@ fn build_body_frame_with_limits(
 
     let df = acc
         .ok_or_else(|| PlanError::Unsupported("first clause must be non-OPTIONAL MATCH".into()))?;
+    let df = apply_coincidence_filter(df, &all_specs, coincidence)?;
     Ok(Some(project_return_body_frame(
         df,
         &body.ret,
@@ -1097,6 +1256,7 @@ struct LoweringContext<'a> {
     params: &'a BTreeMap<String, Value>,
     functions: &'a FunctionRegistry,
     path_expand_limits: PathExpandLimits,
+    coincidence: CoincidenceAxes,
 }
 
 #[derive(Clone, Copy)]
@@ -1169,6 +1329,7 @@ fn path_dataframe(
         path,
         forward,
         lowering.path_expand_limits,
+        lowering.coincidence,
     )
 }
 
@@ -1393,6 +1554,7 @@ fn exists_dataframe(
                 path_df,
                 &shared_vars(&specs_so_far, path_specs),
                 JoinType::Inner,
+                lowering.coincidence,
             )?,
             None => path_df,
         });
@@ -1414,6 +1576,7 @@ fn join_dataframes(
     mut right: DataFrame,
     shared_vars: &[String],
     join_type: JoinType,
+    axes: CoincidenceAxes,
 ) -> Result<DataFrame, PlanError> {
     if shared_vars.is_empty() {
         let left = left.with_column("__cross", lit(1i64))?;
@@ -1422,16 +1585,44 @@ fn join_dataframes(
             .join(right, join_type, &["__cross"], &["__cross_right"], None)?
             .drop_columns(&["__cross", "__cross_right"])?);
     }
-    let keys = shared_vars
+    // Under a range window a shared var re-binds to a VERSION, not an entity:
+    // both occurrences scan the same version set, and an iid-only join would
+    // pair the left's version i with the right's version j — duplicating rows
+    // (the right's columns are dropped below, so the pairs are
+    // indistinguishable) and silently losing the right version's validity. Add
+    // `_valid_from`/`_system_from` (which identify a version) to the equi-key.
+    // Point windows resolve one version per entity, so this adds nothing there
+    // and the key stays `_iid` alone — plan-identical for every shipped query.
+    let mut key_suffixes = vec!["_iid"];
+    if axes.any() {
+        key_suffixes.extend(["_valid_from", "_system_from"]);
+    }
+    let left_cols: BTreeSet<String> = left
+        .schema()
+        .fields()
         .iter()
-        .map(|var| mangled(var, "_iid"))
-        .collect::<Vec<_>>();
-    let mut right_keys = Vec::with_capacity(keys.len());
+        .map(|field| field.name().to_string())
+        .collect();
+    let right_cols: BTreeSet<String> = right
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().to_string())
+        .collect();
+    let mut keys = Vec::new();
+    let mut right_keys = Vec::new();
     let mut drop_cols = Vec::new();
-    for (var, key) in shared_vars.iter().zip(&keys) {
-        let right_key = format!("__join_{key}");
-        right = right.with_column(&right_key, col_exact(key.clone()))?;
-        right_keys.push(right_key);
+    for var in shared_vars {
+        for suffix in &key_suffixes {
+            let key = mangled(var, suffix);
+            if *suffix != "_iid" && !(left_cols.contains(&key) && right_cols.contains(&key)) {
+                continue;
+            }
+            let right_key = format!("__join_{key}");
+            right = right.with_column(&right_key, col_exact(key.clone()))?;
+            keys.push(key);
+            right_keys.push(right_key);
+        }
         let prefix = format!("{var}__");
         drop_cols.extend(
             right
@@ -1800,7 +1991,10 @@ fn join_hop(
 /// A quantified hop: builds a [`PathExpandNode`] over `acc` (which ends at the
 /// hop's start node `prev_var`), then joins its produced `expand_iid` to the
 /// end node's `_iid`. Direction is already baked into `adjacency`'s orientation
-/// by the engine, so no edge-direction handling is needed here.
+/// by the engine, so no edge-direction handling is needed here. Under a range
+/// window (`axes`), the node also emits the walk's interval as the expand
+/// element's mangled temporal columns, so `apply_coincidence_filter` treats
+/// the whole walk as one more bound element.
 #[allow(clippy::too_many_arguments)]
 fn expand_hop(
     acc: DataFrame,
@@ -1808,11 +2002,27 @@ fn expand_hop(
     adjacency: Arc<EdgeAdjacency>,
     prev_var: &str,
     end_var: &str,
+    expand_var: &str,
     path_var: Option<String>,
     min: u32,
     max: u32,
     path_expand_limits: PathExpandLimits,
+    axes: CoincidenceAxes,
 ) -> Result<DataFrame, PlanError> {
+    let interval_cols = WalkIntervalCols {
+        valid: axes.valid.then(|| {
+            (
+                mangled(expand_var, "_valid_from"),
+                mangled(expand_var, "_valid_to"),
+            )
+        }),
+        system: axes.system.then(|| {
+            (
+                mangled(expand_var, "_system_from"),
+                mangled(expand_var, "_system_to"),
+            )
+        }),
+    };
     let (state, plan) = acc.into_parts();
     let node = PathExpandNode::try_new_with_limits(
         plan,
@@ -1820,6 +2030,7 @@ fn expand_hop(
         mangled(prev_var, "_iid"),
         mangled(end_var, "expand_iid"),
         path_var.as_ref().map(|p| mangled(p, "path")),
+        interval_cols,
         min,
         max,
         path_expand_limits,
@@ -1846,6 +2057,7 @@ fn join_chain(
     path: &PathPattern,
     forward: bool,
     path_expand_limits: PathExpandLimits,
+    axes: CoincidenceAxes,
 ) -> Result<DataFrame, PlanError> {
     // Element order in specs/frames is `[n0, e0, n1, e1, n2, …]`: node i is
     // index `2*i`, hop i's edge is index `1 + 2*i`.
@@ -1881,10 +2093,12 @@ fn join_chain(
                     adjacency,
                     &specs[2 * i].var,
                     &specs[node_idx].var,
+                    &specs[edge_idx].var,
                     path_var.clone(),
                     *min,
                     *max,
                     path_expand_limits,
+                    axes,
                 )?;
             } else {
                 let edge_frame = take(&mut frames, edge_idx)?;
@@ -2530,6 +2744,196 @@ mod tests {
             err.to_string()
                 .contains("quantifier max 99 exceeds max_path_depth 10"),
             "unexpected error: {err}"
+        );
+    }
+
+    /// Plan-level pin for the range-window guard
+    /// (`docs/plans/2026-07-29-interval-results.md` tasks 1–2). With
+    /// coincident joins, range windows are legal over every inner-join shape —
+    /// multi-hop, comma patterns, chained `MATCH`, quantified hops — and
+    /// refused only over the two shapes whose own join must carry the
+    /// predicate (OPTIONAL MATCH, EXISTS), with the ranged axis named.
+    #[test]
+    fn scan_specs_reject_range_windows_only_over_optional_and_exists() {
+        let refusal = |gql: &str| {
+            let err = scan_specs(&query(gql).first, DEFAULT_GRAPH, DEFAULT_MAX_PATH_DEPTH)
+                .expect_err("a range window over OPTIONAL/EXISTS must be refused");
+            let message = err.to_string();
+            assert!(
+                message.contains("does not support"),
+                "unexpected error: {message}"
+            );
+            message
+        };
+        let accepted = |gql: &str| {
+            scan_specs(&query(gql).first, DEFAULT_GRAPH, DEFAULT_MAX_PATH_DEPTH)
+                .unwrap_or_else(|err| panic!("{gql} must plan: {err}"));
+        };
+
+        // Coincident joins answer every inner-join shape, on either axis.
+        accepted("FOR VALID_TIME ALL MATCH (a:A)-[:K]->(b:A) RETURN a.name");
+        accepted(
+            "FOR VALID_TIME BETWEEN DATE '2021-01-01' AND DATE '2021-12-31' \
+             MATCH (a:A)-[:K]->(b:A) RETURN a.name",
+        );
+        accepted(
+            "FOR VALID_TIME FROM DATE '2021-01-01' TO DATE '2021-12-31' \
+             MATCH (a:A)-[:K]->{1,3}(b:A) RETURN a.name",
+        );
+        accepted("FOR VALID_TIME ALL MATCH (a:A), (b:A) RETURN a.name");
+        accepted("FOR VALID_TIME ALL MATCH (a:A) MATCH (b:A) RETURN a.name");
+        accepted("FOR SYSTEM_TIME ALL MATCH (a:A)-[:K]->(b:A) RETURN a.name");
+        // Point windows at any depth — including the default (`AS OF now` on
+        // both axes), i.e. every ordinary query.
+        accepted("MATCH (a:A)-[:K]->(b:A)-[:K]->(c:A) RETURN a.name");
+        accepted("FOR VALID_TIME AS OF DATE '2021-06-01' MATCH (a:A)-[:K]->(b:A) RETURN a.name");
+
+        // The two shapes the coincidence machinery does not cover yet, with
+        // the ranged axis named so a mixed-axis query is not misdiagnosed.
+        let message = refusal(
+            "FOR VALID_TIME ALL MATCH (a:A) WHERE EXISTS { (a)-[:K]->(b:A) } RETURN a.name",
+        );
+        assert!(
+            message.contains("EXISTS")
+                && message.contains("FOR VALID_TIME")
+                && !message.contains("FOR SYSTEM_TIME"),
+            "unexpected error: {message}"
+        );
+        let message =
+            refusal("FOR SYSTEM_TIME ALL MATCH (a:A) OPTIONAL MATCH (a)-[:K]->(b:A) RETURN a.name");
+        assert!(
+            message.contains("OPTIONAL MATCH") && message.contains("FOR SYSTEM_TIME"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            refusal(
+                "FOR VALID_TIME ALL FOR SYSTEM_TIME ALL MATCH (a:A) \
+                 OPTIONAL MATCH (a)-[:K]->(b:A) RETURN a.name"
+            )
+            .contains("FOR VALID_TIME and FOR SYSTEM_TIME"),
+            "both axes ranged names both"
+        );
+        // A per-MATCH point clause overrides the query-level range, exactly as
+        // `match_bounds` resolves it — when EVERY clause resolves to a point,
+        // OPTIONAL under a query-level range stays legal.
+        accepted(
+            "FOR VALID_TIME ALL MATCH (a:A) FOR VALID_TIME AS OF DATE '2021-06-01' \
+             OPTIONAL MATCH (a)-[:K]->(b:A) FOR VALID_TIME AS OF DATE '2021-06-01' \
+             RETURN a.name",
+        );
+    }
+
+    /// Empty scan batch with the real scan's column shape (iid + the four
+    /// UTC-microsecond temporal columns, endpoints for edges), enough for
+    /// plan-shape assertions — no rows are ever executed.
+    fn scan_batch(is_edge: bool) -> RecordBatch {
+        let ts = || {
+            DataType::Timestamp(
+                datafusion::arrow::datatypes::TimeUnit::Microsecond,
+                Some("UTC".into()),
+            )
+        };
+        let mut fields = vec![
+            Field::new("_iid", DataType::FixedSizeBinary(16), false),
+            Field::new("_system_from", ts(), false),
+            Field::new("_system_to", ts(), false),
+            Field::new("_valid_from", ts(), false),
+            Field::new("_valid_to", ts(), false),
+        ];
+        if is_edge {
+            fields.push(Field::new("_src_iid", DataType::FixedSizeBinary(16), false));
+            fields.push(Field::new("_dst_iid", DataType::FixedSizeBinary(16), false));
+        }
+        fields.push(Field::new("name", DataType::Utf8, true));
+        let schema = Arc::new(Schema::new(fields));
+        let columns = schema
+            .fields()
+            .iter()
+            .map(|field| new_empty_array(field.data_type()))
+            .collect::<Vec<_>>();
+        RecordBatch::try_new(schema, columns).unwrap()
+    }
+
+    /// Plans `gql` over synthetic empty scans and renders the logical plan.
+    fn body_plan(gql: &str) -> String {
+        let stmt = query(gql);
+        let body = &stmt.first;
+        let clauses = scan_specs(body, DEFAULT_GRAPH, DEFAULT_MAX_PATH_DEPTH).unwrap();
+        let inputs = clauses
+            .iter()
+            .map(|clause| {
+                clause
+                    .specs
+                    .iter()
+                    .map(|spec| match spec.kind {
+                        SpecKind::Node { .. } => ScanInput::Batch(Some(scan_batch(false))),
+                        SpecKind::Edge { .. } => ScanInput::Batch(Some(scan_batch(true))),
+                        SpecKind::Expand { .. } => {
+                            ScanInput::Adjacency(Arc::new(EdgeAdjacency::default()))
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let df = build_body_frame_with_limits(
+            body,
+            &clauses,
+            inputs,
+            &FunctionRegistry::with_builtins(),
+            PathExpandLimits::default(),
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .expect("plan must build");
+        let rendered = df.logical_plan().display_indent().to_string();
+        rendered
+    }
+
+    /// The task-1 guard, as a plan-shape assertion rather than a latency one:
+    /// a point window on both axes — every shipped query — must carry no
+    /// coincidence predicate at all, so `AS OF` plans stay byte-identical.
+    #[test]
+    fn point_window_plans_carry_no_coincidence_predicate() {
+        for gql in [
+            "MATCH (a:A)-[:K]->(b:A) RETURN a.name",
+            "FOR VALID_TIME AS OF DATE '2021-06-01' MATCH (a:A)-[:K]->(b:A)-[:K]->(c:A) \
+             RETURN a.name",
+            "MATCH (a:A)-[:K]->{1,3}(b:A) RETURN a.name",
+        ] {
+            let plan = body_plan(gql);
+            assert!(
+                !plan.contains("greatest(") && !plan.contains("coincide"),
+                "point-window plan for {gql} must carry no coincidence artifacts:\n{plan}"
+            );
+        }
+    }
+
+    /// The per-axis half of the guard: `FOR SYSTEM_TIME ALL` pays for the
+    /// system axis only (§2.1a's mixed case), and a valid-axis range for the
+    /// valid axis only.
+    #[test]
+    fn ranged_window_plans_filter_only_the_ranged_axis() {
+        let plan = body_plan("FOR SYSTEM_TIME ALL MATCH (a:A)-[:K]->(b:A) RETURN a.name");
+        let filter = plan
+            .lines()
+            .find(|line| line.contains("greatest("))
+            .expect("a ranged plan must carry the coincidence filter");
+        assert!(
+            filter.contains("_system_from") && !filter.contains("_valid_from"),
+            "system-axis range must intersect the system axis only: {filter}"
+        );
+
+        let plan = body_plan(
+            "FOR VALID_TIME BETWEEN DATE '2021-01-01' AND DATE '2021-12-31' \
+             MATCH (a:A)-[:K]->(b:A) RETURN a.name",
+        );
+        let filter = plan
+            .lines()
+            .find(|line| line.contains("greatest("))
+            .expect("a ranged plan must carry the coincidence filter");
+        assert!(
+            filter.contains("_valid_from") && !filter.contains("_system_from"),
+            "valid-axis range must intersect the valid axis only: {filter}"
         );
     }
 

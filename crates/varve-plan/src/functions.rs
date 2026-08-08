@@ -56,6 +56,7 @@ impl FunctionRegistry {
             ("valid_from", temporal_column_builder),
             ("valid_to", temporal_column_builder),
             ("system_from", temporal_column_builder),
+            ("system_to", temporal_column_builder),
         ] {
             functions.register_scalar(name, ScalarFn::Builder(builder));
         }
@@ -97,6 +98,29 @@ pub(crate) fn temporal_column(name: &str) -> Option<(&'static str, &'static str)
         "valid_from" => Some(("_valid_from", "valid_from")),
         "valid_to" => Some(("_valid_to", "valid_to")),
         "system_from" => Some(("_system_from", "system_from")),
+        // `_system_to` is never stored, but it IS derived at read time and is a
+        // non-nullable column in every scanned batch, so projecting it costs
+        // nothing (docs/plans/2026-07-29-interval-results.md §2.2).
+        "system_to" => Some(("_system_to", "system_to")),
+        _ => None,
+    }
+}
+
+/// The nullary coincidence projections (`docs/plans/2026-07-29-interval-results.md`
+/// task 3): `(hidden column suffix, true = lower bound)`. The subject is the
+/// whole match rather than any one variable — `coincide_valid_from()` is the
+/// `max` of every bound element's `_valid_from`, `coincide_valid_to()` the
+/// `min` of every `_valid_to`, &c. Handled directly by the lowering (no
+/// registry entry): under any window the element columns are present, so the
+/// interval is always readable — under `AS OF` it is simply the interval over
+/// which the matched versions coexisted, which necessarily contains the query
+/// instant.
+pub(crate) fn coincide_column(name: &str) -> Option<(&'static str, bool)> {
+    match normalize_name(name).as_str() {
+        "coincide_valid_from" => Some(("_valid_from", true)),
+        "coincide_valid_to" => Some(("_valid_to", false)),
+        "coincide_system_from" => Some(("_system_from", true)),
+        "coincide_system_to" => Some(("_system_to", false)),
         _ => None,
     }
 }

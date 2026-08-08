@@ -1121,6 +1121,10 @@ async fn scan_input_for(
                             varve_plan::AdjEdge {
                                 neighbor: e.neighbor,
                                 edge: e.edge,
+                                valid_from: e.valid_from,
+                                valid_to: e.valid_to,
+                                system_from: e.system_from,
+                                system_to: e.system_to,
                             },
                         )
                     }));
@@ -2250,6 +2254,10 @@ impl Db {
                             varve_plan::AdjEdge {
                                 neighbor: e.neighbor,
                                 edge: e.edge,
+                                valid_from: e.valid_from,
+                                valid_to: e.valid_to,
+                                system_from: e.system_from,
+                                system_to: e.system_to,
                             },
                         )
                     }));

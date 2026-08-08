@@ -28,6 +28,16 @@ read-scaling query nodes over any S3-compatible object store.
   DELETE, and `ERASE` / `DETACH ERASE`.
 - Traversal runs as a real DataFusion extension (`PathExpand`) with
   as-of-correct adjacency built at query bounds.
+- **Range windows answer coincidently**
+  (`docs/plans/2026-07-29-interval-results.md`): over `FROM … TO` / `BETWEEN` /
+  `ALL`, a multi-element match is a row only if every bound element's validity
+  shares an instant on the ranged axis — quantified hops intersect edge
+  versions along the walk and prune non-coincident paths at the frontier.
+  Point-window (`AS OF`, and default) plans carry zero coincidence machinery,
+  guarded by plan-shape tests. Temporal projections cover all four fields —
+  `system_to(v)` joins `valid_from`/`valid_to`/`system_from` — and the nullary
+  `coincide_valid_from()` / `coincide_valid_to()` / `coincide_system_from()` /
+  `coincide_system_to()` read the match's coincidence interval.
 - An adapted GQL TCK plus the temporal suites run in CI (current pass rate
   ≈ 0.87 with reasoned exclusions — see `docs/book/src/gql/deviations.md`).
 
@@ -177,6 +187,14 @@ read-scaling query nodes over any S3-compatible object store.
   ingestion, and an Arrow-IPC request format are tracked as future work.
 - Retroactive / as-of `DELETE` is deferred post-v1 (`DELETE` acts on current
   state; a `FOR` clause on `DELETE` is a parse error).
+- A **range-form** temporal window (`FROM … TO`, `BETWEEN`, `ALL`) over
+  `OPTIONAL MATCH` or `EXISTS` is rejected, on whichever axis carries the
+  range — those two shapes need the coincidence predicate inside their own
+  join, which is not built yet. Every other shape (multi-hop, comma patterns,
+  chained `MATCH`, quantified hops) answers **coincidently**: a row is
+  returned only if all matched versions share an instant on the ranged axis
+  (see the GQL surface section). `AS OF` — a point window, and the default on
+  both axes — is unaffected at any pattern depth.
 - Every spec §13 laptop target that has been measured is met; the object-store
   tx/s and scale-out numbers are single-machine (loopback MinIO / shared-CPU
   processes) and should be re-measured on distributed hardware before being

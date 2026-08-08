@@ -30,6 +30,36 @@ Each axis independently accepts one of four forms (all four verified against
 
 `<datetime>` is `TIMESTAMP '<RFC 3339 string>'` or `DATE '<YYYY-MM-DD>'`.
 
+### Range windows answer coincidently
+
+Over a **range** window (`FROM … TO`, `BETWEEN`, `ALL`) a match is a row only
+if every bound element's validity **shares an instant** on the ranged axis: the
+result never contains a path that did not simultaneously exist. A temporal
+window alone is a per-row predicate — each element is tested against the window
+on its own — so the planner additionally intersects validity across the whole
+pattern (`max(from) < min(to)` over every element, per ranged axis; quantified
+hops intersect edge versions along the walk and prune at the frontier). Without
+that intersection, a version of `a` valid only in January would be reported as
+joined to an edge valid only in December — a path that never existed.
+
+The interval over which the match held is projectable — see the
+`coincide_*` functions under [Temporal functions](#temporal-functions).
+
+`AS OF` needs none of this: a one-microsecond window makes the intersection
+free, since anything that passes the per-row filter necessarily coexisted with
+everything else that did. An omitted `FOR` clause is `AS OF now` on both axes,
+so ordinary queries carry zero coincidence machinery — their plans are
+unchanged. The axes are handled independently:
+`FOR SYSTEM_TIME ALL MATCH (a)-[:R]->(b)` intersects the system axis only
+("were these facts ever simultaneously *known*") while the valid axis stays a
+point.
+
+Two shapes are still refused under a range window, with a plan error naming
+the shape and the ranged axis: **OPTIONAL MATCH** (a non-coincident optional
+match must become NULLs, not drop the row, so the predicate belongs inside its
+left join) and **EXISTS** (the subpattern's columns don't survive its
+semi-join). Use `AS OF`, or drop the clause.
+
 Both axes on one query, combining a valid-time range with an all-system-time scan:
 
 ```gql
@@ -91,18 +121,34 @@ INSERT (:P {_id: 1})-[:K]->(:P {_id: 2}) VALID FROM TIMESTAMP '2020-01-01T00:00:
 
 ## Temporal functions
 
-`valid_from(var)`, `valid_to(var)`, and `system_from(var)` project the bound-in-time fields of
-a matched variable in a `RETURN` (backed by DataFusion columns `_valid_from`/`_valid_to`/
-`_system_from`, `crates/varve-plan/src/functions.rs`):
+`valid_from(var)`, `valid_to(var)`, `system_from(var)`, and `system_to(var)` project the
+bound-in-time fields of a matched variable in a `RETURN` (backed by DataFusion columns
+`_valid_from`/`_valid_to`/`_system_from`/`_system_to`, `crates/varve-plan/src/functions.rs`):
 
 ```gql
-MATCH (p:Person) RETURN valid_from(p) AS since, valid_to(p), system_from(p)
+MATCH (p:Person) RETURN valid_from(p) AS since, valid_to(p), system_from(p), system_to(p)
 ```
 *(parser test)*
 
-There is no `system_to()`: per the [architecture overview](../architecture.md), effective
-system-time upper bounds are never stored; they are derived at read time by scanning newer
-events for the same internal id, never persisted as their own field.
+`system_to(var)` reads a **derived** value: per the
+[architecture overview](../architecture.md), effective system-time upper bounds are never
+*stored* — they are computed at read time by scanning newer events for the same internal
+id — but the scan materializes them as a non-nullable column in every batch, so projecting
+one costs nothing. A live, never-superseded row reads as end-of-time.
+
+The nullary `coincide_valid_from()` / `coincide_valid_to()` / `coincide_system_from()` /
+`coincide_system_to()` project the **match's coincidence interval** — the intersection of
+every bound element's validity (`max` of the froms, `min` of the tos). Nullary because the
+subject is the whole match rather than any one variable. Under a range window this is the
+interval during which the returned combination actually held; under `AS OF` it is the
+interval over which the matched versions coexisted, which necessarily contains the query
+instant:
+
+```gql
+FOR VALID_TIME BETWEEN DATE '2021-01-01' AND DATE '2021-12-31'
+MATCH (n:Node)-[:RUNS]->(p:Pod)
+RETURN n.name, p.name, coincide_valid_from() AS since, coincide_valid_to() AS until
+```
 
 ## `ERASE` vs `DELETE`: GDPR semantics
 
