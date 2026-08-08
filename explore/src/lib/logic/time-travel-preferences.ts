@@ -6,6 +6,7 @@ import { DEFAULT_TIME_TRAVEL_FILTER, isValidRange } from './time-travel';
 
 export interface TimeTravelPreferences {
   readonly filter: string;
+  readonly filterCollapsed: boolean;
   readonly axis: TemporalAxis;
   readonly grouping: GroupingMode;
   readonly clusterSize: number;
@@ -19,6 +20,7 @@ const MAX_FILTER_LENGTH = 20_000;
 
 export const DEFAULT_TIME_TRAVEL_PREFERENCES: TimeTravelPreferences = {
   filter: DEFAULT_TIME_TRAVEL_FILTER,
+  filterCollapsed: false,
   axis: 'valid',
   grouping: 'auto',
   clusterSize: DEFAULT_CLUSTER_SIZE,
@@ -73,6 +75,7 @@ function decodePreferences(value: unknown): TimeTravelPreferences {
       record.filter.length <= MAX_FILTER_LENGTH
         ? record.filter
         : DEFAULT_TIME_TRAVEL_FILTER,
+    filterCollapsed: record.filterCollapsed === true,
     axis: record.axis === 'system' ? 'system' : 'valid',
     grouping:
       record.grouping === 'none' || record.grouping === 'type' || record.grouping === 'auto'

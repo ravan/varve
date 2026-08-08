@@ -1,4 +1,5 @@
 import { classifyGql } from './gql';
+import type { NormalizedRow } from './results';
 
 export type TemporalAxis = 'valid' | 'system';
 
@@ -130,6 +131,98 @@ export function customRange(
     return { ok: false, error: 'The interval must span at least ten seconds.' };
   }
   return { ok: true, range: { startMs, endMs } };
+}
+
+export interface DatasetExtent {
+  readonly minMs: number;
+  readonly maxMs: number;
+}
+
+/**
+ * Column-name markers that make a result column count as an instant on each
+ * axis. An unaliased temporal call already matches — its column is literally
+ * `valid_from(cv)` — and an alias keeps working as long as it carries the
+ * function name (`valid_from(cv) AS cve_valid_from`). A column aliased to
+ * anything else simply does not participate in fitting.
+ */
+const AXIS_COLUMN_MARKERS: Record<TemporalAxis, readonly string[]> = {
+  valid: ['valid_from', 'valid_to'],
+  system: ['system_from', 'system_to'],
+};
+
+const INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/;
+const UNBOUNDED_YEAR = 9999;
+const FIT_PADDING_FRACTION = 0.1;
+
+/**
+ * Spans the instants the rows report for `axis`, or null when they report none.
+ * Only the axis in play is read: a query that returns both clocks would
+ * otherwise fit a window stretching from when a fact became true to when it was
+ * recorded, which is years wide and shows neither.
+ */
+export function datasetExtent(
+  rows: readonly NormalizedRow[],
+  axis: TemporalAxis,
+): DatasetExtent | null {
+  const markers = AXIS_COLUMN_MARKERS[axis];
+  let minMs = Number.POSITIVE_INFINITY;
+  let maxMs = Number.NEGATIVE_INFINITY;
+
+  for (const row of rows) {
+    for (const [column, cell] of Object.entries(row)) {
+      if (cell.kind !== 'value') continue;
+      const lower = column.toLowerCase();
+      if (!markers.some((marker) => lower.includes(marker))) continue;
+      const timeMs = parseInstant(cell.value);
+      if (timeMs === null) continue;
+      minMs = Math.min(minMs, timeMs);
+      maxMs = Math.max(maxMs, timeMs);
+    }
+  }
+
+  if (minMs === Number.POSITIVE_INFINITY) return null;
+  return { minMs, maxMs };
+}
+
+/**
+ * Frames `extent` with padding, or returns null when the extent already fits
+ * inside `range` — an in-range dataset leaves the operator's window alone.
+ */
+export function fitRangeToExtent(range: TimeRange, extent: DatasetExtent): TimeRange | null {
+  if (!Number.isFinite(extent.minMs) || !Number.isFinite(extent.maxMs)) return null;
+  if (extent.maxMs < extent.minMs) return null;
+  if (extent.minMs >= range.startMs && extent.maxMs <= range.endMs) return null;
+
+  const span = extent.maxMs - extent.minMs;
+  if (span <= 0) {
+    // A single instant has no extent to frame, so keep the current zoom and
+    // centre it: the one thing the data says is where to look, not how far.
+    const half = Math.max(range.endMs - range.startMs, MIN_RANGE_SPAN_MS) / 2;
+    return {
+      startMs: Math.round(extent.minMs - half),
+      endMs: Math.round(extent.minMs + half),
+    };
+  }
+
+  const padding = Math.max(span * FIT_PADDING_FRACTION, SECOND);
+  const startMs = Math.round(extent.minMs - padding);
+  const endMs = Math.round(extent.maxMs + padding);
+  if (endMs - startMs < MIN_RANGE_SPAN_MS) {
+    const centre = (startMs + endMs) / 2;
+    const halfSpan = MIN_RANGE_SPAN_MS / 2;
+    return { startMs: Math.round(centre - halfSpan), endMs: Math.round(centre + halfSpan) };
+  }
+  return { startMs, endMs };
+}
+
+/** Reads an ISO-8601 instant, rejecting anything else a Date would guess at. */
+function parseInstant(value: unknown): number | null {
+  if (typeof value !== 'string' || !INSTANT_PATTERN.test(value)) return null;
+  const timeMs = Date.parse(value);
+  if (!Number.isFinite(timeMs)) return null;
+  // Open-ended facts carry a sentinel end; fitting to it would zoom to millennia.
+  if (new Date(timeMs).getUTCFullYear() >= UNBOUNDED_YEAR) return null;
+  return timeMs;
 }
 
 export function timelineTicks(range: TimeRange, targetCount = 6): TimelineTick[] {

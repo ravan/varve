@@ -13,6 +13,22 @@ export function extractEntityGraph(
   rows: readonly NormalizedRow[],
   limits: GraphLimits,
 ): GraphExtraction {
+  // No rows is an answer, not a malformed query: a time-travel read at an
+  // instant before its subject existed returns nothing, and telling the operator
+  // to "return whole variables" there is wrong and alarming. The proven-topology
+  // extractor already reports empty results as available-with-no-nodes, which is
+  // what renders "Nothing here at this instant"; match it.
+  if (rows.length === 0) {
+    return {
+      available: true,
+      nodes: [],
+      edges: [],
+      totalNodes: 0,
+      totalEdges: 0,
+      truncated: false,
+    };
+  }
+
   const nodesByIid = new Map<string, { labels: Set<string>; captions: Map<string, string> }>();
   const edgesByIid = new Map<string, { source: string; target: string; type?: string }>();
 

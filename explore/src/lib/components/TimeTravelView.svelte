@@ -25,6 +25,8 @@
   import {
     buildTimeTravelGql,
     clampTime,
+    datasetExtent,
+    fitRangeToExtent,
     formatInstantWithDate,
     RELATIVE_INTERVALS,
     relativeRange,
@@ -42,7 +44,9 @@
   import type { StorageLike } from '$lib/logic/workspace';
   import type { FetchLike } from '$lib/stores/connection.svelte';
   import type { WorkspaceStore } from '$lib/stores/workspace.svelte';
+  import Minus from '@lucide/svelte/icons/minus';
   import Play from '@lucide/svelte/icons/play';
+  import Plus from '@lucide/svelte/icons/plus';
   import Radio from '@lucide/svelte/icons/radio';
   import { onMount } from 'svelte';
 
@@ -79,6 +83,9 @@
   let rows = $state<readonly NormalizedRow[]>([]);
   let extraction = $state<GraphExtraction | null>(null);
   let executedAtMs = $state<number | null>(null);
+  let rangeFitted = $state(false);
+
+  let filterSummary = $derived(summarizeFilter(filterDraft));
 
   let clustering = $derived(
     extraction === null || !extraction.available
@@ -92,7 +99,7 @@
 
   onMount(() => {
     componentMounted = true;
-    void runQuery();
+    void runQuery(selectedMs, true);
 
     return () => {
       componentMounted = false;
@@ -131,7 +138,7 @@
     };
   });
 
-  async function runQuery(atMs: number = selectedMs): Promise<void> {
+  async function runQuery(atMs: number = selectedMs, fitRange = false): Promise<void> {
     if (!filterValid) {
       queryError = 'The topology filter is not valid GQL; fix it and rerun.';
       return;
@@ -169,6 +176,7 @@
       extraction = extractTopology(filterDraft, normalized.rows);
       executedAtMs = atMs;
       workspace.observeExecution(filterDraft, 'success', Date.now());
+      if (fitRange) fitToDataset(normalized.rows);
     } catch (cause) {
       if (!componentMounted || controller.signal.aborted) return;
       queryError =
@@ -181,6 +189,26 @@
         running = false;
       }
     }
+  }
+
+  /**
+   * Re-frames the timeline around the instants the query returned for the
+   * active axis. Only explicit runs fit — a timeline click must not re-frame
+   * the range under the handle being dragged.
+   */
+  function fitToDataset(resultRows: readonly NormalizedRow[]): void {
+    const extent = datasetExtent(resultRows, preferences.axis);
+    if (extent === null) return;
+    const fitted = fitRangeToExtent(range, extent);
+    if (fitted === null) return;
+
+    range = fitted;
+    preferences = rememberRange(preferences, fitted);
+    rangeFitted = true;
+    selectedMs = clampTime(fitted, selectedMs);
+    // The graph on screen was resolved at the old instant, so rerun at the
+    // clamped one — without fitting again, which is what terminates this.
+    void runQuery(selectedMs);
   }
 
   const GRAPH_LIMITS = { maxNodes: 2_000, maxEdges: 4_000 };
@@ -219,6 +247,7 @@
 
   function applyRange(next: TimeRange): void {
     range = next;
+    rangeFitted = false;
     preferences = rememberRange(preferences, next);
     const clamped = clampTime(next, selectedMs);
     if (clamped !== selectedMs) selectTime(clamped);
@@ -228,6 +257,7 @@
     const span = range.endMs - range.startMs;
     const now = Date.now();
     range = { startMs: now - span, endMs: now };
+    rangeFitted = false;
     selectTime(now);
   }
 
@@ -241,12 +271,28 @@
 
   function setAxis(axis: TemporalAxis): void {
     preferences = { ...preferences, axis };
-    void runQuery();
+    void runQuery(selectedMs, true);
   }
 
   function applyStarter(starter: string): void {
     filterDraft = `${starter} LIMIT 100`;
-    void runQuery();
+    preferences = { ...preferences, filterCollapsed: false };
+    void runQuery(selectedMs, true);
+  }
+
+  function toggleFilterCollapsed(): void {
+    preferences = { ...preferences, filterCollapsed: !preferences.filterCollapsed };
+  }
+
+  // Collapsed header stands in for the whole query, so it shows the first line
+  // and an ellipsis whenever anything below it is hidden.
+  function summarizeFilter(filter: string): { readonly firstLine: string; readonly more: boolean } {
+    const lines = filter.split('\n');
+    const firstIndex = lines.findIndex((line) => line.trim().length > 0);
+    if (firstIndex === -1) return { firstLine: '', more: false };
+    const firstLine = lines[firstIndex].trim();
+    const more = lines.slice(firstIndex + 1).some((line) => line.trim().length > 0);
+    return { firstLine, more };
   }
 
   // Only label starters: Varve v1 matches nothing for unlabeled endpoints, so
@@ -326,33 +372,70 @@
     />
   </div>
 
-  <div class="overflow-hidden rounded-xl border bg-card shadow-sm">
-    <div class="flex items-center justify-between border-b px-3 py-2">
-      <span class="text-sm font-medium">Filter topology</span>
-      <span class="text-muted-foreground font-mono text-xs">⌘/Ctrl + Enter</span>
-    </div>
-    <div class="flex items-stretch">
-      <div class="min-w-0 flex-1">
-        <GqlEditor
-          value={filterDraft}
-          onChange={(value) => (filterDraft = value)}
-          onSubmit={() => void runQuery()}
-          schema={() => workspace.observedSchema}
-          ariaLabel="Topology filter GQL"
-          placeholder="MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a, r, b LIMIT 100"
-          compact={true}
-          onValidation={(valid) => (filterValid = valid)}
-        />
-      </div>
-      <Button
-        class="m-2 self-center"
-        disabled={running || !filterValid || filterDraft.trim().length === 0}
-        onclick={() => void runQuery()}
+  <div class="shrink-0 overflow-hidden rounded-xl border bg-card shadow-sm">
+    <div class="flex items-center gap-3 px-3 py-2" class:border-b={!preferences.filterCollapsed}>
+      <button
+        type="button"
+        class="hover:text-foreground/80 flex shrink-0 items-center gap-2 text-sm font-medium"
+        aria-expanded={!preferences.filterCollapsed}
+        aria-controls="time-travel-filter-body"
+        onclick={toggleFilterCollapsed}
       >
-        <Play aria-hidden="true" />
-        Go
-      </Button>
+        <span
+          class="text-muted-foreground flex size-4 items-center justify-center rounded border"
+          aria-hidden="true"
+        >
+          {#if preferences.filterCollapsed}
+            <Plus size={12} />
+          {:else}
+            <Minus size={12} />
+          {/if}
+        </span>
+        Filter topology
+      </button>
+      {#if preferences.filterCollapsed}
+        <span class="text-muted-foreground min-w-0 flex-1 truncate font-mono text-xs">
+          {filterSummary.firstLine}{filterSummary.more ? ' …' : ''}
+        </span>
+        <Button
+          size="sm"
+          class="shrink-0"
+          disabled={running || !filterValid || filterDraft.trim().length === 0}
+          onclick={() => void runQuery(selectedMs, true)}
+        >
+          <Play aria-hidden="true" />
+          Go
+        </Button>
+      {:else}
+        <span class="text-muted-foreground flex-1 text-right font-mono text-xs">
+          ⌘/Ctrl + Enter
+        </span>
+      {/if}
     </div>
+    {#if !preferences.filterCollapsed}
+      <div id="time-travel-filter-body" class="flex items-stretch">
+        <div class="min-w-0 flex-1">
+          <GqlEditor
+            value={filterDraft}
+            onChange={(value) => (filterDraft = value)}
+            onSubmit={() => void runQuery(selectedMs, true)}
+            schema={() => workspace.observedSchema}
+            ariaLabel="Topology filter GQL"
+            placeholder="MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a, r, b LIMIT 100"
+            compact={true}
+            onValidation={(valid) => (filterValid = valid)}
+          />
+        </div>
+        <Button
+          class="m-2 self-center"
+          disabled={running || !filterValid || filterDraft.trim().length === 0}
+          onclick={() => void runQuery(selectedMs, true)}
+        >
+          <Play aria-hidden="true" />
+          Go
+        </Button>
+      </div>
+    {/if}
   </div>
 
   {#if queryError !== null}
@@ -387,6 +470,11 @@
         {/if}
       </div>
       <div class="flex items-center gap-2">
+        {#if rangeFitted}
+          <Badge variant="outline" title="The interval was fitted to the instants this query returned.">
+            Fitted to data
+          </Badge>
+        {/if}
         <TimeIntervalPicker {range} recentRanges={preferences.recentRanges} onApply={zoomToRange} />
         <Button variant="outline" size="sm" onclick={goLive}>
           <Radio aria-hidden="true" />

@@ -70,6 +70,17 @@ describe('extractEntityGraph', () => {
     expect(extraction.reason).toContain('RETURN a, r, b');
   });
 
+  it('reports no rows as an empty graph, not a malformed return', () => {
+    const extraction = extractEntityGraph([], LIMITS);
+
+    expect(extraction.available).toBe(true);
+    expect(extraction.reason).toBeUndefined();
+    expect(extraction.nodes).toEqual([]);
+    expect(extraction.edges).toEqual([]);
+    expect(extraction.totalNodes).toBe(0);
+    expect(extraction.truncated).toBe(false);
+  });
+
   it('respects node and edge limits and reports truncation', () => {
     const rows = Array.from({ length: 5 }, (_, index) =>
       row({ [`n._iid`]: `iid-${index}`, 'n._labels': ['Thing'] }),

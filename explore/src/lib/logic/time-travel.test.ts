@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
+import type { NormalizedRow } from './results';
 import {
   buildTimeTravelGql,
   clampTime,
   customRange,
+  datasetExtent,
   DEFAULT_TIME_TRAVEL_FILTER,
+  fitRangeToExtent,
   formatInstant,
   formatRangeSummary,
   fractionOfTime,
@@ -150,5 +153,91 @@ describe('buildTimeTravelGql', () => {
   it('does not reject property names that merely contain FOR', () => {
     const built = buildTimeTravelGql('MATCH (n) WHERE n.platform = 1 RETURN n', at, 'valid');
     expect(built.ok).toBe(true);
+  });
+});
+
+function row(values: Record<string, unknown>): NormalizedRow {
+  return Object.fromEntries(
+    Object.entries(values).map(([column, value]) => [column, { kind: 'value' as const, value }]),
+  );
+}
+
+const DEC_08 = Date.parse('2021-12-08T00:00:00Z');
+const DEC_10 = Date.parse('2021-12-10T10:15:00Z');
+
+describe('datasetExtent', () => {
+  it('spans the instants of columns naming the active axis', () => {
+    const rows = [
+      row({ cve_valid_from: '2021-12-10T10:15:00Z', product_valid_from: '2021-12-08T00:00:00Z' }),
+      row({ cve_valid_from: '2021-12-10T10:15:00Z', product_valid_from: '2021-12-09T00:00:00Z' }),
+    ];
+    expect(datasetExtent(rows, 'valid')).toEqual({ minMs: DEC_08, maxMs: DEC_10 });
+  });
+
+  it('reads only the axis in play, so the two clocks never merge into one span', () => {
+    const rows = [
+      row({
+        became_valid_from: '2021-12-10T10:15:00Z',
+        ingest_system_from: '2026-07-28T17:46:30Z',
+      }),
+    ];
+    expect(datasetExtent(rows, 'valid')).toEqual({ minMs: DEC_10, maxMs: DEC_10 });
+    expect(datasetExtent(rows, 'system')).toEqual({
+      minMs: Date.parse('2026-07-28T17:46:30Z'),
+      maxMs: Date.parse('2026-07-28T17:46:30Z'),
+    });
+  });
+
+  it('returns null when no column names the axis, or when rows are empty', () => {
+    expect(datasetExtent([row({ 'cv.timeScanned': '2021-12-10T10:15:00Z' })], 'valid')).toBeNull();
+    expect(datasetExtent([], 'valid')).toBeNull();
+  });
+
+  it('ignores values that are not ISO instants and unbounded end sentinels', () => {
+    expect(datasetExtent([row({ x_valid_from: 'Dec 10 2021' })], 'valid')).toBeNull();
+    expect(datasetExtent([row({ x_valid_from: 1_639_130_100_000 })], 'valid')).toBeNull();
+    expect(datasetExtent([row({ x_valid_to: '9999-12-31T23:59:59Z' })], 'valid')).toBeNull();
+    expect(datasetExtent([row({ x_valid_from: null })], 'valid')).toBeNull();
+  });
+
+  it('skips missing cells', () => {
+    expect(datasetExtent([{ x_valid_from: { kind: 'missing' } }], 'valid')).toBeNull();
+  });
+});
+
+describe('fitRangeToExtent', () => {
+  const range = { startMs: 0, endMs: 10 * HOUR };
+
+  it('leaves the range alone when the dataset already fits inside it', () => {
+    expect(fitRangeToExtent(range, { minMs: HOUR, maxMs: 9 * HOUR })).toBeNull();
+    expect(fitRangeToExtent(range, { minMs: 0, maxMs: 10 * HOUR })).toBeNull();
+  });
+
+  it('frames an out-of-range dataset with padding on both sides', () => {
+    const fitted = fitRangeToExtent(range, { minMs: DEC_08, maxMs: DEC_10 });
+    const span = DEC_10 - DEC_08;
+    expect(fitted).toEqual({ startMs: DEC_08 - span * 0.1, endMs: DEC_10 + span * 0.1 });
+  });
+
+  it('re-centres at the current zoom when the dataset is a single instant', () => {
+    const fitted = fitRangeToExtent(range, { minMs: DEC_10, maxMs: DEC_10 });
+    expect(fitted).toEqual({ startMs: DEC_10 - 5 * HOUR, endMs: DEC_10 + 5 * HOUR });
+  });
+
+  it('never fits below the minimum usable span', () => {
+    const fitted = fitRangeToExtent(
+      { startMs: 0, endMs: MIN_RANGE_SPAN_MS },
+      {
+        minMs: DEC_10,
+        maxMs: DEC_10 + 1_000,
+      },
+    );
+    expect(fitted).not.toBeNull();
+    expect(fitted!.endMs - fitted!.startMs).toBe(MIN_RANGE_SPAN_MS);
+  });
+
+  it('rejects a reversed or non-finite extent', () => {
+    expect(fitRangeToExtent(range, { minMs: DEC_10, maxMs: DEC_08 })).toBeNull();
+    expect(fitRangeToExtent(range, { minMs: Number.NaN, maxMs: DEC_10 })).toBeNull();
   });
 });

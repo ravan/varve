@@ -138,14 +138,20 @@
 }
 
 .app-shell {
+  --rail-width: 15rem;
+  --inspector-width: 20rem;
   display: grid;
-  grid-template-columns: 15rem minmax(0, 1fr) 20rem;
+  grid-template-columns: var(--rail-width) minmax(0, 1fr) var(--inspector-width);
   min-height: 100vh;
   transition: grid-template-columns 200ms ease;
 }
 
 .app-shell[data-inspector='collapsed'] {
-  grid-template-columns: 15rem minmax(0, 1fr) 3rem;
+  --inspector-width: 3rem;
+}
+
+.app-shell[data-rail='collapsed'] {
+  --rail-width: 3.5rem;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -179,6 +185,10 @@
 
 .mobile-only {
   display: none;
+}
+
+.desktop-only {
+  display: inline-flex;
 }
 
 .query-editor .cm-editor {
@@ -420,6 +430,10 @@
 
   .mobile-only {
     display: inline-flex;
+  }
+
+  .desktop-only {
+    display: none;
   }
 
   .panel-columns {

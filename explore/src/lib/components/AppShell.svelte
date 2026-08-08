@@ -20,6 +20,8 @@
   import Database from '@lucide/svelte/icons/database';
   import History from '@lucide/svelte/icons/history';
   import Menu from '@lucide/svelte/icons/menu';
+  import PanelLeftClose from '@lucide/svelte/icons/panel-left-close';
+  import PanelLeftOpen from '@lucide/svelte/icons/panel-left-open';
   import PanelRight from '@lucide/svelte/icons/panel-right';
   import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
   import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
@@ -43,27 +45,38 @@
   } = $props();
 
   const INSPECTOR_COLLAPSED_KEY = 'varve-explorer.inspector-collapsed.v1';
+  const RAIL_COLLAPSED_KEY = 'varve-explorer.rail-collapsed.v1';
 
   let navigationOpen = $state(false);
   let inspectorOpen = $state(false);
-  let inspectorCollapsed = $state(restoreInspectorCollapsed());
+  let inspectorCollapsed = $state(restoreCollapsed(INSPECTOR_COLLAPSED_KEY));
+  let railCollapsed = $state(restoreCollapsed(RAIL_COLLAPSED_KEY));
 
-  function restoreInspectorCollapsed(): boolean {
+  function restoreCollapsed(key: string): boolean {
     if (!browser) return false;
     try {
-      return window.localStorage.getItem(INSPECTOR_COLLAPSED_KEY) === '1';
+      return window.localStorage.getItem(key) === '1';
     } catch {
       return false;
     }
   }
 
-  function toggleInspector(): void {
-    inspectorCollapsed = !inspectorCollapsed;
+  function rememberCollapsed(key: string, collapsed: boolean): void {
     try {
-      window.localStorage.setItem(INSPECTOR_COLLAPSED_KEY, inspectorCollapsed ? '1' : '0');
+      window.localStorage.setItem(key, collapsed ? '1' : '0');
     } catch {
       // Storage can be unavailable; the choice then lasts for this page only.
     }
+  }
+
+  function toggleInspector(): void {
+    inspectorCollapsed = !inspectorCollapsed;
+    rememberCollapsed(INSPECTOR_COLLAPSED_KEY, inspectorCollapsed);
+  }
+
+  function toggleRail(): void {
+    railCollapsed = !railCollapsed;
+    rememberCollapsed(RAIL_COLLAPSED_KEY, railCollapsed);
   }
   let connectionOpen = $state(false);
   let reconnectButton = $state<HTMLButtonElement | null>(null);
@@ -121,20 +134,26 @@
 </script>
 
 <Tooltip.Provider>
-  <div class="app-shell" data-inspector={inspectorCollapsed ? 'collapsed' : 'open'}>
+  <div
+    class="app-shell"
+    data-inspector={inspectorCollapsed ? 'collapsed' : 'open'}
+    data-rail={railCollapsed ? 'collapsed' : 'open'}
+  >
     <aside class="desktop-rail border-r bg-sidebar text-sidebar-foreground">
-      <div class="flex h-14 items-center gap-2 px-4">
-        <span class="grid size-8 place-items-center rounded-lg bg-primary font-semibold text-primary-foreground"
+      <div class="flex h-14 items-center gap-2" class:px-4={!railCollapsed} class:justify-center={railCollapsed}>
+        <span class="grid size-8 shrink-0 place-items-center rounded-lg bg-primary font-semibold text-primary-foreground"
           >V</span
         >
-        <div class="min-w-0">
-          <p class="truncate text-sm font-semibold">Varve Explorer</p>
-          <p class="text-muted-foreground text-xs">Query workspace</p>
-        </div>
+        {#if !railCollapsed}
+          <div class="min-w-0">
+            <p class="truncate text-sm font-semibold">Varve Explorer</p>
+            <p class="text-muted-foreground text-xs">Query workspace</p>
+          </div>
+        {/if}
       </div>
       <Separator />
       <ScrollArea class="h-[calc(100vh-3.6rem)]">
-        <nav class="grid gap-1 p-3" aria-label="Workspace navigation">
+        <nav class="grid gap-1" class:p-3={!railCollapsed} class:p-2={railCollapsed} aria-label="Workspace navigation">
           {#each navigation as item}
             <Tooltip.Root>
               <Tooltip.Trigger>
@@ -142,11 +161,14 @@
                   <Button
                     {...props}
                     variant={(item.name === 'New query' && activePanel === null) || item.name === activePanel ? 'secondary' : 'ghost'}
-                    class="w-full justify-start"
+                    class={railCollapsed ? 'w-full justify-center px-0' : 'w-full justify-start'}
+                    aria-label={item.name}
                     onclick={() => selectNavigation(item.name)}
                   >
                     <item.icon aria-hidden="true" />
-                    {item.name}
+                    {#if !railCollapsed}
+                      {item.name}
+                    {/if}
                   </Button>
                 {/snippet}
               </Tooltip.Trigger>
@@ -190,7 +212,36 @@
           </Sheet.Content>
         </Sheet.Root>
 
-        <ConnectionStatus session={connection.session} health={connection.health} />
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <Button
+                {...props}
+                variant="ghost"
+                size="icon-sm"
+                class="desktop-only"
+                aria-label={railCollapsed ? 'Expand navigation' : 'Collapse navigation'}
+                aria-expanded={!railCollapsed}
+                onclick={toggleRail}
+              >
+                {#if railCollapsed}
+                  <PanelLeftOpen aria-hidden="true" />
+                {:else}
+                  <PanelLeftClose aria-hidden="true" />
+                {/if}
+              </Button>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content side="right">
+            {railCollapsed ? 'Expand navigation' : 'Collapse navigation'}
+          </Tooltip.Content>
+        </Tooltip.Root>
+
+        <ConnectionStatus
+          session={connection.session}
+          health={connection.health}
+          status={connection.status}
+        />
         <span
           class="text-muted-foreground min-w-0 flex-1 truncate text-center font-mono text-xs"
           title={connection.config?.target}

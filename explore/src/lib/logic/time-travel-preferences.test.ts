@@ -24,6 +24,7 @@ describe('time travel preferences', () => {
     const storage = memoryStorage();
     const preferences = {
       ...DEFAULT_TIME_TRAVEL_PREFERENCES,
+      filterCollapsed: true,
       axis: 'system' as const,
       grouping: 'type' as const,
       clusterSize: 25,
@@ -48,6 +49,7 @@ describe('time travel preferences', () => {
     const storage = memoryStorage({
       [TIME_TRAVEL_STORAGE_KEY]: JSON.stringify({
         filter: '   ',
+        filterCollapsed: 'yes',
         axis: 'both',
         grouping: 'giant',
         clusterSize: -3,
@@ -57,6 +59,7 @@ describe('time travel preferences', () => {
 
     expect(loadTimeTravelPreferences(storage)).toEqual({
       filter: DEFAULT_TIME_TRAVEL_FILTER,
+      filterCollapsed: false,
       axis: 'valid',
       grouping: 'auto',
       clusterSize: 2,
