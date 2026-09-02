@@ -416,11 +416,14 @@ impl SideEffects {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct TxReceipt {
     pub tx_id: u64,
     pub system_time: Instant,
     pub side_effects: SideEffects,
+    /// The submitting principal, exactly as written to `LogRecord.user`.
+    /// Empty for the trusted embedded caller.
+    pub user: String,
 }
 
 pub(crate) const WRITER_ADVERTISEMENT_KEY: &str = "v1/writer.json";

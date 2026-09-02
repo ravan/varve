@@ -170,6 +170,7 @@ fn tx_receipt_maps_every_side_effect_and_repeats_tx_id_as_basis() {
             labels_added: 7,
             labels_removed: 8,
         },
+        user: String::new(),
     };
 
     assert_eq!(

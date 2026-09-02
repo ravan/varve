@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use varve_engine::{Db, EngineError};
 use varve_plan::PlanError;
 use varve_types::Instant;
@@ -124,4 +125,18 @@ async fn delete_with_unmatched_where_variable_errors_and_deletes_nothing() {
         rows(db.query("MATCH (p:Person) RETURN p.age").await.unwrap()),
         1
     );
+}
+
+/// Silt-0a task 1: the receipt names the submitting principal exactly as it
+/// is written to `LogRecord.user`; the trusted embedded caller is `""`.
+#[tokio::test]
+async fn receipt_carries_the_submitting_user() {
+    let db = Db::memory();
+    let as_ada = db
+        .execute_as("INSERT (:X {_id: 1})", &BTreeMap::new(), "ada")
+        .await
+        .unwrap();
+    assert_eq!(as_ada.user, "ada");
+    let embedded = db.execute("INSERT (:X {_id: 2})").await.unwrap();
+    assert_eq!(embedded.user, "");
 }

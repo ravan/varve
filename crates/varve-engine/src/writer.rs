@@ -886,6 +886,7 @@ fn seal_effects(
         tx_id,
         system_time: system,
         side_effects: effects.side_effects,
+        user: user.to_string(),
     };
     Ok((record, effects, receipt, effect_graph.to_string()))
 }
@@ -3566,6 +3567,7 @@ mod tests {
                 tx_id: 1,
                 system_time: Instant::from_micros(100),
                 side_effects: SideEffects::default(),
+                user: String::new(),
             },
             ack,
         };

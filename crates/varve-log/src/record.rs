@@ -14,7 +14,9 @@ pub struct TableEffects {
 }
 
 /// One transaction's log record — the spec §6 protobuf envelope
-/// `{tx_id, system_time, user, effects}`. `user` is carried empty in v1.
+/// `{tx_id, system_time, user, effects}`. `user` is the submitting
+/// principal (the authenticated subject on the server); the trusted
+/// embedded caller writes it empty.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct LogRecord {
     #[prost(uint64, tag = "1")]
@@ -165,6 +167,21 @@ mod tests {
                 0x12, 0x01, 0xAA, // effects.arrow_ipc
             ]
         );
+    }
+
+    #[test]
+    fn user_round_trips_on_field_3() {
+        let rec = LogRecord {
+            user: "ada".into(),
+            ..sample()
+        };
+        let bytes = rec.to_wire();
+        // field 3, length-delimited, "ada"
+        assert!(bytes
+            .windows(5)
+            .any(|w| w == [0x1A, 0x03, b'a', b'd', b'a']));
+        assert_eq!(LogRecord::from_wire(&bytes).unwrap(), rec);
+        assert_eq!(LogRecord::from_wire(&bytes).unwrap().user, "ada");
     }
 
     #[test]

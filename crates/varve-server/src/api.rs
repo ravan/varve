@@ -327,6 +327,7 @@ mod tests {
             tx_id: 7,
             system_time: Instant::END_OF_TIME,
             side_effects: SideEffects::default(),
+            user: String::new(),
         };
         let response = TxResponse::from_receipt(&receipt);
         assert_eq!(response.system_time, "9223372036854775807us");

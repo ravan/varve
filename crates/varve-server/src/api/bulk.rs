@@ -792,6 +792,7 @@ mod tests {
             tx_id,
             system_time: varve_types::Instant::from_micros(1_700_000_000_000_000),
             side_effects,
+            user: "demo".into(),
         }
     }
 
