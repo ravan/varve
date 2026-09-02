@@ -24,7 +24,7 @@ docs/superpowers/
 # mdBook build output
 docs/book/book/
 .kata.local.toml
-/.agentenv
+/.hats
 /.kata.toml
 /explore/.playwright-cli
 /gallery/blast-radius/corpus/expanded/

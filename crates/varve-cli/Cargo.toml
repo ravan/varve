@@ -11,9 +11,9 @@ name = "varve"
 path = "src/main.rs"
 
 [dependencies]
-varve = { path = "../varve", version = "1.0.0" }
-varve-gql = { path = "../varve-gql", version = "1.0.0" }
-varve-server = { path = "../varve-server", version = "1.0.0", default-features = false, features = [
+varve = { path = "../varve", version = "0.1.0" }
+varve-gql = { path = "../varve-gql", version = "0.1.0" }
+varve-server = { path = "../varve-server", version = "0.1.0", default-features = false, features = [
     "bulk",
 ] }
 serde = { workspace = true }
