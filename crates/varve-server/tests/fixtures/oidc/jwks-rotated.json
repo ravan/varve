@@ -1,0 +1,1 @@
+{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"test-1","alg":"EdDSA","use":"sig","x":"WqAWjSwa6kYeWhOdYwJQYJQODaptLXdBsAbMkSu3oKY"},{"kty":"OKP","crv":"Ed25519","kid":"test-2","alg":"EdDSA","use":"sig","x":"KMXO_sRSqv8s6ylBRRK78jo4G7lWFsK5RAjU4Tw-mLg"}]}

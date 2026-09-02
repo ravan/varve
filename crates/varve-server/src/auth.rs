@@ -4,6 +4,9 @@ use subtle::ConstantTimeEq;
 use thiserror::Error;
 use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
 
+#[cfg(feature = "oidc")]
+pub mod oidc;
+
 pub trait Authenticator: Send + Sync {
     fn authenticate(&self, bearer: Option<&str>) -> Result<Principal, AuthError>;
 }
@@ -11,6 +14,9 @@ pub trait Authenticator: Send + Sync {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Principal {
     pub subject: String,
+    /// RFC 8693 `act` claim (the acting party), when the token has one.
+    /// Logged, never enforced.
+    pub act: Option<String>,
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -52,6 +58,7 @@ impl Authenticator for StaticAuth {
         if matched == 1 {
             Ok(Principal {
                 subject: subject.unwrap_or_default(),
+                act: None,
             })
         } else {
             Err(AuthError::Invalid)

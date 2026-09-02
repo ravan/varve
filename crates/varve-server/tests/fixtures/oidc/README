@@ -1,0 +1,10 @@
+Test-only OIDC fixtures for `tests/auth_oidc.rs` and `tests/process_oidc.rs`.
+
+- `ed25519.pem`     private Ed25519 key, JWKS kid `test-1`
+- `ed25519-2.pem`   private Ed25519 key, JWKS kid `test-2` (rotation case)
+- `jwks.json`       public JWK set holding `test-1` only
+- `jwks-rotated.json` public JWK set holding `test-1` and `test-2`
+
+These keys are public in this repository. Never use them outside tests.
+Regenerate with `openssl genpkey -algorithm ed25519`; the JWK `x` is the
+base64url of the last 32 bytes of the DER public key.

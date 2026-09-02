@@ -5,12 +5,11 @@ use varve_server::{static_auth, AuthError, ServerRegistries};
 fn static_auth_accepts_exact_tokens_and_rejects_absent_or_near_matches() {
     let auth = static_auth(&[("alice", "correct-horse-battery-staple")])
         .unwrap_or_else(|error| panic!("valid static auth must build: {error}"));
-    assert_eq!(
-        auth.authenticate(Some("correct-horse-battery-staple"))
-            .unwrap()
-            .subject,
-        "alice"
-    );
+    let principal = auth
+        .authenticate(Some("correct-horse-battery-staple"))
+        .unwrap();
+    assert_eq!(principal.subject, "alice");
+    assert_eq!(principal.act, None);
     assert!(matches!(auth.authenticate(None), Err(AuthError::Missing)));
     assert!(matches!(
         auth.authenticate(Some("correct-horse-battery-staplef")),

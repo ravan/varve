@@ -326,6 +326,11 @@ async fn authenticate(
             return response;
         }
     };
+    if let Some(act) = &principal.act {
+        // RFC 8693 delegation is informational in this slice: recorded for
+        // operators, never enforced.
+        tracing::debug!(subject = %principal.subject, act = %act, "bearer carries an act claim");
+    }
     request.extensions_mut().insert::<Principal>(principal);
     let response = next.run(request).await;
     context.frontend.metrics.observe_request(

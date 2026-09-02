@@ -91,6 +91,9 @@ mod tests {
         let registries = ServerRegistries::with_builtins()
             .unwrap_or_else(|error| panic!("builtin registries must construct: {error}"));
         assert_eq!(registries.frontend.names(), vec!["http"]);
+        #[cfg(feature = "oidc")]
+        assert_eq!(registries.authenticator.names(), vec!["oidc", "static"]);
+        #[cfg(not(feature = "oidc"))]
         assert_eq!(registries.authenticator.names(), vec!["static"]);
         // `Registry::names()` is sorted (backed by a `BTreeMap`), not
         // insertion order — "otlp" < "prometheus".

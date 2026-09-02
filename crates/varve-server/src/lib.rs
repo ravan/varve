@@ -38,6 +38,8 @@ impl ServerRegistries {
         frontend.register(Box::new(http::HttpFrontendFactory))?;
         let mut authenticator = Registry::new("authenticator");
         authenticator.register(Box::new(auth::StaticAuthFactory))?;
+        #[cfg(feature = "oidc")]
+        authenticator.register(Box::new(auth::oidc::OidcAuthFactory))?;
         let mut metrics = Registry::new("metrics");
         metrics.register(Box::new(metrics::PrometheusMetricsFactory))?;
         #[cfg(feature = "otel")]
