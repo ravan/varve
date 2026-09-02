@@ -75,6 +75,8 @@ pub enum EngineError {
     UnknownTable(String),
     #[error("unknown graph '{0}'")]
     UnknownGraph(String),
+    #[error("graph given twice: request field '{field}' and USE '{use_graph}'")]
+    GraphConflict { field: String, use_graph: String },
     #[error("graph already exists '{0}'")]
     GraphExists(String),
     #[error(transparent)]
@@ -186,6 +188,25 @@ pub(crate) fn validate_user_graph_name(graph: &str) -> Result<(), EngineError> {
         )));
     }
     Ok(())
+}
+
+/// Picks the target graph from an explicit request field and the program's
+/// own `USE`. Both present is `GraphConflict`; neither is `DEFAULT_GRAPH`.
+/// The chosen name is validated against the reserved `__` prefix.
+fn resolve_graph(explicit: Option<&str>, use_graph: Option<String>) -> Result<String, EngineError> {
+    let graph = match (explicit, use_graph) {
+        (Some(field), Some(use_graph)) => {
+            return Err(EngineError::GraphConflict {
+                field: field.to_string(),
+                use_graph,
+            })
+        }
+        (Some(field), None) => field.to_string(),
+        (None, Some(use_graph)) => use_graph,
+        (None, None) => DEFAULT_GRAPH.to_string(),
+    };
+    validate_user_graph_name(&graph)?;
+    Ok(graph)
 }
 
 /// Group-commit tuning read from `[log]` (spec §6): a batch flushes when its
@@ -500,6 +521,7 @@ pub struct Query {
     basis: Option<BasisToken>,
     timeout: Duration,
     principal: Option<String>,
+    graph: Option<String>,
 }
 
 impl Query {
@@ -528,13 +550,27 @@ impl Query {
         self
     }
 
+    /// Selects the target graph beside the GQL text. Errors at `stream()`
+    /// with `EngineError::GraphConflict` if the program also has `USE`.
+    /// Without it, today's rule applies: the program's `USE`, else
+    /// `DEFAULT_GRAPH`.
+    pub fn graph(mut self, graph: impl Into<String>) -> Query {
+        self.graph = Some(graph.into());
+        self
+    }
+
     pub async fn stream(self) -> Result<SendableRecordBatchStream, EngineError> {
         self.db.require_role(NodeRole::Query)?;
         if let Some(basis) = self.basis {
             self.db.wait_for_basis(basis, self.timeout).await?;
         }
         self.db
-            .query_stream_impl(&self.gql, &self.params, self.principal.as_deref())
+            .query_stream_impl(
+                &self.gql,
+                &self.params,
+                self.principal.as_deref(),
+                self.graph.as_deref(),
+            )
             .await
     }
 }
@@ -1583,7 +1619,21 @@ impl Db {
         params: &BTreeMap<String, Value>,
         user: &str,
     ) -> Result<TxReceipt, EngineError> {
-        let (graph, statements) = self.parse_mutation_program(gql)?;
+        self.execute_as_in(None, gql, params, user).await
+    }
+
+    /// [`Self::execute_as`] on an explicit graph. `graph: None` keeps today's
+    /// rule (the program's `USE`, else `DEFAULT_GRAPH`). `Some(g)` selects
+    /// `g`, which must exist (`UnknownGraph`); `Some(g)` plus a `USE` in
+    /// `gql` is `GraphConflict`. Both checks run before the writer queue.
+    pub async fn execute_as_in(
+        &self,
+        graph: Option<&str>,
+        gql: &str,
+        params: &BTreeMap<String, Value>,
+        user: &str,
+    ) -> Result<TxReceipt, EngineError> {
+        let (graph, statements) = self.parse_mutation_program(graph, gql)?;
         let (ack, rx) = oneshot::channel();
         // `varve.submit` (Task 13): the submit+ack future, instrumented
         // rather than `entered()` since it awaits twice (the writer-queue
@@ -1637,7 +1687,26 @@ impl Db {
         nodes: Vec<NodePut>,
         edges: Vec<EdgePut>,
     ) -> Result<TxReceipt, EngineError> {
+        self.ingest_in_as(DEFAULT_GRAPH, user, nodes, edges).await
+    }
+
+    /// [`Self::ingest_as`] into the named graph. Validates the name (the
+    /// `__` prefix is reserved), requires the graph to exist
+    /// (`UnknownGraph`), then submits one atomic transaction scoped to it.
+    /// Under `[security] enabled` the submitter's `ON GRAPH graph` write
+    /// grants apply exactly as for a `USE graph` INSERT.
+    pub async fn ingest_in_as(
+        &self,
+        graph: &str,
+        user: &str,
+        nodes: Vec<NodePut>,
+        edges: Vec<EdgePut>,
+    ) -> Result<TxReceipt, EngineError> {
         self.require_role(NodeRole::Writer)?;
+        validate_user_graph_name(graph)?;
+        if !self.graph_exists(graph)? {
+            return Err(EngineError::UnknownGraph(graph.to_string()));
+        }
         if nodes.is_empty() && edges.is_empty() {
             return Err(EngineError::NotAMutation);
         }
@@ -1646,15 +1715,28 @@ impl Db {
             self.writer_handle()?
                 .submit(Submission {
                     payload: Payload::Ingest { nodes, edges },
-                    graph: DEFAULT_GRAPH.to_string(),
+                    graph: graph.to_string(),
                     user: user.to_string(),
                     ack,
                 })
                 .await?;
             rx.await.map_err(|_| EngineError::WriterUnavailable)?
         }
-        .instrument(tracing::info_span!("varve.ingest", user = %user))
+        .instrument(tracing::info_span!("varve.ingest", user = %user, graph = %graph))
         .await
+    }
+
+    /// Whether a graph of this name is in the live catalog. Reserved names
+    /// are answered like any other; callers validate first if they must
+    /// reject them.
+    pub fn graph_exists(&self, graph: &str) -> Result<bool, EngineError> {
+        Ok(self
+            .inner
+            .state
+            .read()
+            .map_err(|_| EngineError::Poisoned)?
+            .graphs
+            .contains_key(graph))
     }
 
     /// Snapshot EVERY live node in the data graph at the current
@@ -1707,7 +1789,19 @@ impl Db {
         params: &BTreeMap<String, Value>,
         user: &str,
     ) -> Result<TxReceipt, EngineError> {
-        let (graph, statements) = self.parse_mutation_program(gql)?;
+        self.try_execute_as_in(None, gql, params, user).await
+    }
+
+    /// [`Self::try_execute_as`] on an explicit graph; see
+    /// [`Self::execute_as_in`] for the graph rules.
+    pub async fn try_execute_as_in(
+        &self,
+        graph: Option<&str>,
+        gql: &str,
+        params: &BTreeMap<String, Value>,
+        user: &str,
+    ) -> Result<TxReceipt, EngineError> {
+        let (graph, statements) = self.parse_mutation_program(graph, gql)?;
         let (ack, rx) = oneshot::channel();
         if let Err(error) = self.writer_handle()?.try_submit(Submission {
             payload: Payload::Program {
@@ -1729,16 +1823,22 @@ impl Db {
         rx.await.map_err(|_| EngineError::WriterUnavailable)?
     }
 
-    /// Shared preamble for `execute_as`/`try_execute_as`: requires the
-    /// Writer role, parses `gql`, resolves the target graph, and rejects a
-    /// query (or empty program) before it ever reaches the writer queue.
-    fn parse_mutation_program(&self, gql: &str) -> Result<(String, Vec<Statement>), EngineError> {
+    /// Shared preamble for `execute_as_in`/`try_execute_as_in`: requires the
+    /// Writer role, parses `gql`, resolves the target graph (an explicit
+    /// `graph` must exist and must not meet a `USE`), and rejects a query
+    /// (or empty program) before it ever reaches the writer queue.
+    fn parse_mutation_program(
+        &self,
+        graph: Option<&str>,
+        gql: &str,
+    ) -> Result<(String, Vec<Statement>), EngineError> {
         self.require_role(NodeRole::Writer)?;
         let program = varve_gql::parse_program(gql)?;
-        let graph = program
-            .use_graph
-            .unwrap_or_else(|| DEFAULT_GRAPH.to_string());
-        validate_user_graph_name(&graph)?;
+        let explicit = graph.is_some();
+        let graph = resolve_graph(graph, program.use_graph)?;
+        if explicit && !self.graph_exists(&graph)? {
+            return Err(EngineError::UnknownGraph(graph));
+        }
         if program.statements.is_empty()
             || program
                 .statements
@@ -1769,6 +1869,7 @@ impl Db {
             basis: None,
             timeout: self.inner.basis_timeout,
             principal: None,
+            graph: None,
         }
     }
 
@@ -1805,6 +1906,7 @@ impl Db {
         gql: &str,
         params: &BTreeMap<String, Value>,
         principal: Option<&str>,
+        explicit_graph: Option<&str>,
     ) -> Result<SendableRecordBatchStream, EngineError> {
         // `varve.query.parse` (Task 13): fully synchronous — parsing,
         // graph-name validation/existence and the query-shape checks never
@@ -1819,18 +1921,8 @@ impl Db {
         let parsed = {
             let _g = tracing::info_span!("varve.query.parse").entered();
             let program = varve_gql::parse_program(gql)?;
-            let graph = program
-                .use_graph
-                .unwrap_or_else(|| DEFAULT_GRAPH.to_string());
-            validate_user_graph_name(&graph)?;
-            if !self
-                .inner
-                .state
-                .read()
-                .map_err(|_| EngineError::Poisoned)?
-                .graphs
-                .contains_key(&graph)
-            {
+            let graph = resolve_graph(explicit_graph, program.use_graph)?;
+            if !self.graph_exists(&graph)? {
                 return Err(EngineError::UnknownGraph(graph));
             }
             if program.statements.len() != 1 {
