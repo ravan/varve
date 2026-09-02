@@ -6,7 +6,7 @@ use varve_index::LiveTable;
 use varve_storage::TrieEntry;
 use varve_types::Iid;
 
-pub(crate) const DEFAULT_GRAPH: &str = "default";
+pub const DEFAULT_GRAPH: &str = "default";
 pub(crate) const META_GRAPH: &str = "__meta";
 /// The two v1 tables (spec §5.1). Nodes carry entities; edges carry
 /// relationships with `src`/`dst` endpoints (slice 6).

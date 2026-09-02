@@ -157,6 +157,7 @@ mod tests {
                 labels_removed: 7,
             },
             basis: 42,
+            subject: String::new(),
         };
 
         let rendered = format_receipt(&response);

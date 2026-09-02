@@ -32,6 +32,7 @@ pub use node::{
 };
 pub use registries::Registries;
 pub use security::SecurityTuning;
+pub use state::DEFAULT_GRAPH;
 pub use varve_storage::{ProbeReport, ProbeVerdict};
 pub use verify::VerifyReport;
 pub use writer::{EdgePut, NodePut};

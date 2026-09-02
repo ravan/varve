@@ -23,6 +23,10 @@ pub struct QueryRequest {
     pub params: BTreeMap<String, JsonValue>,
     pub basis: Option<BasisRequest>,
     pub basis_timeout_ms: Option<u64>,
+    /// Target graph. Absent or `null` keeps the program's `USE`, else the
+    /// default graph. Present together with a `USE` is a 400.
+    #[serde(default)]
+    pub graph: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -59,6 +63,9 @@ pub struct TxRequest {
     pub gql: String,
     #[serde(default)]
     pub params: BTreeMap<String, JsonValue>,
+    /// Target graph; same rule as [`QueryRequest::graph`].
+    #[serde(default)]
+    pub graph: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -68,6 +75,10 @@ pub struct TxResponse {
     pub system_time_us: i64,
     pub side_effects: SideEffectsResponse,
     pub basis: u64,
+    /// The authenticated principal that made the write, as recorded in the
+    /// log. Empty only for the embedded caller.
+    #[serde(default)]
+    pub subject: String,
 }
 
 impl TxResponse {
@@ -95,6 +106,7 @@ impl TxResponse {
                 labels_removed: receipt.side_effects.labels_removed,
             },
             basis: receipt.tx_id,
+            subject: receipt.user.clone(),
         }
     }
 }

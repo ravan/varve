@@ -22,6 +22,7 @@ fn insert_ada_request() -> TxRequest {
     TxRequest {
         gql: "INSERT (:Person {name: $name})".to_string(),
         params,
+        graph: None,
     }
 }
 
@@ -31,6 +32,7 @@ fn find_ada_request(basis_tx_id: u64) -> QueryRequest {
         params: BTreeMap::new(),
         basis: Some(BasisRequest::TxId(basis_tx_id)),
         basis_timeout_ms: Some(5_000),
+        graph: None,
     }
 }
 

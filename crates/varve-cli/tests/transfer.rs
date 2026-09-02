@@ -77,6 +77,7 @@ impl CommandClient for FakeClient {
                 labels_removed: 0,
             },
             basis: tx_id,
+            subject: String::new(),
         })
     }
 
@@ -249,6 +250,7 @@ async fn export_writes_line_delimited_json_with_explicit_nulls_and_tagged_bytes(
         params: BTreeMap::new(),
         basis: None,
         basis_timeout_ms: None,
+        graph: None,
     };
     let mut output = Vec::new();
     let rows = export_jsonl(client, request, &mut output)

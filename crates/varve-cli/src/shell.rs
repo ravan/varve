@@ -184,6 +184,7 @@ async fn run_program(
             params: BTreeMap::new(),
             basis: basis.clone(),
             basis_timeout_ms: None,
+            graph: None,
         };
         let batches = client.query(request).await?;
         writeln!(output, "{}", format_batches(&batches)?)?;
@@ -191,6 +192,7 @@ async fn run_program(
         let request = TxRequest {
             gql: text.to_string(),
             params: BTreeMap::new(),
+            graph: None,
         };
         let response = client.execute(request).await?;
         *basis = Some(BasisRequest::TxId(response.basis));

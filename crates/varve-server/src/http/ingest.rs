@@ -21,12 +21,13 @@ use crate::{
 };
 use axum::{
     body::Body,
-    extract::{Extension, State},
+    extract::{Extension, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use futures::StreamExt;
+use serde::Deserialize;
 use std::time::Instant;
 use tracing::Instrument;
 use varve_engine::{EdgePut, EngineError, NodePut, NodeRole, TxReceipt};
@@ -36,9 +37,20 @@ const NDJSON_CONTENT_TYPE: &str = "application/x-ndjson";
 /// CSV media type (Neo4j-dialect, BI-3).
 const CSV_CONTENT_TYPE: &str = "text/csv";
 
+/// `?graph=<name>` selects the target graph (Silt-0a). The body is a
+/// stream of NDJSON or CSV, so it has no JSON envelope to hold a field; a
+/// query parameter keeps the URL the single address of the target and works
+/// with `curl --data-binary @file`. Absent ⇒ the default graph.
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct IngestQuery {
+    #[serde(default)]
+    graph: Option<String>,
+}
+
 pub(super) async fn ingest(
     State(c): State<HttpContext>,
     Extension(p): Extension<Principal>,
+    Query(target): Query<IngestQuery>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
@@ -59,11 +71,35 @@ pub(super) async fn ingest(
         if !c.frontend.db.roles().contains(NodeRole::Writer) {
             return handlers::redirect(&c).await;
         }
-        // 3. Stream the body: frames feed the incremental framer; decoded ops
-        //    commit in `chunk_ops`-sized chunks (via `ingest_as`, so the
-        //    submitter's write grants are enforced under `[security]` exactly
-        //    as a GQL INSERT would be — a denied label/type → 403). Constant
-        //    server memory (one line + one chunk), never the whole payload.
+        // 3. Resolve the target graph before reading a byte of the body: a
+        //    reserved name is a 400, an unknown one a 404 with nothing
+        //    committed.
+        let graph = target
+            .graph
+            .unwrap_or_else(|| varve_engine::DEFAULT_GRAPH.to_string());
+        if let Some(rejected) = handlers::reserved_graph(Some(&graph)) {
+            return rejected;
+        }
+        match c.frontend.db.graph_exists(&graph) {
+            Ok(true) => {}
+            Ok(false) => {
+                return committed_error(
+                    StatusCode::NOT_FOUND,
+                    EngineError::UnknownGraph(graph).to_string(),
+                    IngestProgress::default(),
+                )
+            }
+            Err(error) => {
+                let (status, message) = classify_chunk_error(error);
+                return committed_error(status, message, IngestProgress::default());
+            }
+        }
+        // 4. Stream the body: frames feed the incremental framer; decoded ops
+        //    commit in `chunk_ops`-sized chunks (via `ingest_in_as`, so the
+        //    submitter's write grants on the target graph are enforced under
+        //    `[security]` exactly as a GQL INSERT would be — a denied
+        //    label/type → 403). Constant server memory (one line + one
+        //    chunk), never the whole payload.
         let started = Instant::now();
         let chunk_ops = c.ingest.chunk_ops;
         let mut pending: Vec<BulkOp> = Vec::new();
@@ -100,7 +136,8 @@ pub(super) async fn ingest(
             pending.extend(ops);
             while pending.len() >= chunk_ops {
                 let chunk: Vec<BulkOp> = pending.drain(..chunk_ops).collect();
-                if let Err(response) = commit(&c, &p.subject, chunk, &mut progress, &mut last).await
+                if let Err(response) =
+                    commit(&c, &graph, &p.subject, chunk, &mut progress, &mut last).await
                 {
                     return response;
                 }
@@ -120,7 +157,9 @@ pub(super) async fn ingest(
         while !pending.is_empty() {
             let take = pending.len().min(chunk_ops);
             let chunk: Vec<BulkOp> = pending.drain(..take).collect();
-            if let Err(response) = commit(&c, &p.subject, chunk, &mut progress, &mut last).await {
+            if let Err(response) =
+                commit(&c, &graph, &p.subject, chunk, &mut progress, &mut last).await
+            {
                 return response;
             }
         }
@@ -148,12 +187,14 @@ pub(super) async fn ingest(
     .await
 }
 
-/// Commits one non-empty chunk as an atomic `Db::ingest_as` transaction,
-/// attributed to `user` (write grants enforced under `[security]`), folding
-/// the receipt into `progress`/`last`. On engine failure returns the
-/// committed-progress error `Response` for the caller to return immediately.
+/// Commits one non-empty chunk as an atomic `Db::ingest_in_as` transaction
+/// on `graph`, attributed to `user` (write grants enforced under
+/// `[security]`), folding the receipt into `progress`/`last`. On engine
+/// failure returns the committed-progress error `Response` for the caller
+/// to return immediately.
 async fn commit(
     c: &HttpContext,
+    graph: &str,
     user: &str,
     chunk: Vec<BulkOp>,
     progress: &mut IngestProgress,
@@ -167,7 +208,7 @@ async fn commit(
             BulkOp::Edge(edge) => edges.push(edge),
         }
     }
-    match c.frontend.db.ingest_as(user, nodes, edges).await {
+    match c.frontend.db.ingest_in_as(graph, user, nodes, edges).await {
         Ok(receipt) => {
             progress.absorb(&receipt);
             *last = Some(receipt);
@@ -220,6 +261,9 @@ fn classify_chunk_error(error: EngineError) -> (StatusCode, String) {
         // A denied write grant (BI-4): the label/edge-type the submitter
         // named is safe to echo — it is their own request.
         EngineError::AccessDenied(message) => (StatusCode::FORBIDDEN, message),
+        // The target graph vanished mid-stream (or never existed): the name
+        // is the caller's own request input.
+        unknown @ EngineError::UnknownGraph(_) => (StatusCode::NOT_FOUND, unknown.to_string()),
         EngineError::WriterFenced(_) => (StatusCode::SERVICE_UNAVAILABLE, "writer fenced".into()),
         EngineError::Backpressure => (
             StatusCode::TOO_MANY_REQUESTS,

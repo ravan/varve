@@ -331,6 +331,10 @@ pub struct IngestResponse {
     pub basis: u64,
     pub system_time: String,
     pub system_time_us: i64,
+    /// The authenticated principal that made the writes, as recorded in the
+    /// log. Empty only for the embedded caller.
+    #[serde(default)]
+    pub subject: String,
 }
 
 impl IngestResponse {
@@ -344,6 +348,7 @@ impl IngestResponse {
             basis: progress.basis,
             system_time: last.system_time.to_string(),
             system_time_us: last.system_time.as_micros(),
+            subject: last.user.clone(),
         }
     }
 }
@@ -824,6 +829,7 @@ mod tests {
         assert_eq!(response.basis, 7);
         assert_eq!(response.system_time_us, 1_700_000_000_000_000);
         assert_eq!(response.system_time, last.system_time.to_string());
+        assert_eq!(response.subject, "demo");
     }
 
     /// Drives a framer with one frame per element of `frames` and returns the

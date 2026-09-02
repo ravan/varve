@@ -395,6 +395,7 @@ mod tests {
                     basis: 5,
                     system_time: "2024-01-01T00:00:00.000000Z".to_string(),
                     system_time_us: 0,
+                    subject: String::new(),
                 })
             }),
         );

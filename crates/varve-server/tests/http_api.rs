@@ -190,18 +190,20 @@ async fn invalid_requests_negotiation_timeout_and_internal_errors_are_stable() {
     assert_eq!(timeout.status(), StatusCode::REQUEST_TIMEOUT);
     assert_eq!(json_body(timeout).await["code"], "basis_timeout");
 
-    let internal = call(
+    // An unknown graph names the caller's own request input (Silt-0a,
+    // decision 3): 404 `unknown_graph`, message carries the name.
+    let unknown = call(
         router(),
         Method::POST,
         "/v1/query",
-        Some(json!({"gql":"USE secret_storage_credential; MATCH (p) RETURN p"})),
+        Some(json!({"gql":"USE org_x; MATCH (p) RETURN p"})),
         true,
     )
     .await;
-    assert_eq!(internal.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let body = json_body(internal).await;
-    assert_eq!(body["code"], "internal");
-    assert!(!body.to_string().contains("secret_storage_credential"));
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    let body = json_body(unknown).await;
+    assert_eq!(body["code"], "unknown_graph");
+    assert_eq!(body["message"], "unknown graph 'org_x'");
 }
 
 #[tokio::test]

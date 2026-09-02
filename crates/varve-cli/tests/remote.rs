@@ -114,6 +114,7 @@ async fn remote_client_reroutes_writer_mutation_once_but_keeps_queries_on_query_
         .execute(TxRequest {
             gql: "INSERT (:X {_id: 1})".to_string(),
             params: BTreeMap::new(),
+            graph: None,
         })
         .await
         .unwrap_or_else(|error| panic!("tx must succeed via reroute: {error}"));
@@ -128,6 +129,7 @@ async fn remote_client_reroutes_writer_mutation_once_but_keeps_queries_on_query_
             params: BTreeMap::new(),
             basis: Some(BasisRequest::TxId(tx.tx_id)),
             basis_timeout_ms: Some(5_000),
+            graph: None,
         })
         .await
         .unwrap_or_else(|error| panic!("query must succeed on query node: {error}"));
@@ -174,6 +176,7 @@ async fn remote_client_reports_redirect_loop_on_a_second_misdirected_response() 
         .execute(TxRequest {
             gql: "INSERT (:X {_id: 1})".to_string(),
             params: BTreeMap::new(),
+            graph: None,
         })
         .await;
     assert!(

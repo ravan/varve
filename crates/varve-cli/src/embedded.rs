@@ -47,9 +47,13 @@ impl CommandClient for EmbeddedClient {
             params,
             basis,
             basis_timeout_ms,
+            graph,
         } = request;
         let params = params_from_json(&params)?;
         let mut query = self.db.query(gql).params(params);
+        if let Some(graph) = graph {
+            query = query.graph(graph);
+        }
         if let Some(basis) = basis {
             query = query.basis(BasisToken::try_from(basis)?);
         }
@@ -63,7 +67,12 @@ impl CommandClient for EmbeddedClient {
         let params = params_from_json(&request.params)?;
         let receipt = self
             .db
-            .execute_as(&request.gql, &params, EMBEDDED_USER)
+            .execute_as_in(
+                request.graph.as_deref(),
+                &request.gql,
+                &params,
+                EMBEDDED_USER,
+            )
             .await?;
         Ok(TxResponse::from_receipt(&receipt))
     }

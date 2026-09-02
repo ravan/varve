@@ -101,6 +101,7 @@ pub async fn run_export(
                 params: std::collections::BTreeMap::new(),
                 basis,
                 basis_timeout_ms: None,
+                graph: None,
             };
             let output = open_output(&args.file)?;
             let rows = export_jsonl(client, request, output).await?;

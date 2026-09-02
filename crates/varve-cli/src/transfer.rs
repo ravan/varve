@@ -148,7 +148,11 @@ fn build_tx_request(line: &str, label: &str, graph: Option<&str>) -> Result<TxRe
 
     varve_gql::parse_program(&gql).map_err(|error| CliError::InvalidInput(error.to_string()))?;
 
-    Ok(TxRequest { gql, params })
+    Ok(TxRequest {
+        gql,
+        params,
+        graph: None,
+    })
 }
 
 /// Validates a candidate GQL identifier's ASCII shape only (first byte

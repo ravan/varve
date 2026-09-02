@@ -80,6 +80,7 @@ impl CommandClient for FakeClient {
                 labels_removed: 0,
             },
             basis: tx_id,
+            subject: String::new(),
         })
     }
 

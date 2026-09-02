@@ -49,6 +49,9 @@ pub(super) async fn query(
         Ok(v) => v,
         Err(e) => return mapped(e),
     };
+    if let Some(rejected) = reserved_graph(r.graph.as_deref()) {
+        return rejected;
+    }
     // The authenticated principal always rides along; with `[security]`
     // disabled it is inert (attribution only), with it enabled the engine
     // enforces the subject's grants (deny-by-default).
@@ -58,6 +61,9 @@ pub(super) async fn query(
         .query(r.gql)
         .params(params)
         .as_principal(p.subject);
+    if let Some(graph) = r.graph {
+        q = q.graph(graph);
+    }
     if let Some(b) = r.basis {
         match BasisToken::try_from(b) {
             Ok(v) => q = q.basis(v),
@@ -104,10 +110,13 @@ pub(super) async fn tx(
         Ok(v) => v,
         Err(e) => return mapped(e),
     };
+    if let Some(rejected) = reserved_graph(r.graph.as_deref()) {
+        return rejected;
+    }
     match c
         .frontend
         .db
-        .try_execute_as(&r.gql, &params, &p.subject)
+        .try_execute_as_in(r.graph.as_deref(), &r.gql, &params, &p.subject)
         .await
     {
         Ok(v) => Json(TxResponse::from_receipt(&v)).into_response(),
@@ -222,6 +231,21 @@ pub(super) async fn redirect(c: &HttpContext) -> Response {
         ),
     }
 }
+/// A `graph` request value with the reserved `__` prefix is the caller's
+/// mistake: 400 `invalid_request`, before the engine sees it. `None` when
+/// the name is absent or allowed.
+pub(super) fn reserved_graph(graph: Option<&str>) -> Option<Response> {
+    let graph = graph?;
+    graph.starts_with("__").then(|| {
+        error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            &format!("graph names starting with '__' are reserved: {graph}"),
+            None,
+        )
+    })
+}
+
 pub(super) fn mapped(e: ServerError) -> Response {
     // A statement-caused engine error (a type clash, a mixed-type property
     // column, an unknown column, an unsupported feature, ...) references only
@@ -253,6 +277,22 @@ pub(super) fn mapped(e: ServerError) -> Response {
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "invalid request",
+            None,
+        ),
+        // The request named the graph twice (field and `USE`): the caller's
+        // own two names, safe to echo.
+        ServerError::Engine(ref conflict @ EngineError::GraphConflict { .. }) => error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            &conflict.to_string(),
+            None,
+        ),
+        // The graph name is the caller's own request input, like a bad
+        // label in `client_query_error`; it carries no server secret.
+        ServerError::Engine(ref unknown @ EngineError::UnknownGraph(_)) => error(
+            StatusCode::NOT_FOUND,
+            "unknown_graph",
+            &unknown.to_string(),
             None,
         ),
         ServerError::NotAcceptable(_) => error(
@@ -296,8 +336,7 @@ pub(super) fn mapped(e: ServerError) -> Response {
         other => {
             // Anything else becomes an opaque 500; log the real cause so
             // operators can diagnose it. The message may embed storage
-            // credentials or a user-supplied identifier (e.g. an unknown
-            // graph name) and MUST NOT ship to the client.
+            // credentials or internal detail and MUST NOT ship to the client.
             tracing::error!(error = %other, "request mapped to internal server error");
             error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -385,16 +424,33 @@ mod tests {
         assert!(body["message"].as_str().unwrap().contains("scoreValue"));
     }
 
-    /// An unknown graph carries a user-supplied name that must not be
-    /// reflected: it stays an opaque 500 and the name never reaches the body.
+    /// An unknown graph is the caller's own request input (Silt-0a,
+    /// decision 3): 404 `unknown_graph`, and the message names the graph so
+    /// the mistake is fixable.
     #[tokio::test]
-    async fn unknown_graph_stays_opaque_500() {
+    async fn unknown_graph_maps_to_404_with_name() {
         let response = mapped(ServerError::Engine(EngineError::UnknownGraph(
-            "secret_storage_credential".into(),
+            "org_x".into(),
         )));
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body = body_json(response).await;
-        assert_eq!(body["code"], "internal");
-        assert!(!body.to_string().contains("secret_storage_credential"));
+        assert_eq!(body["code"], "unknown_graph");
+        assert_eq!(body["message"], "unknown graph 'org_x'");
+    }
+
+    /// A `graph` field beside a `USE` is a 400 that quotes both names.
+    #[tokio::test]
+    async fn graph_conflict_maps_to_400_invalid_request() {
+        let response = mapped(ServerError::Engine(EngineError::GraphConflict {
+            field: "g".into(),
+            use_graph: "h".into(),
+        }));
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(response).await;
+        assert_eq!(body["code"], "invalid_request");
+        assert_eq!(
+            body["message"],
+            "graph given twice: request field 'g' and USE 'h'"
+        );
     }
 }

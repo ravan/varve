@@ -179,6 +179,7 @@ fn tx_receipt_maps_every_side_effect_and_repeats_tx_id_as_basis() {
             "tx_id": 42,
             "system_time": "1970-01-01T00:00:01.234567Z",
             "system_time_us": 1234567,
+            "subject": "",
             "side_effects": {
                 "nodes_created": 1,
                 "nodes_deleted": 2,

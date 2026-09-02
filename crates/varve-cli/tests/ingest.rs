@@ -37,6 +37,7 @@ fn query(gql: &str) -> QueryRequest {
         params: BTreeMap::new(),
         basis: None,
         basis_timeout_ms: None,
+        graph: None,
     }
 }
 
