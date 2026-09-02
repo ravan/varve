@@ -114,6 +114,18 @@ impl ProcessCluster {
     /// `v1/writer.json`); the query-only nodes follow, in order. Any
     /// partially started node is killed if a later node fails to come up.
     pub async fn start_with_query_nodes(query_nodes: usize) -> Result<ProcessCluster> {
+        ProcessCluster::start_with(query_nodes, &static_auth_toml()).await
+    }
+
+    /// Starts one Writer+Query+Compactor process with `auth_toml` in place
+    /// of the default `[auth]` block (e.g. an `oidc` backend). The static
+    /// [`ProcessCluster::token`] is then meaningless; use
+    /// [`ProcessCluster::tx_with_bearer`].
+    pub async fn start_writer_with_auth(auth_toml: &str) -> Result<ProcessCluster> {
+        ProcessCluster::start_with(0, auth_toml).await
+    }
+
+    async fn start_with(query_nodes: usize, auth_toml: &str) -> Result<ProcessCluster> {
         let tempdir = TempDir::new()?;
         let log_dir = tempdir.path().join("log");
         let store_dir = tempdir.path().join("store");
@@ -136,6 +148,7 @@ impl ProcessCluster {
             Some(&writer_advertised),
             &log_dir,
             &store_dir,
+            auth_toml,
         );
         match start_node(
             "writer",
@@ -155,7 +168,14 @@ impl ProcessCluster {
 
         for index in 1..=query_nodes {
             let name = format!("query{index}");
-            let config = node_config(&["query"], "127.0.0.1:0", None, &log_dir, &store_dir);
+            let config = node_config(
+                &["query"],
+                "127.0.0.1:0",
+                None,
+                &log_dir,
+                &store_dir,
+                auth_toml,
+            );
             let file = format!("node-{name}.toml");
             match start_node(&name, &tempdir, &file, &config, &client).await {
                 Ok(node) => nodes.push(node),
@@ -198,6 +218,29 @@ impl ProcessCluster {
     /// The shared bearer token.
     pub fn token(&self) -> &str {
         &self.token
+    }
+
+    /// POSTs a mutation to `base`'s `/v1/tx` with an explicit bearer and
+    /// returns the status and the JSON body, whatever the status.
+    pub async fn tx_with_bearer(
+        &self,
+        base: &str,
+        bearer: &str,
+        gql: &str,
+    ) -> Result<(reqwest::StatusCode, serde_json::Value)> {
+        let response = self
+            .client
+            .post(format!("{base}/v1/tx"))
+            .bearer_auth(bearer)
+            .json(&json!({ "gql": gql }))
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.text().await?;
+        let value = serde_json::from_str(&body).map_err(|error| {
+            format!("tx to {base} returned {status} with non-JSON body {body}: {error}")
+        })?;
+        Ok((status, value))
     }
 
     /// POSTs a mutation to `base`'s `/v1/tx` and returns the receipt. Errors
@@ -279,15 +322,27 @@ fn reserve_loopback_port() -> Result<u16> {
     Ok(port)
 }
 
+/// The default `[auth]` block: one static token shared by every node.
+fn static_auth_toml() -> String {
+    format!(
+        "[auth]\n\
+         backend = \"static\"\n\
+         [auth.static]\n\
+         tokens = [{{ subject = \"test\", token = \"{TOKEN}\" }}]\n"
+    )
+}
+
 /// Renders a complete node TOML: shared `[log.local]`/`[storage.local]`,
-/// authenticated `[server.http]`, static auth, prometheus metrics. Writers pass
-/// `Some(advertised)`; query nodes pass `None` and may bind port 0.
+/// authenticated `[server.http]`, the given `[auth]` block, prometheus
+/// metrics. Writers pass `Some(advertised)`; query nodes pass `None` and may
+/// bind port 0.
 fn node_config(
     roles: &[&str],
     listen: &str,
     advertised: Option<&str>,
     log_dir: &Path,
     store_dir: &Path,
+    auth_toml: &str,
 ) -> String {
     let roles = roles
         .iter()
@@ -325,10 +380,7 @@ fn node_config(
          {advertised_line}\
          max_body_bytes = \"8MiB\"\n\
          \n\
-         [auth]\n\
-         backend = \"static\"\n\
-         [auth.static]\n\
-         tokens = [{{ subject = \"test\", token = \"{TOKEN}\" }}]\n\
+         {auth_toml}\
          \n\
          [metrics]\n\
          backend = \"prometheus\"\n",
