@@ -161,7 +161,7 @@ Authentication backend selection.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `backend` | string: `static` | `"static"` | Authenticator backend. |
+| `backend` | string: `static` | `oidc` | `"static"` | Authenticator backend. `oidc` needs the `oidc` cargo feature (on by default). |
 
 ## `[auth.static]`
 
@@ -170,6 +170,26 @@ Tuning for `[auth] backend = "static"` (a bearer-token allowlist).
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `tokens` | array of tables (`subject`, `token`) | (required) | Bearer tokens accepted, each with a distinct subject; at least one is required and tokens must be unique. |
+
+## `[auth.oidc]`
+
+Tuning for `[auth] backend = "oidc"` (bearer JWTs verified against one or more JWKS issuers). Every issuer's key set is fetched once at startup; an unreachable issuer is a startup error. An unknown `kid` refreshes the key set at most once per 30 s. Accepted algorithms: RS256, ES256, EdDSA.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `issuers` | array of tables (`[[auth.oidc.issuers]]`, below) | (required) | Trusted issuers; at least one. The first exact `iss` match is used. |
+| `clock_skew_secs` | integer | `60` | Leeway, in seconds, applied to `exp` and `nbf`. |
+
+## `[[auth.oidc.issuers]]`
+
+One trusted issuer for `[auth.oidc]`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `issuer` | string | (required) | Exact `iss` claim value. |
+| `jwks_url` | string | (none) | JWKS document URL. Absent: `jwks_uri` is read from `<issuer>/.well-known/openid-configuration` at startup. |
+| `audience` | string | (required) | Exact `aud` match; a string claim or one member of an array claim. |
+| `subject_claim` | string | `"sub"` | The claim that becomes the principal's subject; must be a non-empty string. |
 
 ## `[security]`
 

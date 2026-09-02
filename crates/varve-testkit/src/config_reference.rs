@@ -456,9 +456,9 @@ fn sections() -> Vec<Section> {
             intro: "Authentication backend selection.",
             entries: vec![Entry {
                 key: "backend",
-                r#type: "string: `static`",
+                r#type: "string: `static` | `oidc`",
                 default: quoted("static"),
-                description: "Authenticator backend.",
+                description: "Authenticator backend. `oidc` needs the `oidc` cargo feature (on by default).",
             }],
         },
         Section {
@@ -470,6 +470,60 @@ fn sections() -> Vec<Section> {
                 default: required(),
                 description: "Bearer tokens accepted, each with a distinct subject; at least one is required and tokens must be unique.",
             }],
+        },
+        Section {
+            name: "auth.oidc",
+            intro: "Tuning for `[auth] backend = \"oidc\"` (bearer JWTs verified against one or \
+                    more JWKS issuers). Every issuer's key set is fetched once at startup; an \
+                    unreachable issuer is a startup error. An unknown `kid` refreshes the key \
+                    set at most once per 30 s. Accepted algorithms: RS256, ES256, EdDSA.",
+            entries: vec![
+                Entry {
+                    key: "issuers",
+                    r#type: "array of tables (`[[auth.oidc.issuers]]`, below)",
+                    default: required(),
+                    description: "Trusted issuers; at least one. The first exact `iss` match is used.",
+                },
+                Entry {
+                    key: "clock_skew_secs",
+                    r#type: "integer",
+                    default: code(varve_server::auth::oidc::DEFAULT_CLOCK_SKEW_SECS),
+                    description: "Leeway, in seconds, applied to `exp` and `nbf`.",
+                },
+            ],
+        },
+        Section {
+            // Rendered as `[[auth.oidc.issuers]]`: an array of tables.
+            name: "[auth.oidc.issuers]",
+            intro: "One trusted issuer for `[auth.oidc]`.",
+            entries: vec![
+                Entry {
+                    key: "issuer",
+                    r#type: "string",
+                    default: required(),
+                    description: "Exact `iss` claim value.",
+                },
+                Entry {
+                    key: "jwks_url",
+                    r#type: "string",
+                    default: none(),
+                    description: "JWKS document URL. Absent: `jwks_uri` is read from \
+                                  `<issuer>/.well-known/openid-configuration` at startup.",
+                },
+                Entry {
+                    key: "audience",
+                    r#type: "string",
+                    default: required(),
+                    description: "Exact `aud` match; a string claim or one member of an array claim.",
+                },
+                Entry {
+                    key: "subject_claim",
+                    r#type: "string",
+                    default: quoted(varve_server::auth::oidc::DEFAULT_SUBJECT_CLAIM),
+                    description: "The claim that becomes the principal's subject; must be a \
+                                  non-empty string.",
+                },
+            ],
         },
         Section {
             name: "security",
@@ -605,6 +659,8 @@ mod tests {
             "[ingest]",
             "[auth]",
             "[auth.static]",
+            "[auth.oidc]",
+            "[[auth.oidc.issuers]]",
             "[security]",
             "[metrics]",
             "[metrics.otlp]",

@@ -21,10 +21,11 @@ varve-config = { path = "../varve-config" }
 varve-gql = { path = "../varve-gql" }
 # config_reference.rs (library code, task 13) reuses
 # varve_server::http::DEFAULT_MAX_BODY_BYTES so the generated configuration
-# reference cannot drift from the server's real serde default; only the
-# "http" feature is needed (no tls/otel) for that one constant.
+# reference cannot drift from the server's real serde default; "http" for
+# that constant and "oidc" for the `[auth.oidc]` defaults (no tls/otel).
 varve-server = { path = "../varve-server", default-features = false, features = [
     "http",
+    "oidc",
 ] }
 tokio = { workspace = true }
 # backends.rs is library code (not test-only) that shells out to docker and

@@ -12,7 +12,7 @@ additive only.
 ## Endpoint
 
 ```
-POST /v1/ingest
+POST /v1/ingest[?graph=<name>]
 Authorization: Bearer <token>
 Content-Type: application/x-ndjson        # NDJSON (primary)
              | text/csv                   # Neo4j-dialect CSV
@@ -27,6 +27,11 @@ Content-Encoding: gzip                    # optional
 - **Authorization.** Under `[security] enabled`, the submitter's write grants are enforced
   against every affected label / edge-type exactly as a GQL `INSERT` would be; a denied
   label/type is `403 forbidden` naming it.
+- **Target graph.** `?graph=<name>` selects the graph. The body is a stream of NDJSON or CSV,
+  so it has no JSON envelope to hold a field; the query parameter keeps the URL the single
+  address of the target and works with `curl --data-binary @file`. Absent ⇒ `default`. A
+  reserved `__` name is `400`; an unknown graph is `404` before any chunk commits (the body
+  reports `committed` all zeros). `ON GRAPH <name>` grants apply.
 
 ## NDJSON records (primary format)
 
@@ -93,8 +98,12 @@ usable as `?basis=` on a subsequent read, exactly like `TxResponse.basis`:
 
 ```json
 {"nodes": 100000, "edges": 500000, "transactions": 60,
- "basis": 12345, "system_time": "…", "system_time_us": 1234567890}
+ "basis": 12345, "system_time": "…", "system_time_us": 1234567890,
+ "subject": "ada"}
 ```
+
+`subject` is the authenticated principal that made the writes, exactly as recorded in the
+log. It is empty only for the embedded CLI import.
 
 ## Atomicity
 
@@ -140,7 +149,13 @@ curl -X POST "$BASE/v1/ingest" \
   -H "authorization: Bearer $TOKEN" \
   -H 'content-type: application/x-ndjson' \
   --data-binary @social.ndjson
-# → {"nodes":3,"edges":2,"transactions":1,"basis":1,"system_time":"…","system_time_us":…}
+# → {"nodes":3,"edges":2,"transactions":1,"basis":1,"system_time":"…","system_time_us":…,"subject":"ada"}
+
+# NDJSON into a named graph (create it first with `CREATE GRAPH org_x`)
+curl -X POST "$BASE/v1/ingest?graph=org_x" \
+  -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/x-ndjson' \
+  --data-binary @social.ndjson
 
 # gzipped NDJSON
 gzip -c social.ndjson | curl -X POST "$BASE/v1/ingest" \

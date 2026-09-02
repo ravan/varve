@@ -4,6 +4,31 @@ All notable changes to Varve are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.1.0 (2026-09-02)
+
+Silt slice 0a: named graphs on the HTTP surface, an OIDC bearer backend, and
+the writing subject in every write answer. Existing callers see no change
+except two new response fields.
+
+### Added
+
+- `graph` field on `POST /v1/query` and `POST /v1/tx`, and `?graph=` on
+  `POST /v1/ingest`, select the target graph without a `USE` prefix. A field
+  plus a `USE` is `400`.
+- `TxResponse.subject` and `IngestResponse.subject`: the authenticated
+  principal, as written to the log. `TxReceipt.user` carries it in the engine.
+- `[auth] backend = "oidc"`: bearer JWTs verified against JWKS issuers
+  (RS256, ES256, EdDSA; `exp`, `nbf`, `aud`, clock skew; discovery; rate-limited
+  key refresh). Cargo feature `oidc`, on by default.
+- Engine: `Query::graph`, `Db::execute_as_in`, `Db::try_execute_as_in`,
+  `Db::ingest_in_as`, `Db::graph_exists`, `EngineError::GraphConflict`.
+- `varve` shell prints `by <subject>` after `tx <id> @ <time>`.
+
+### Changed
+
+- An unknown graph over HTTP is `404 unknown_graph` naming the graph. It was
+  an opaque `500`.
+
 ## 1.0.0 (2026-07-XX)
 
 First stable release. Varve is a bitemporal property-graph database that speaks

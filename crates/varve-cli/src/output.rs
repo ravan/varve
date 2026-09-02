@@ -20,12 +20,17 @@ pub(crate) fn format_batches(batches: &[RecordBatch]) -> Result<String, CliError
     Ok(pretty_format_batches(batches)?.to_string())
 }
 
-/// Renders a transaction receipt as `tx <id> @ <RFC3339-micros>`, followed
+/// Renders a transaction receipt as `tx <id> @ <RFC3339-micros>`, with
+/// ` by <subject>` appended when the server named the principal, followed
 /// by one line per nonzero side-effect field in the brief's fixed order:
 /// nodes created/deleted, relationships created/deleted, properties
 /// set/removed, labels added/removed.
 pub(crate) fn format_receipt(response: &TxResponse) -> String {
-    let mut lines = vec![format!("tx {} @ {}", response.tx_id, response.system_time)];
+    let mut head = format!("tx {} @ {}", response.tx_id, response.system_time);
+    if !response.subject.is_empty() {
+        head.push_str(&format!(" by {}", response.subject));
+    }
+    let mut lines = vec![head];
     lines.extend(side_effect_lines(&response.side_effects));
     lines.join("\n")
 }
@@ -171,5 +176,30 @@ mod tests {
         ]
         .join("\n");
         assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn format_receipt_names_the_subject_when_present() {
+        let response = TxResponse {
+            tx_id: 42,
+            system_time: "2026-09-02T10:00:00.000000Z".to_string(),
+            system_time_us: 0,
+            side_effects: SideEffectsResponse {
+                nodes_created: 1,
+                nodes_deleted: 0,
+                relationships_created: 0,
+                relationships_deleted: 0,
+                properties_set: 0,
+                properties_removed: 0,
+                labels_added: 0,
+                labels_removed: 0,
+            },
+            basis: 42,
+            subject: "ada".to_string(),
+        };
+        assert_eq!(
+            format_receipt(&response),
+            "tx 42 @ 2026-09-02T10:00:00.000000Z by ada\n  nodes created: 1"
+        );
     }
 }

@@ -22,8 +22,8 @@ admins  = ["root"]      # bootstrap subjects; bypass all checks
   granted labels and edge types are readable/writable. Requests *without* a
   principal — the embedded `Db` API unless you opt in — keep full access,
   SQLite-style (the process owner). The server always sets the principal from
-  the authenticated bearer token (see `[auth.static]`), so every HTTP request
-  is enforced.
+  the authenticated bearer token (see `[auth.static]` and the
+  [OIDC backend](#oidc-backend)), so every HTTP request is enforced.
 - `admins` subjects bypass every check and bootstrap the policy; delegate with
   `GRANT ADMIN TO ROLE …`.
 
@@ -103,6 +103,78 @@ through the role, atomically.
   all graphs, current and future.
 - HTTP: a denied request maps to **403 `forbidden`** (distinct from 401
   authentication failures).
+
+## Choosing a graph over HTTP
+
+A request can name its target graph beside the GQL text instead of a `USE`
+prefix. The GQL stays the caller's own; the server never rewrites it.
+
+| Route | How | Absent |
+|---|---|---|
+| `POST /v1/query`, `POST /v1/tx` | JSON field `"graph": "org_x"` | the program's `USE`, else `default` |
+| `POST /v1/ingest` | query parameter `?graph=org_x` | `default` |
+
+Rules:
+
+- A `graph` field **and** a `USE` in the same request is `400 invalid_request`
+  ("graph given twice").
+- Names starting with `__` are reserved: `400 invalid_request`.
+- An unknown graph is `404 unknown_graph`; the message names the graph. The
+  name is the caller's own request input, so it is safe to echo.
+- Under `[security] enabled`, the chosen graph is enforced exactly as a
+  `USE g` program: `ON GRAPH g` grants apply. A principal with no READ grant
+  on the graph sees zero rows; a write or an ingest without WRITE is
+  `403 forbidden`.
+
+Every write answer (`TxResponse`, `IngestResponse`) carries `"subject"`: the
+authenticated principal, exactly as it is written to the log record. The
+`varve` shell prints it as `tx 42 @ 2026-09-02T10:00:00Z by ada`.
+
+```sh
+curl -sX POST "$BASE/v1/tx" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"gql":"INSERT (:Person {_id: 1})","graph":"org_x"}'
+# → {"tx_id":7,...,"subject":"ada"}
+```
+
+## OIDC backend
+
+`[auth] backend = "oidc"` verifies bearer JWTs against one or more JWKS
+issuers. Use it when another system (an identity provider, or a service such
+as Silt) mints the tokens.
+
+```toml
+[auth]
+backend = "oidc"
+
+[auth.oidc]
+clock_skew_secs = 60                 # leeway on exp and nbf
+
+[[auth.oidc.issuers]]
+issuer   = "https://id.example.org"  # exact `iss`
+audience = "varve"                   # exact `aud` (string, or array member)
+# jwks_url = "https://id.example.org/jwks"   # default: discovery
+# subject_claim = "sub"                      # the claim that becomes the subject
+```
+
+How a token is checked, in order:
+
+1. The header names an allowed algorithm (`RS256`, `ES256`, `EdDSA`) and a
+   `kid`. Symmetric algorithms are refused.
+2. The unverified `iss` picks the issuer. The first exact match wins.
+3. The `kid` picks the key from that issuer's JWKS. On a miss, the key set is
+   refreshed once (at most once per 30 s) and looked up again.
+4. Signature, `exp`, `nbf`, and `aud` verify within `clock_skew_secs`.
+5. The subject is `subject_claim` (default `sub`) as a non-empty string.
+
+Anything that fails is `401 unauthorized`. The subject is the principal for
+`[security]` and the `subject` in every write answer. An RFC 8693 `act` claim
+(`"act": {"sub": "siltd"}` or `"act": "siltd"`) is logged and never enforced.
+
+Startup fetches every issuer's key set once. An unreachable issuer is a
+startup error. With `jwks_url` absent, `jwks_uri` is read from
+`<issuer>/.well-known/openid-configuration`. The backend needs the `oidc`
+cargo feature, which is on by default.
 
 ## Operational notes
 

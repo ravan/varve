@@ -169,11 +169,14 @@ the same log + object store.
 | `/healthz` | GET | public | liveness/readiness |
 | `/metrics` | GET | bearer | Prometheus text (`text/plain; version=0.0.4`) |
 | `/v1/status` | GET | bearer | role, log position, watermark, probe verdict |
-| `/v1/query` | POST | bearer | JSON body; JSON or Arrow response |
-| `/v1/tx` | POST | bearer | mutation; **421** on a query-only node with the writer address |
+| `/v1/query` | POST | bearer | JSON body (`gql`, `params`, `basis`, `graph`); JSON or Arrow response |
+| `/v1/tx` | POST | bearer | mutation (`gql`, `params`, `graph`); answer names the `subject`; **421** on a query-only node with the writer address |
+| `/v1/ingest` | POST | bearer | bulk NDJSON/CSV stream, `?graph=<name>`; answer names the `subject` |
 | `/v1/admin/compact\|gc\|verify` | POST | bearer | writer-gated |
 
-Every `/v1/*` and `/metrics` request requires `Authorization: Bearer <token>`. TLS is
+Every `/v1/*` and `/metrics` request requires `Authorization: Bearer <token>`. Tokens come
+from `[auth] backend = "static"` (an allowlist) or `"oidc"` (JWTs verified against a JWKS
+issuer; see the security chapter of the book). TLS is
 served by rustls (explicit `ring` provider) when `tls_cert`/`tls_key` are configured;
 configuring exactly one of the pair is a startup error.
 
