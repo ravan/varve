@@ -90,8 +90,10 @@ because system time governs "what Varve knew then", independent of valid time)*
 
 `DELETE`/`MATCH … INSERT`/`DETACH DELETE` all read current state only; a `FOR` clause on
 any of them is a parse error ("DELETE reads current state - temporal clauses not supported" /
-"MATCH ... INSERT reads current state - temporal clauses not supported"). Retroactive/as-of
-mutation is out of scope for v1.
+"MATCH ... INSERT reads current state - temporal clauses not supported"). The *write* side
+of a mutation can still be placed in valid time: `INSERT … VALID FROM/TO` and
+`DELETE … VALID FROM/TO` (below). As-of *matching* (mutating what was true at some earlier
+instant) remains out of scope.
 
 ## `INSERT … VALID FROM` / `VALID TO`
 
@@ -118,6 +120,38 @@ INSERT (:Person {_id: 3, name: 'Cleo'}) VALID FROM DATE '2020-01-01'
 INSERT (:P {_id: 1})-[:K]->(:P {_id: 2}) VALID FROM TIMESTAMP '2020-01-01T00:00:00Z'
 ```
 *(parser test)*
+
+## `DELETE … VALID FROM` / `VALID TO`
+
+`DELETE` accepts the same `VALID` tail as `INSERT`. It ends the matched fact at a chosen
+valid time instead of at the transaction's system time. The `MATCH` still binds against
+current state; only the tombstone is placed in the past (or future).
+
+```gql
+MATCH (a:P)-[e:K]->(b:P) DELETE e VALID FROM TIMESTAMP '2024-06-01T00:00:00Z'
+```
+*(engine test `delete_valid_from_ends_fact_at_chosen_valid_time`, `temporal.rs`)*
+
+After this statement, with the edge inserted `VALID FROM 2020`:
+
+| Query | Sees the edge? |
+|---|---|
+| `MATCH …` (now) | no |
+| `FOR VALID_TIME AS OF 2023 MATCH …` | yes, `valid_to(e)` is `2024-06-01` |
+| `FOR VALID_TIME AS OF 2024-06-01 MATCH …` | no |
+| `FOR SYSTEM_TIME AS OF <before the delete> FOR VALID_TIME AS OF 2025 MATCH …` | yes |
+
+Both bounds carve a window out of the fact; it holds again after `TO`:
+
+```gql
+MATCH (p:P) DELETE p VALID FROM DATE '2021-01-01' TO DATE '2022-01-01'
+```
+*(engine test `delete_valid_window_leaves_fact_true_outside_it`)*
+
+`VALID FROM` must be earlier than `VALID TO` (parser error when both are literal; engine
+error `InvalidValidRange` when `FROM` defaults to the tx time and `TO` lies before it).
+`DETACH DELETE … VALID …` applies the same interval to the incident edges. `ERASE` rejects a
+`VALID` clause: it removes all history and has no interval to bound.
 
 ## Temporal functions
 

@@ -175,6 +175,15 @@ MATCH (p:Person) WHERE p.name = 'Ada' DETACH DELETE p
 ```
 *(parser test)*
 
+`DELETE` also accepts `VALID FROM`/`VALID TO` to end (or window) the fact at a chosen valid
+time rather than at the transaction's system time. See
+[Bitemporal queries](temporal.md#delete--valid-from--valid-to).
+
+```gql
+MATCH (a:P)-[e:K]->(b:P) DELETE e VALID FROM TIMESTAMP '2024-06-01T00:00:00Z'
+```
+*(parser test)*
+
 ## ERASE [DETACH]
 
 Varve's GDPR hard-delete extension (not part of standard GQL): erases a node's history at

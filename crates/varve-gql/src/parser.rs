@@ -894,43 +894,51 @@ impl Parser {
             break;
         }
 
-        let (mut valid_from, mut valid_to) = (None, None);
-        if *self.peek() == TokenKind::Kw(Keyword::Valid) {
-            self.pos += 1;
-            let offset = self.offset();
-            match self.bump() {
-                TokenKind::Kw(Keyword::From) => {
-                    valid_from = Some(self.datetime()?);
-                    if *self.peek() == TokenKind::Kw(Keyword::To) {
-                        self.pos += 1;
-                        valid_to = Some(self.datetime()?);
-                    }
-                }
-                TokenKind::Kw(Keyword::To) => {
-                    valid_to = Some(self.datetime()?);
-                }
-                other => {
-                    return Err(GqlError::Parse {
-                        offset,
-                        msg: format!("expected FROM or TO after VALID, found {other:?}"),
-                    })
-                }
-            }
-            if let (Some(from), Some(to)) = (valid_from, valid_to) {
-                if from >= to {
-                    return Err(GqlError::Parse {
-                        offset,
-                        msg: "VALID FROM must be earlier than VALID TO".into(),
-                    });
-                }
-            }
-        }
+        let (valid_from, valid_to) = self.valid_clause()?;
         Ok(InsertStmt {
             match_part,
             paths,
             valid_from,
             valid_to,
         })
+    }
+
+    /// Optional `VALID FROM <dt> [TO <dt>]` / `VALID TO <dt>` tail shared by
+    /// `INSERT` and `DELETE`. `(None, None)` when the clause is absent.
+    fn valid_clause(&mut self) -> Result<(Option<Instant>, Option<Instant>), GqlError> {
+        let (mut valid_from, mut valid_to) = (None, None);
+        if *self.peek() != TokenKind::Kw(Keyword::Valid) {
+            return Ok((valid_from, valid_to));
+        }
+        self.pos += 1;
+        let offset = self.offset();
+        match self.bump() {
+            TokenKind::Kw(Keyword::From) => {
+                valid_from = Some(self.datetime()?);
+                if *self.peek() == TokenKind::Kw(Keyword::To) {
+                    self.pos += 1;
+                    valid_to = Some(self.datetime()?);
+                }
+            }
+            TokenKind::Kw(Keyword::To) => {
+                valid_to = Some(self.datetime()?);
+            }
+            other => {
+                return Err(GqlError::Parse {
+                    offset,
+                    msg: format!("expected FROM or TO after VALID, found {other:?}"),
+                })
+            }
+        }
+        if let (Some(from), Some(to)) = (valid_from, valid_to) {
+            if from >= to {
+                return Err(GqlError::Parse {
+                    offset,
+                    msg: "VALID FROM must be earlier than VALID TO".into(),
+                });
+            }
+        }
+        Ok((valid_from, valid_to))
     }
 
     /// '(' [var] (':' label)* [props] ')'
@@ -1353,11 +1361,17 @@ impl Parser {
             MutKind::Erase => "ERASE",
         };
         self.validate_mutation_target(&match_part, &target, kind_name)?;
+        if kind == MutKind::Erase && *self.peek() == TokenKind::Kw(Keyword::Valid) {
+            return Err(self.err("ERASE removes all history - VALID clauses not supported"));
+        }
+        let (valid_from, valid_to) = self.valid_clause()?;
         Ok(Statement::Mutate(MutateStmt {
             match_part,
             kind,
             target,
             detach,
+            valid_from,
+            valid_to,
         }))
     }
 
@@ -2354,6 +2368,48 @@ mod tests {
     }
 
     #[test]
+    fn parses_delete_valid_from() {
+        let stmt =
+            parse("MATCH (a:P)-[e:K]->(b:P) DELETE e VALID FROM TIMESTAMP '2025-01-01T00:00:00Z'")
+                .unwrap();
+        let Statement::Mutate(del) = stmt else {
+            panic!("expected mutate")
+        };
+        assert_eq!(del.kind, MutKind::Delete);
+        assert_eq!(del.target, "e");
+        assert_eq!(del.valid_from, Some(ts("2025-01-01T00:00:00Z")));
+        assert_eq!(del.valid_to, None);
+    }
+
+    #[test]
+    fn parses_detach_delete_valid_from_to() {
+        let stmt = parse(
+            "MATCH (p:Person) DETACH DELETE p VALID FROM DATE '2020-01-01' TO DATE '2021-01-01'",
+        )
+        .unwrap();
+        let Statement::Mutate(del) = stmt else {
+            panic!("expected mutate")
+        };
+        assert!(del.detach);
+        assert_eq!(del.valid_from, Some(ts("2020-01-01T00:00:00Z")));
+        assert_eq!(del.valid_to, Some(ts("2021-01-01T00:00:00Z")));
+    }
+
+    #[test]
+    fn delete_valid_from_must_precede_valid_to() {
+        let err =
+            parse("MATCH (p:Person) DELETE p VALID FROM DATE '2021-01-01' TO DATE '2020-01-01'")
+                .unwrap_err();
+        assert!(err.to_string().contains("earlier than"), "{err}");
+    }
+
+    #[test]
+    fn erase_rejects_valid_clause() {
+        let err = parse("MATCH (p:Person) ERASE p VALID FROM DATE '2020-01-01'").unwrap_err();
+        assert!(err.to_string().contains("ERASE"), "{err}");
+    }
+
+    #[test]
     fn parses_insert_edge_with_inline_nodes() {
         let stmt = parse(
             "INSERT (:Person {_id: 1, name: 'Ada'})-[:KNOWS {since: 2020}]->(:Person {_id: 2})",
@@ -2807,6 +2863,8 @@ mod tests {
                 kind: MutKind::Erase,
                 target: "n".into(),
                 detach: false,
+                valid_from: None,
+                valid_to: None,
             })
         );
 
@@ -2817,6 +2875,8 @@ mod tests {
                 kind: MutKind::Erase,
                 target: "n".into(),
                 detach: true,
+                valid_from: None,
+                valid_to: None,
             })
         );
     }

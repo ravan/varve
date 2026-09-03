@@ -2562,10 +2562,26 @@ fn mutation_op(kind: &MutKind) -> Op {
     }
 }
 
-fn mutation_valid_from(kind: &MutKind, system: Instant) -> Instant {
-    match kind {
-        MutKind::Delete => system,
-        MutKind::Erase => Instant::MIN,
+/// The valid interval a tombstone covers. `DELETE` defaults to "from the
+/// tx's system time, forever" and honours an explicit `VALID FROM`/`TO`
+/// (BI-4 mirror of `INSERT … VALID …`); `ERASE` always spans all of time.
+fn mutation_valid_interval(
+    del: &MutateStmt,
+    system: Instant,
+) -> Result<(Instant, Instant), EngineError> {
+    match del.kind {
+        MutKind::Erase => Ok((Instant::MIN, Instant::END_OF_TIME)),
+        MutKind::Delete => {
+            let valid_from = del.valid_from.unwrap_or(system);
+            let valid_to = del.valid_to.unwrap_or(Instant::END_OF_TIME);
+            if valid_from >= valid_to {
+                return Err(EngineError::InvalidValidRange {
+                    from: valid_from,
+                    to: valid_to,
+                });
+            }
+            Ok((valid_from, valid_to))
+        }
     }
 }
 
@@ -2605,7 +2621,7 @@ async fn resolve_delete(
     iids.sort();
     iids.dedup();
     let op = mutation_op(&del.kind);
-    let valid_from = mutation_valid_from(&del.kind, system);
+    let (valid_from, valid_to) = mutation_valid_interval(del, system)?;
     let name = mutation_name(&del.kind);
 
     let bounds = TemporalBounds {
@@ -2640,7 +2656,7 @@ async fn resolve_delete(
                 iid,
                 system_from: system,
                 valid_from,
-                valid_to: Instant::END_OF_TIME,
+                valid_to,
                 src: Some(src),
                 dst: Some(dst),
                 op: op.clone(),
@@ -2689,7 +2705,7 @@ async fn resolve_delete(
             iid: edge,
             system_from: system,
             valid_from,
-            valid_to: Instant::END_OF_TIME,
+            valid_to,
             src: Some(src),
             dst: Some(dst),
             op: op.clone(),
@@ -2705,7 +2721,7 @@ async fn resolve_delete(
             iid,
             system_from: system,
             valid_from,
-            valid_to: Instant::END_OF_TIME,
+            valid_to,
             src: None,
             dst: None,
             op: op.clone(),

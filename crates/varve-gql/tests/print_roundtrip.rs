@@ -43,6 +43,12 @@ fn prints_reparses_mutations_and_programs() {
     assert_statement_roundtrip("MATCH (n:Person) WHERE n._id = 1 REMOVE n.name, n:Employee");
     assert_statement_roundtrip("MATCH (n:Person) WHERE n._id = 1 DETACH ERASE n");
     assert_statement_roundtrip(
+        "MATCH (a:P)-[e:K]->(b:P) DELETE e VALID FROM TIMESTAMP '2024-06-01T00:00:00Z'",
+    );
+    assert_statement_roundtrip(
+        "MATCH (n:Person) DETACH DELETE n VALID FROM DATE '2020-01-01' TO DATE '2021-01-01'",
+    );
+    assert_statement_roundtrip(
         "MATCH (a:Person {name: 'Ada'}) INSERT (a)-[:KNOWS]->(:Person {_id: 2}) \
          VALID FROM DATE '2020-01-01' TO DATE '2021-01-01'",
     );

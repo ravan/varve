@@ -285,6 +285,13 @@ pub struct MutateStmt {
     pub kind: MutKind,
     pub target: String,
     pub detach: bool,
+    /// `DELETE x VALID FROM <dt> [TO <dt>]` / `VALID TO <dt>`: the valid-time
+    /// interval over which the fact stops holding. `None` defers to the
+    /// engine default (from the tx's system time, to the end of time). The
+    /// MATCH still reads current state; only the tombstone is placed in the
+    /// past (or future). Always `None` on `ERASE`, which removes all history.
+    pub valid_from: Option<Instant>,
+    pub valid_to: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -40,7 +40,8 @@ TCK, and a differential check against the official GQL ANTLR grammar.
   DROP, GRAPH, USE`. (Keywords are case-insensitive; matching is done on the uppercased token.)
 - **`DELETE`/`DETACH DELETE`/`MATCH … INSERT` read current state only**: a `FOR VALID_TIME`/
   `FOR SYSTEM_TIME` clause on any of them is a parse error (see
-  [Bitemporal queries](temporal.md)). Retroactive/as-of mutation is out of scope for v1.
+  [Bitemporal queries](temporal.md)). The written fact can still be placed in valid time via
+  `INSERT … VALID …` and `DELETE … VALID …`; as-of *matching* is out of scope for v1.
 - **`ERASE`/`DETACH ERASE` are Varve extensions**, not part of standard GQL. See
   [Bitemporal queries](temporal.md) for their semantics and proofs.
 

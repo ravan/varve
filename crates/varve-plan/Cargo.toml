@@ -7,9 +7,9 @@ repository.workspace = true
 description = "DataFusion query planning and graph traversal (PathExpand) for Varve, the bitemporal graph database."
 
 [dependencies]
-varve-gql = { path = "../varve-gql", version = "0.1.0" }
-varve-index = { path = "../varve-index", version = "0.1.0" }
-varve-types = { path = "../varve-types", version = "0.1.0" }
+varve-gql = { path = "../varve-gql", version = "0.1.1" }
+varve-index = { path = "../varve-index", version = "0.1.1" }
+varve-types = { path = "../varve-types", version = "0.1.1" }
 datafusion = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }

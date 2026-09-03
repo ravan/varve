@@ -15,9 +15,9 @@ object-store = ["dep:varve-storage", "dep:bytes"]
 fault-injection = []
 
 [dependencies]
-varve-types = { path = "../varve-types", version = "0.1.0" }
-varve-config = { path = "../varve-config", version = "0.1.0" }
-varve-storage = { path = "../varve-storage", version = "0.1.0", optional = true }
+varve-types = { path = "../varve-types", version = "0.1.1" }
+varve-config = { path = "../varve-config", version = "0.1.1" }
+varve-storage = { path = "../varve-storage", version = "0.1.1", optional = true }
 bytes = { workspace = true, optional = true }
 prost = { workspace = true }
 crc32c = { workspace = true }

@@ -718,3 +718,134 @@ async fn range_over_a_single_element_is_still_allowed() {
         .unwrap();
     assert_eq!(strings(&batches, "name"), vec!["a", "b"]);
 }
+
+/// `DELETE … VALID FROM <dt>` ends a fact at a chosen valid time instead of
+/// at the tx's system time. The MATCH still reads current state; only the
+/// tombstone is placed in the past. Three views must agree: valid time
+/// before the cut still sees the edge, valid time after it does not, and
+/// system time before the delete tx sees it at every valid time.
+#[tokio::test]
+async fn delete_valid_from_ends_fact_at_chosen_valid_time() {
+    let db = Db::memory();
+    // Endpoints must be valid wherever the edge is probed, so backdate them too.
+    db.execute(
+        "INSERT (:P {_id: 1, name: 'a'}), (:P {_id: 2, name: 'b'})          VALID FROM TIMESTAMP '2020-01-01T00:00:00Z'",
+    )
+    .await
+    .unwrap();
+    let inserted = db
+        .execute(
+            "MATCH (a:P {_id: 1}), (b:P {_id: 2}) INSERT (a)-[:K]->(b) \
+             VALID FROM TIMESTAMP '2020-01-01T00:00:00Z'",
+        )
+        .await
+        .unwrap();
+    db.execute("MATCH (a:P)-[e:K]->(b:P) DELETE e VALID FROM TIMESTAMP '2024-06-01T00:00:00Z'")
+        .await
+        .unwrap();
+
+    // Current state (system now, valid now): gone.
+    let now = db
+        .query("MATCH (a:P)-[:K]->(b:P) RETURN b.name AS name")
+        .await
+        .unwrap();
+    assert_eq!(rows(&now), 0);
+    // Valid time before the cut: still true.
+    let before = db
+        .query(
+            "FOR VALID_TIME AS OF TIMESTAMP '2023-01-01T00:00:00Z' \
+             MATCH (a:P)-[:K]->(b:P) RETURN b.name AS name",
+        )
+        .await
+        .unwrap();
+    assert_eq!(strings(&before, "name"), vec!["b".to_string()]);
+    // Valid time after the cut: gone.
+    let after = db
+        .query(
+            "FOR VALID_TIME AS OF TIMESTAMP '2024-06-01T00:00:00Z' \
+             MATCH (a:P)-[:K]->(b:P) RETURN b.name AS name",
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows(&after), 0);
+    // System time before the delete tx: the edge is still known, at a valid
+    // time the delete would otherwise cover.
+    let known_then = db
+        .query(format!(
+            "FOR SYSTEM_TIME AS OF TIMESTAMP '{}' FOR VALID_TIME AS OF TIMESTAMP '2025-01-01T00:00:00Z' \
+             MATCH (a:P)-[:K]->(b:P) RETURN b.name AS name",
+            inserted.system_time
+        ))
+        .await
+        .unwrap();
+    assert_eq!(strings(&known_then, "name"), vec!["b".to_string()]);
+    // The cut is visible through the temporal projection of the surviving version.
+    let bounds = db
+        .query(
+            "FOR VALID_TIME AS OF TIMESTAMP '2023-01-01T00:00:00Z' \
+             MATCH (a:P)-[e:K]->(b:P) RETURN valid_to(e) AS until",
+        )
+        .await
+        .unwrap();
+    let until: &TimestampMicrosecondArray = bounds[0]
+        .column_by_name("until")
+        .unwrap()
+        .as_any()
+        .downcast_ref()
+        .unwrap();
+    assert_eq!(
+        until.value(0),
+        Instant::parse_rfc3339("2024-06-01T00:00:00Z")
+            .unwrap()
+            .as_micros()
+    );
+}
+
+/// `DELETE … VALID FROM x TO y` removes a fact for a bounded window only;
+/// it holds again after `y`.
+#[tokio::test]
+async fn delete_valid_window_leaves_fact_true_outside_it() {
+    let db = Db::memory();
+    db.execute("INSERT (:P {_id: 1, name: 'a'}) VALID FROM TIMESTAMP '2020-01-01T00:00:00Z'")
+        .await
+        .unwrap();
+    db.execute(
+        "MATCH (p:P) DELETE p VALID FROM TIMESTAMP '2021-01-01T00:00:00Z' \
+         TO TIMESTAMP '2022-01-01T00:00:00Z'",
+    )
+    .await
+    .unwrap();
+    for (at, expect) in [
+        ("2020-06-01T00:00:00Z", 1),
+        ("2021-06-01T00:00:00Z", 0),
+        ("2022-06-01T00:00:00Z", 1),
+    ] {
+        let got = db
+            .query(format!(
+                "FOR VALID_TIME AS OF TIMESTAMP '{at}' MATCH (p:P) RETURN p.name AS name"
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rows(&got), expect, "valid time {at}");
+    }
+    // Current state: the window is over, so the node is back.
+    let now = db.query("MATCH (p:P) RETURN p.name AS name").await.unwrap();
+    assert_eq!(rows(&now), 1);
+}
+
+/// A `DELETE … VALID FROM` at or after the tx's system-time default with a
+/// `TO` before it is rejected by the engine, mirroring `INSERT`.
+#[tokio::test]
+async fn delete_valid_to_before_default_from_is_rejected() {
+    let db = Db::memory();
+    db.execute("INSERT (:P {_id: 1})").await.unwrap();
+    // valid_from defaults to tx time (2026+) which lands AFTER VALID TO.
+    let err = db
+        .execute("MATCH (p:P) DELETE p VALID TO TIMESTAMP '2000-01-01T00:00:00Z'")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::InvalidValidRange { .. }),
+        "{err:?}"
+    );
+}

@@ -86,23 +86,7 @@ fn print_insert(stmt: &InsertStmt) -> String {
     }
     out.push_str("INSERT ");
     out.push_str(&join_paths(&stmt.paths));
-    match (&stmt.valid_from, &stmt.valid_to) {
-        (Some(from), Some(to)) => {
-            out.push_str(" VALID FROM ");
-            out.push_str(&print_instant(from));
-            out.push_str(" TO ");
-            out.push_str(&print_instant(to));
-        }
-        (Some(from), None) => {
-            out.push_str(" VALID FROM ");
-            out.push_str(&print_instant(from));
-        }
-        (None, Some(to)) => {
-            out.push_str(" VALID TO ");
-            out.push_str(&print_instant(to));
-        }
-        (None, None) => {}
-    }
+    push_valid_clause(&mut out, stmt.valid_from.as_ref(), stmt.valid_to.as_ref());
     out
 }
 
@@ -137,7 +121,28 @@ fn print_mutate(stmt: &MutateStmt) -> String {
         MutKind::Erase => "ERASE ",
     });
     out.push_str(&stmt.target);
+    push_valid_clause(&mut out, stmt.valid_from.as_ref(), stmt.valid_to.as_ref());
     out
+}
+
+fn push_valid_clause(out: &mut String, valid_from: Option<&Instant>, valid_to: Option<&Instant>) {
+    match (valid_from, valid_to) {
+        (Some(from), Some(to)) => {
+            out.push_str(" VALID FROM ");
+            out.push_str(&print_instant(from));
+            out.push_str(" TO ");
+            out.push_str(&print_instant(to));
+        }
+        (Some(from), None) => {
+            out.push_str(" VALID FROM ");
+            out.push_str(&print_instant(from));
+        }
+        (None, Some(to)) => {
+            out.push_str(" VALID TO ");
+            out.push_str(&print_instant(to));
+        }
+        (None, None) => {}
+    }
 }
 
 fn print_set(stmt: &SetStmt) -> String {

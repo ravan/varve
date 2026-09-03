@@ -4,6 +4,16 @@ All notable changes to Varve are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.1.1 (2026-09-03)
+
+### Added
+
+- `DELETE … VALID FROM <dt> [TO <dt>]` / `VALID TO <dt>`: end (or window) a
+  fact at a chosen valid time instead of the transaction's system time. Same
+  clause as `INSERT … VALID …`; `MATCH` still reads current state. `ERASE`
+  rejects the clause. Silt's document remap needs this to keep the old
+  release visible under a valid-time view.
+
 ## 0.1.0 (2026-09-02)
 
 Silt slice 0a: named graphs on the HTTP surface, an OIDC bearer backend, and
