@@ -53,7 +53,11 @@ impl LogPosition {
 
     /// The position `n` records after this one, within the same epoch.
     pub fn advance(&self, n: u64) -> Result<Self, TypeError> {
-        Self::new(self.epoch(), self.offset() + n)
+        let offset = self
+            .offset()
+            .checked_add(n)
+            .ok_or(TypeError::OffsetOverflow(u64::MAX))?;
+        Self::new(self.epoch(), offset)
     }
 }
 
@@ -104,6 +108,15 @@ mod tests {
         // the epoch.
         let p = LogPosition::new(0, (1u64 << 48) - 1).unwrap();
         assert!(p.next().is_err());
+    }
+
+    #[test]
+    fn advance_rejects_arithmetic_overflow() {
+        let p = LogPosition::new(3, 1).unwrap();
+        assert!(matches!(
+            p.advance(u64::MAX),
+            Err(TypeError::OffsetOverflow(_))
+        ));
     }
 
     #[test]

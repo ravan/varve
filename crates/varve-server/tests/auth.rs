@@ -1,4 +1,4 @@
-use varve_config::{BuildContext, Config};
+use varve_config::Config;
 use varve_server::{static_auth, AuthError, ServerRegistries};
 
 #[test]
@@ -30,16 +30,15 @@ fn build_static(tokens: &str) -> Result<(), varve_config::RegistryError> {
     let config = Config::from_toml_str(&toml)?;
     let auth = config
         .section("auth")
+        .unwrap_or_else(|error| panic!("valid section: {error}"))
         .ok_or_else(|| varve_config::RegistryError::Build {
             kind: "authenticator",
             name: "static".into(),
             source: Box::new(std::io::Error::other("test auth section is missing")),
         })?;
-    ServerRegistries::with_builtins()?.authenticator.build(
-        "static",
-        &auth,
-        &BuildContext::empty(),
-    )?;
+    ServerRegistries::with_builtins()?
+        .authenticator
+        .build("static", &auth, &())?;
     Ok(())
 }
 

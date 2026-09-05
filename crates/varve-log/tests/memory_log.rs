@@ -1,4 +1,3 @@
-use varve_config::BuildContext;
 use varve_log::{log_registry, Log, LogError, LogRecord, MemoryLog};
 use varve_types::LogPosition;
 
@@ -65,18 +64,26 @@ async fn registry_builds_memory_by_name_and_lists_available_on_unknown() {
     let cfg = Config::from_toml_str("[log]\nbackend = \"memory\"")
         .unwrap()
         .section("log")
+        .unwrap()
         .unwrap();
-    let log = reg.build("memory", &cfg, &BuildContext::empty()).unwrap();
+    let log = reg.build("memory", &cfg, &dependencies()).unwrap();
     log.append(vec![rec(1)]).await.unwrap();
     assert_eq!(log.tail(LogPosition::ZERO).await.unwrap().len(), 1);
 
     // `.unwrap_err()` needs `Arc<dyn Log>: Debug`, which `Log` does not
     // require (unlike the `Greeter: Debug` example in registry_test.rs), so
     // extract the error via `match` instead.
-    let err = match reg.build("kafka", &cfg, &BuildContext::empty()) {
+    let err = match reg.build("kafka", &cfg, &dependencies()) {
         Ok(_) => panic!("expected build(\"kafka\") to fail"),
         Err(e) => e.to_string(),
     };
     assert!(err.contains("kafka"), "{err}");
     assert!(err.contains("memory"), "{err}");
+}
+
+fn dependencies() -> varve_log::LogDependencies {
+    varve_log::LogDependencies {
+        #[cfg(feature = "object-store")]
+        store: varve_storage::memory_store(),
+    }
 }

@@ -6,6 +6,8 @@ use varve_types::{Iid, Instant, TemporalBounds};
 
 #[derive(Debug, Error)]
 pub enum IndexError {
+    #[error("property '{property}' integer {value} cannot be represented exactly in a mixed float column")]
+    InexactNumericConversion { property: String, value: i64 },
     #[error(
         "property '{property}' has mixed types across rows (lifted with dense-union columns in slice 4)"
     )]

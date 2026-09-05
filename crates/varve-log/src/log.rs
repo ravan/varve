@@ -35,6 +35,12 @@ pub enum LogError {
 /// survives `kill -9`.
 #[async_trait::async_trait]
 pub trait Log: Send + Sync {
+    /// Persistence promised after append. Custom logs must declare volatility
+    /// explicitly to allow pairing with a volatile block store.
+    fn durability(&self) -> varve_types::Durability {
+        varve_types::Durability::Unknown
+    }
+
     /// Durably append `records`; returns the position of the FIRST record.
     async fn append(&self, records: Vec<LogRecord>) -> Result<LogPosition, LogError>;
     /// Records with `from <= position < to`, in position order.

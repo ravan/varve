@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{ComponentFactory, ConfigSection, RegistryError};
 use varve_log::Log;
 use varve_storage::{CondPut, ConditionalStore, ObjectStore, ProbeVerdict, PROBE_PREFIX};
 
@@ -313,7 +313,9 @@ impl Coordinator for CasFailover {
 
 pub(crate) struct CasFailoverFactory;
 
-impl ComponentFactory<dyn Coordinator> for CasFailoverFactory {
+impl ComponentFactory<dyn Coordinator, crate::registries::CoordinatorDependencies>
+    for CasFailoverFactory
+{
     fn name(&self) -> &'static str {
         "cas-failover"
     }
@@ -321,21 +323,11 @@ impl ComponentFactory<dyn Coordinator> for CasFailoverFactory {
     fn build(
         &self,
         cfg: &ConfigSection,
-        ctx: &BuildContext,
+        ctx: &crate::registries::CoordinatorDependencies,
     ) -> Result<Arc<dyn Coordinator>, RegistryError> {
         let result = (|| -> Result<CasFailover, Box<dyn std::error::Error + Send + Sync>> {
-            let store = ctx.get::<Arc<dyn ObjectStore>>().ok_or_else(|| {
-                std::io::Error::other(
-                    "cas-failover coordinator requires ObjectStore in BuildContext \
-                     (open through Db::open)",
-                )
-            })?;
-            let clock = ctx.get::<Arc<dyn Clock>>().ok_or_else(|| {
-                std::io::Error::other(
-                    "cas-failover coordinator requires Clock in BuildContext \
-                     (open through Db::open)",
-                )
-            })?;
+            let store = Arc::clone(&ctx.store);
+            let clock = Arc::clone(&ctx.clock);
             let tuning: CoordTuning = cfg.get()?;
             let (heartbeat_interval, takeover_after) =
                 tuning.validate().map_err(std::io::Error::other)?;

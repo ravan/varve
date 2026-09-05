@@ -73,8 +73,8 @@ impl fmt::Display for Instant {
 /// Semantics ported from XTDB's `TemporalBounds.kt`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TemporalDimension {
-    pub lower: Instant,
-    pub upper: Instant,
+    lower: Instant,
+    upper: Instant,
 }
 
 impl TemporalDimension {
@@ -86,7 +86,7 @@ impl TemporalDimension {
         }
     }
 
-    /// `FROM a TO b` — `[a, b)`.
+    /// `FROM a TO b` — `[a, b)`. Empty when `from >= to`.
     pub fn in_range(from: Instant, to: Instant) -> Self {
         Self {
             lower: from,
@@ -95,6 +95,7 @@ impl TemporalDimension {
     }
 
     /// `BETWEEN a AND b` — `[a, b]` (closed upper, SQL:2011 style).
+    /// Reversed bounds are empty; END_OF_TIME remains an exclusive sentinel.
     pub fn between(from: Instant, to: Instant) -> Self {
         Self {
             lower: from,
@@ -109,8 +110,21 @@ impl TemporalDimension {
         }
     }
 
+    pub fn lower(&self) -> Instant {
+        self.lower
+    }
+
+    pub fn upper(&self) -> Instant {
+        self.upper
+    }
+
+    /// Empty ranges contain no instants and never intersect another range.
+    pub fn is_empty(&self) -> bool {
+        self.lower >= self.upper
+    }
+
     pub fn intersects(&self, lower: Instant, upper: Instant) -> bool {
-        self.lower < upper && lower < self.upper
+        !self.is_empty() && lower < upper && self.lower < upper && lower < self.upper
     }
 
     /// A one-microsecond window — what [`Self::at`] builds, and what every
@@ -119,7 +133,7 @@ impl TemporalDimension {
     /// temporal filter necessarily coexisted with everything else that did,
     /// so the pattern needs no cross-element intersection.
     pub fn is_point(&self) -> bool {
-        self.upper.0 == self.lower.0.saturating_add(1)
+        !self.is_empty() && self.lower.0.checked_add(1) == Some(self.upper.0)
     }
 }
 
@@ -261,6 +275,23 @@ mod tests {
             TemporalDimension::between(us(3), Instant::END_OF_TIME).upper,
             Instant::END_OF_TIME // saturating +1
         );
+    }
+
+    #[test]
+    fn empty_and_reversed_ranges_never_intersect() {
+        for dim in [
+            TemporalDimension::in_range(us(5), us(5)),
+            TemporalDimension::in_range(us(7), us(3)),
+            TemporalDimension::between(us(7), us(3)),
+            TemporalDimension::at(Instant::END_OF_TIME),
+        ] {
+            assert!(dim.is_empty());
+            assert!(!dim.is_point());
+            assert!(!dim.intersects(Instant::MIN, Instant::END_OF_TIME));
+        }
+        let dim = TemporalDimension::all();
+        assert!(!dim.intersects(us(5), us(5)));
+        assert!(!dim.intersects(us(7), us(3)));
     }
 
     #[test]

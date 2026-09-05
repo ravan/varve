@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
-use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{ComponentFactory, ConfigSection, RegistryError};
 use varve_engine::{BasisToken, Db, EngineError, NodeRole, Registries};
 use varve_log::{Log, LogError, LogRecord};
 use varve_types::LogPosition;
@@ -167,6 +167,9 @@ struct CorruptAfterRecoveryLog {
 
 #[async_trait::async_trait]
 impl Log for CorruptAfterRecoveryLog {
+    fn durability(&self) -> varve_types::Durability {
+        varve_types::Durability::Volatile
+    }
     async fn append(&self, _records: Vec<LogRecord>) -> Result<LogPosition, LogError> {
         unreachable!("query-only test node never appends")
     }
@@ -202,7 +205,7 @@ impl Log for CorruptAfterRecoveryLog {
 
 struct CorruptAfterRecoveryFactory;
 
-impl ComponentFactory<dyn Log> for CorruptAfterRecoveryFactory {
+impl ComponentFactory<dyn Log, varve_log::LogDependencies> for CorruptAfterRecoveryFactory {
     fn name(&self) -> &'static str {
         "corrupt-after-recovery"
     }
@@ -210,7 +213,7 @@ impl ComponentFactory<dyn Log> for CorruptAfterRecoveryFactory {
     fn build(
         &self,
         _cfg: &ConfigSection,
-        _ctx: &BuildContext,
+        _ctx: &varve_log::LogDependencies,
     ) -> Result<Arc<dyn Log>, RegistryError> {
         Ok(Arc::new(CorruptAfterRecoveryLog {
             reads: AtomicUsize::new(0),

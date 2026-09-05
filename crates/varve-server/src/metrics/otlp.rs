@@ -14,7 +14,7 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{ComponentFactory, ConfigSection, RegistryError};
 use varve_engine::{EngineMetricsSnapshot, NodeStatus};
 
 /// Pure converter: Prometheus families → one OTLP/HTTP JSON
@@ -310,14 +310,10 @@ impl ComponentFactory<dyn MetricsSink> for OtlpMetricsFactory {
     /// defaults to 10000) and builds an [`OtlpMetrics`]. Building this sink
     /// spawns the background pusher task (see [`OtlpMetrics::new`]), so
     /// `build` must be called from inside a tokio runtime.
-    fn build(
-        &self,
-        cfg: &ConfigSection,
-        _ctx: &BuildContext,
-    ) -> Result<Arc<dyn MetricsSink>, RegistryError> {
+    fn build(&self, cfg: &ConfigSection, _ctx: &()) -> Result<Arc<dyn MetricsSink>, RegistryError> {
         let result = (|| -> Result<OtlpMetrics, Box<dyn std::error::Error + Send + Sync>> {
             let config: OtlpConfig = cfg
-                .child("otlp")
+                .child("otlp")?
                 .unwrap_or_else(ConfigSection::empty)
                 .get()?;
             let endpoint = config

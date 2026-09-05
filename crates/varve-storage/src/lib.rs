@@ -22,7 +22,7 @@ pub use memory::{memory_store, MemoryStoreFactory};
 pub use probe::{probe_conditional_put, ProbeReport, ProbeVerdict, PROBE_PREFIX};
 #[cfg(feature = "s3")]
 pub use s3::S3StoreFactory;
-pub use store::{CondPut, ConditionalStore, ObjectStore, StorageError};
+pub use store::{BackendDurability, CondPut, ConditionalStore, ObjectStore, StorageError};
 
 use varve_config::{ComponentFactory, Registry};
 

@@ -1,5 +1,5 @@
 use std::path::Path;
-use varve_config::{BuildContext, Config};
+use varve_config::Config;
 use varve_log::{log_registry, LocalLog, Log, LogError, LogRecord, DEFAULT_SEGMENT_MAX_BYTES};
 use varve_types::LogPosition;
 
@@ -142,8 +142,9 @@ async fn factory_builds_from_toml_and_requires_dir() {
     ))
     .unwrap()
     .section("log")
+    .unwrap()
     .unwrap();
-    let log = reg.build("local", &cfg, &BuildContext::empty()).unwrap();
+    let log = reg.build("local", &cfg, &dependencies()).unwrap();
     log.append(vec![rec(1)]).await.unwrap();
     assert_eq!(log.tail(LogPosition::ZERO).await.unwrap().len(), 1);
 
@@ -153,10 +154,18 @@ async fn factory_builds_from_toml_and_requires_dir() {
     let bare = Config::from_toml_str("[log]\nbackend = \"local\"")
         .unwrap()
         .section("log")
+        .unwrap()
         .unwrap();
-    let err = match reg.build("local", &bare, &BuildContext::empty()) {
+    let err = match reg.build("local", &bare, &dependencies()) {
         Ok(_) => panic!("expected build(\"local\") with no [log.local] to fail"),
         Err(e) => e.to_string(),
     };
     assert!(err.contains("log.local"), "{err}");
+}
+
+fn dependencies() -> varve_log::LogDependencies {
+    varve_log::LogDependencies {
+        #[cfg(feature = "object-store")]
+        store: varve_storage::memory_store(),
+    }
 }

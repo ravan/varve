@@ -32,7 +32,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{oneshot, watch};
 use tracing::Instrument;
-use varve_config::{BuildContext, ByteSize, Config, ConfigError, ConfigSection, RegistryError};
+use varve_config::{ByteSize, Config, ConfigError, ConfigSection, RegistryError};
 use varve_gql::ast::{Expr, LabelSpec, QueryBody, Statement};
 use varve_gql::token::GqlError;
 use varve_index::{decode_events, IndexError, LabelFilter, LiveTable};
@@ -83,12 +83,7 @@ pub enum EngineError {
     Storage(#[from] StorageError),
     #[error("writer advertisement JSON: {0}")]
     WriterAdvertisementJson(#[from] serde_json::Error),
-    #[error(
-        "[log] backend \"local\" with [storage] backend \"memory\" would lose \
-         flushed blocks on restart while trimming the durable log; set \
-         [storage] backend = \"local\" (with [storage.local] dir) or use a \
-         memory log"
-    )]
+    #[error("a durable or undeclared [log] requires a durable [storage] backend before log records can be retired")]
     VolatileBlockStore,
     #[error("unsupported in v1: {0}")]
     Unsupported(String),
@@ -159,14 +154,20 @@ impl EngineError {
             EngineError::Type(_)
                 | EngineError::Unsupported(_)
                 | EngineError::InvalidValidRange { .. }
-                | EngineError::Index(IndexError::MixedPropertyTypes { .. })
+                | EngineError::Index(
+                    IndexError::MixedPropertyTypes { .. }
+                        | IndexError::InexactNumericConversion { .. }
+                )
                 | EngineError::Plan(
                     PlanError::UnknownColumn(_)
                         | PlanError::UnknownVariable(_)
                         | PlanError::MissingParam(_)
                         | PlanError::UnknownFunction(_)
                         | PlanError::Unsupported(_)
-                        | PlanError::Index(IndexError::MixedPropertyTypes { .. })
+                        | PlanError::Index(
+                            IndexError::MixedPropertyTypes { .. }
+                                | IndexError::InexactNumericConversion { .. }
+                        )
                 )
         );
         statement_caused.then(|| self.to_string())
@@ -1364,40 +1365,45 @@ impl Db {
     /// extension point: register custom `Log`/`Clock` factories, then open.
     pub async fn open_with(config: &Config, registries: &Registries) -> Result<Db, EngineError> {
         // Storage FIRST: later factories may consume the raw store through
-        // the BuildContext (spec §4 ctx) — the object-store log shares the
+        // typed log dependencies — the object-store log shares the
         // block store's bucket and keyspace (spec §9).
         let storage_section = config
-            .section("storage")
+            .section("storage")?
             .unwrap_or_else(ConfigSection::empty);
-        let storage_backend = storage_section.backend().unwrap_or("memory").to_string();
-        let raw_store =
-            registries
-                .storage
-                .build(&storage_backend, &storage_section, &BuildContext::empty())?;
+        let storage_backend = storage_section.backend()?.unwrap_or("memory").to_string();
+        let raw_store = registries
+            .storage
+            .build(&storage_backend, &storage_section, &())?;
 
-        // The RAW store goes into the context: log traffic must not flow
+        // The raw store is a log dependency: log traffic must not flow
         // through (or fill) the query-path cache wired below.
-        let mut ctx = BuildContext::empty();
-        ctx.insert(Arc::clone(&raw_store));
+        let log_dependencies = varve_log::LogDependencies {
+            store: Arc::clone(&raw_store),
+        };
 
-        let log_section = config.section("log").unwrap_or_else(ConfigSection::empty);
-        let log_backend = log_section.backend().unwrap_or("memory").to_string();
-        // Decision 11 (slice 4): a DURABLE log over a volatile block store
-        // would trim durable data while blocks evaporate on restart.
-        if log_backend == "local" && storage_backend == "memory" {
+        let log_section = config.section("log")?.unwrap_or_else(ConfigSection::empty);
+        let log_backend = log_section.backend()?.unwrap_or("memory").to_string();
+        let log = registries
+            .log
+            .build(&log_backend, &log_section, &log_dependencies)?;
+        // Validate capabilities, independent of registry names and wrappers.
+        if log.durability() != varve_types::Durability::Volatile
+            && raw_store.durability() != varve_types::Durability::Durable
+        {
             return Err(EngineError::VolatileBlockStore);
         }
-        let log = registries.log.build(&log_backend, &log_section, &ctx)?;
 
         // [cache] tiers, folded outermost-first over raw_store (Task 6).
-        let cache_section = config.section("cache").unwrap_or_else(ConfigSection::empty);
+        let cache_section = config
+            .section("cache")?
+            .unwrap_or_else(ConfigSection::empty);
         let cache_config: CacheConfig = cache_section.get()?;
         let mut store: Arc<dyn ObjectStore> = Arc::clone(&raw_store);
         // Innermost tier wraps first, so the FIRST listed tier is the first
         // one checked on a read.
         let mut cache_tiers: CacheTierList = Vec::new();
         for name in cache_config.tiers.iter().rev() {
-            let tier = registries.cache.build(name, &cache_section, &ctx)?;
+            let tier = registries.cache.build(name, &cache_section, &())?;
             let stats = Arc::new(CacheStats::default());
             store = Arc::new(CachedStore::with_stats(store, tier, Arc::clone(&stats)));
             cache_tiers.push((name.clone(), stats));
@@ -1406,27 +1412,34 @@ impl Db {
         // it in reverse to wrap innermost-first).
         cache_tiers.reverse();
 
-        let clock_section = config.section("clock").unwrap_or_else(ConfigSection::empty);
+        let clock_section = config
+            .section("clock")?
+            .unwrap_or_else(ConfigSection::empty);
         let clock = registries.clock.build(
-            clock_section.backend().unwrap_or("system"),
+            clock_section.backend()?.unwrap_or("system"),
             &clock_section,
-            &ctx,
+            &(),
         )?;
         // The coordinator factories (below) read the clock through the
         // context, same as they read the raw store.
-        ctx.insert::<Arc<dyn Clock>>(Arc::clone(&clock));
+        let ctx = crate::registries::CoordinatorDependencies {
+            store: Arc::clone(&raw_store),
+            clock: Arc::clone(&clock),
+        };
 
         let log_tuning: LogTuning = log_section.get()?;
         let storage_tuning: StorageTuning = storage_section.get()?;
-        let query_section = config.section("query").unwrap_or_else(ConfigSection::empty);
+        let query_section = config
+            .section("query")?
+            .unwrap_or_else(ConfigSection::empty);
         let query_tuning: QueryTuning = query_section.get()?;
-        let gc_section = config.section("gc").unwrap_or_else(ConfigSection::empty);
+        let gc_section = config.section("gc")?.unwrap_or_else(ConfigSection::empty);
         let gc_config = gc_section.get::<GcTuning>()?.into_config();
         let security_section = config
-            .section("security")
+            .section("security")?
             .unwrap_or_else(ConfigSection::empty);
         let security: SecurityTuning = security_section.get()?;
-        let node_section = config.section("node").unwrap_or_else(ConfigSection::empty);
+        let node_section = config.section("node")?.unwrap_or_else(ConfigSection::empty);
         let node_tuning: NodeTuning = node_section.get()?;
         let (roles, node_tuning) = node_tuning
             .validate()
@@ -1445,10 +1458,10 @@ impl Db {
         // here, so recovery only ever runs once this node holds the write
         // lease (or designated-writer's best-effort guard has cleared).
         let coord_section = config
-            .section("coordinator")
+            .section("coordinator")?
             .unwrap_or_else(ConfigSection::empty);
         let coord_backend = coord_section
-            .backend()
+            .backend()?
             .unwrap_or("designated-writer")
             .to_string();
         if coord_backend == "cas-failover" && log_backend != "object-store" {
@@ -2933,7 +2946,7 @@ mod tests {
     #[test]
     fn log_tuning_uses_human_readable_byte_sizes() {
         let config = Config::from_toml_str("[log]\ngroup_commit_max_bytes = \"1MiB\"\n").unwrap();
-        let tuning: LogTuning = config.section("log").unwrap().get().unwrap();
+        let tuning: LogTuning = config.section("log").unwrap().unwrap().get().unwrap();
 
         assert_eq!(
             tuning.group_commit_max_bytes,
@@ -2946,6 +2959,7 @@ mod tests {
         let config = Config::from_toml_str("[log]\ngroup_commit_max_bytes = 1048576\n").unwrap();
         let error = config
             .section("log")
+            .unwrap()
             .unwrap()
             .get::<LogTuning>()
             .err()
@@ -2971,7 +2985,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let tuning: QueryTuning = cfg.section("query").unwrap().get().unwrap();
+        let tuning: QueryTuning = cfg.section("query").unwrap().unwrap().get().unwrap();
 
         assert_eq!(tuning.max_path_depth, 7);
         assert_eq!(tuning.path_output_batch_rows, 16);
@@ -2990,7 +3004,7 @@ mod tests {
         std::env::set_var("VARVE__QUERY__TRAVERSAL_ADJACENCY_BUDGET", "44");
 
         let cfg = Config::from_toml_str("").unwrap();
-        let tuning: QueryTuning = cfg.section("query").unwrap().get().unwrap();
+        let tuning: QueryTuning = cfg.section("query").unwrap().unwrap().get().unwrap();
 
         assert_eq!(tuning.path_row_budget, 33);
         assert_eq!(tuning.traversal_adjacency_budget, 44);

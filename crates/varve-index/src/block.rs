@@ -47,7 +47,7 @@ impl PageMeta {
     /// Should the scan read this page? Prune rules (slice-4 plan, decision 4):
     /// - IID point outside `[min_iid, max_iid]` → skip: resolution is
     ///   per-entity, other entities' pages are irrelevant.
-    /// - Every event at/after `bounds.system.upper` → skip: `resolve()`
+    /// - Every event at/after `bounds.system.upper()` → skip: `resolve()`
     ///   ignores such events BEFORE they touch the ceiling, so dropping the
     ///   page is exactly output-preserving — UNLESS the page holds an
     ///   `Erase`, which hides history at every system time (slice-2 GDPR
@@ -65,7 +65,7 @@ impl PageMeta {
                 return false;
             }
         }
-        if self.min_system_from >= bounds.system.upper && !self.has_erase {
+        if self.min_system_from >= bounds.system.upper() && !self.has_erase {
             return false;
         }
         true
@@ -979,7 +979,7 @@ mod tests {
             valid: TemporalDimension::at(us(5)),
             system: TemporalDimension::at(us(10)),
         };
-        assert!(block.pages[0].min_system_from >= bounds.system.upper);
+        assert!(block.pages[0].min_system_from >= bounds.system.upper());
         assert!(
             block.pages[0].selected(&bounds, None),
             "erase page must be scanned"

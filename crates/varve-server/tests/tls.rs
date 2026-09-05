@@ -2,7 +2,7 @@
 
 use std::{path::PathBuf, sync::Arc};
 use varve::{Db, ProbeVerdict};
-use varve_config::{BuildContext, Config};
+use varve_config::Config;
 use varve_server::{
     readiness_channel, static_auth, FrontendContext, PrometheusMetrics, ServerRegistries, Shutdown,
 };
@@ -25,10 +25,13 @@ async fn rustls_frontend_serves_health_and_shuts_down() {
         .await
         .unwrap_or_else(|error| panic!("probe must run: {error}"));
     assert!(matches!(probe.verdict, ProbeVerdict::Supported));
-    let mut build_context = BuildContext::empty();
-    build_context.insert(db.clone());
+    let build_context = varve_server::FrontendDependencies {
+        db: db.clone(),
+        ingest: Default::default(),
+    };
     let server = config
         .section("server")
+        .unwrap_or_else(|error| panic!("valid section: {error}"))
         .unwrap_or_else(varve_config::ConfigSection::empty);
     let frontend = ServerRegistries::with_builtins()
         .unwrap_or_else(|error| panic!("registries must build: {error}"))

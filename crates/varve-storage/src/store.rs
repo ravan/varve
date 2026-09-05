@@ -74,6 +74,12 @@ pub trait ConditionalStore: Send + Sync {
 /// whole object or none (the manifest commit point relies on this).
 #[async_trait::async_trait]
 pub trait ObjectStore: Send + Sync {
+    /// Persistence of successful writes. Undeclared backends cannot replace
+    /// a durable log as the sole copy of flushed records.
+    fn durability(&self) -> varve_types::Durability {
+        varve_types::Durability::Unknown
+    }
+
     /// Atomically create/replace the object at `key`.
     async fn put(&self, key: &str, bytes: Bytes) -> Result<(), StorageError>;
     /// Reads the whole object.
@@ -93,14 +99,17 @@ pub trait ObjectStore: Send + Sync {
     }
 }
 
-/// Blanket impl: every `object_store::ObjectStore` IS a Varve `ObjectStore`.
+/// Adapter for external object stores with an explicit durability declaration.
 ///
 /// Fully-qualified call syntax (`object_store::ObjectStoreExt::put(self, ...)`)
 /// is required throughout this impl — a bare `self.put(...)` would resolve
 /// back to OUR trait (of the same name) and recurse forever instead of
 /// reaching the underlying `object_store` crate's implementation.
 #[async_trait::async_trait]
-impl<T: object_store::ObjectStore> ObjectStore for T {
+impl<T: object_store::ObjectStore + BackendDurability> ObjectStore for T {
+    fn durability(&self) -> varve_types::Durability {
+        BackendDurability::durability(self)
+    }
     async fn put(&self, key: &str, bytes: Bytes) -> Result<(), StorageError> {
         let path = object_store::path::Path::from(key);
         object_store::ObjectStoreExt::put(self, &path, bytes.into())
@@ -223,6 +232,31 @@ impl<T: object_store::ObjectStore> ConditionalStore for T {
             Some(etag) => Ok(Some((bytes, etag))),
             None => Err(StorageError::NoEtag(key.to_string())),
         }
+    }
+}
+
+/// Persistence declaration for an external `object_store` backend. This is
+/// separate from its I/O API so adapters must explicitly declare durability.
+pub trait BackendDurability {
+    fn durability(&self) -> varve_types::Durability;
+}
+
+impl BackendDurability for object_store::memory::InMemory {
+    fn durability(&self) -> varve_types::Durability {
+        varve_types::Durability::Volatile
+    }
+}
+
+impl BackendDurability for object_store::local::LocalFileSystem {
+    fn durability(&self) -> varve_types::Durability {
+        varve_types::Durability::Durable
+    }
+}
+
+#[cfg(feature = "s3")]
+impl BackendDurability for object_store::aws::AmazonS3 {
+    fn durability(&self) -> varve_types::Durability {
+        varve_types::Durability::Durable
     }
 }
 

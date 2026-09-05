@@ -1,11 +1,11 @@
 use bytes::Bytes;
 use std::sync::Arc;
-use varve_config::{BuildContext, Config, ConfigSection};
+use varve_config::{Config, ConfigSection};
 use varve_storage::{local_store, memory_store, storage_registry, ObjectStore, StorageError};
 
 #[cfg(feature = "s3")]
 mod s3_factory {
-    use varve_config::{BuildContext, Config, ConfigSection};
+    use varve_config::{Config, ConfigSection};
     use varve_storage::storage_registry;
 
     #[allow(clippy::unwrap_used)]
@@ -13,6 +13,7 @@ mod s3_factory {
         Config::from_toml_str(toml)
             .unwrap()
             .section("storage")
+            .unwrap()
             .unwrap()
     }
 
@@ -26,9 +27,7 @@ mod s3_factory {
              region = \"garage\"\naccess_key_id = \"GK0123456789\"\n\
              secret_access_key = \"secret\"\n",
         );
-        assert!(storage_registry()
-            .build("s3", &cfg, &BuildContext::empty())
-            .is_ok());
+        assert!(storage_registry().build("s3", &cfg, &()).is_ok());
     }
 
     /// Credentials may be omitted entirely: the builder starts from
@@ -40,15 +39,13 @@ mod s3_factory {
             "[storage]\nbackend = \"s3\"\n[storage.s3]\n\
              endpoint = \"http://127.0.0.1:3900\"\nbucket = \"varve\"\n",
         );
-        assert!(storage_registry()
-            .build("s3", &cfg, &BuildContext::empty())
-            .is_ok());
+        assert!(storage_registry().build("s3", &cfg, &()).is_ok());
     }
 
     #[test]
     fn s3_factory_requires_the_s3_section() {
         let cfg = storage_section("[storage]\nbackend = \"s3\"\n");
-        let err = match storage_registry().build("s3", &cfg, &BuildContext::empty()) {
+        let err = match storage_registry().build("s3", &cfg, &()) {
             Ok(_) => panic!("expected build(\"s3\") with no [storage.s3] to fail"),
             Err(e) => e.to_string(),
         };
@@ -59,7 +56,7 @@ mod s3_factory {
     fn s3_factory_requires_a_bucket() {
         let cfg =
             storage_section("[storage]\nbackend = \"s3\"\n[storage.s3]\nendpoint = \"http://x\"\n");
-        let err = match storage_registry().build("s3", &cfg, &BuildContext::empty()) {
+        let err = match storage_registry().build("s3", &cfg, &()) {
             Ok(_) => panic!("expected build(\"s3\") without bucket to fail"),
             Err(e) => e.to_string(),
         };
@@ -202,9 +199,7 @@ async fn local_store_survives_reopen() {
 async fn registry_builds_by_name() {
     let reg = storage_registry();
     assert_eq!(reg.names(), vec!["local", "memory", "s3"]);
-    let store = reg
-        .build("memory", &ConfigSection::empty(), &BuildContext::empty())
-        .unwrap();
+    let store = reg.build("memory", &ConfigSection::empty(), &()).unwrap();
     store.put("k", Bytes::from_static(b"v")).await.unwrap();
     assert_eq!(store.get("k").await.unwrap(), Bytes::from_static(b"v"));
 }
@@ -214,11 +209,10 @@ fn local_factory_requires_dir() {
     // `.unwrap_err()` needs `Arc<dyn ObjectStore>: Debug`, which `ObjectStore`
     // does not require, so extract the error via `match` instead (see
     // varve-log's local_log.rs test for the same pattern).
-    let err =
-        match storage_registry().build("local", &ConfigSection::empty(), &BuildContext::empty()) {
-            Ok(_) => panic!("expected build(\"local\") with no [storage.local] to fail"),
-            Err(e) => e.to_string(),
-        };
+    let err = match storage_registry().build("local", &ConfigSection::empty(), &()) {
+        Ok(_) => panic!("expected build(\"local\") with no [storage.local] to fail"),
+        Err(e) => e.to_string(),
+    };
     assert!(err.contains("[storage.local]"), "{err}");
 }
 
@@ -232,10 +226,9 @@ async fn local_factory_builds_from_config() {
     let cfg = Config::from_toml_str(&toml)
         .unwrap()
         .section("storage")
+        .unwrap()
         .unwrap();
-    let store = storage_registry()
-        .build("local", &cfg, &BuildContext::empty())
-        .unwrap();
+    let store = storage_registry().build("local", &cfg, &()).unwrap();
     store.put("v1/y", Bytes::from_static(b"z")).await.unwrap();
     assert_eq!(store.get("v1/y").await.unwrap(), Bytes::from_static(b"z"));
 }

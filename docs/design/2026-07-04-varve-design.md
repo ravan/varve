@@ -98,14 +98,19 @@ Every subsystem is defined by a trait in a core crate and accessed through a **c
 
 ```rust
 // varve-config
-pub trait ComponentFactory<T: ?Sized>: Send + Sync {
-    fn kind(&self) -> &'static str;          // e.g. "log"
-    fn name(&self) -> &'static str;          // e.g. "object-store"
-    fn build(&self, cfg: &ConfigSection, ctx: &BuildContext) -> Result<Arc<T>>;
+pub trait ComponentFactory<T: ?Sized, D = ()>: Send + Sync {
+	fn name(&self) -> &'static str;
+	fn build(&self, cfg: &ConfigSection, dependencies: &D) -> Result<Arc<T>, RegistryError>;
 }
 
-pub struct Registry { /* (kind, name) → factory, explicit registration */ }
+pub struct Registry<T: ?Sized, D = ()> { /* name → typed factory, explicit registration */ }
 ```
+
+Factory dependencies are explicit types: `LogDependencies` carries the raw store,
+`CoordinatorDependencies` carries the store and clock, and `FrontendDependencies`
+carries the database and ingest settings. Configuration-only factories use `()`.
+`Registry<T, D>` accepts only factories with that dependency type. Composition
+uses no `Any`, type identifiers, or downcasts.
 
 - **Explicit registration** (no link-time magic): `Registry::with_builtins()` registers everything compiled in; Cargo features gate optional backends; embedding applications may register custom implementations before opening a database.
 - **Pluggable interfaces (v1 set):** `Log`, `ObjectStore` (thin wrapper over the `object_store` crate), `Coordinator` (designated-writer | cas-failover), `CacheTier`, `ProtocolFrontend` (http; bolt/pgwire are roadmap), `FunctionRegistry` (GQL scalar/aggregate functions), `Clock` (mockable for tests), `MetricsSink`, `Authenticator`.

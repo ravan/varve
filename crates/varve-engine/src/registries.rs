@@ -11,11 +11,11 @@ use varve_storage::{CacheTier, ObjectStore};
 /// everything compiled in; embedding applications may `register` additional
 /// factories before calling `Db::open_with`.
 pub struct Registries {
-    pub log: Registry<dyn Log>,
+    pub log: Registry<dyn Log, varve_log::LogDependencies>,
     pub clock: Registry<dyn Clock>,
     pub storage: Registry<dyn ObjectStore>,
     pub cache: Registry<dyn CacheTier>,
-    pub coordinator: Registry<dyn Coordinator>,
+    pub coordinator: Registry<dyn Coordinator, CoordinatorDependencies>,
 }
 
 impl Registries {
@@ -43,10 +43,16 @@ impl Registries {
     }
 }
 
+/// Required inputs for coordinator factories, assembled before acquisition.
+pub struct CoordinatorDependencies {
+    pub store: std::sync::Arc<dyn ObjectStore>,
+    pub clock: std::sync::Arc<dyn Clock>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use varve_config::{BuildContext, ConfigSection};
+    use varve_config::ConfigSection;
 
     #[test]
     fn builtins_cover_log_and_clock() {
@@ -72,11 +78,17 @@ mod tests {
         let registries = Registries::with_builtins();
         let _log = registries
             .log
-            .build("memory", &ConfigSection::empty(), &BuildContext::empty())
+            .build(
+                "memory",
+                &ConfigSection::empty(),
+                &varve_log::LogDependencies {
+                    store: varve_storage::memory_store(),
+                },
+            )
             .unwrap();
         let clock = registries
             .clock
-            .build("system", &ConfigSection::empty(), &BuildContext::empty())
+            .build("system", &ConfigSection::empty(), &())
             .unwrap();
         assert!(clock.next().as_micros() > 0);
     }

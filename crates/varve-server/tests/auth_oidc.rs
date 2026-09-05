@@ -7,7 +7,7 @@
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde_json::json;
 use std::time::Duration;
-use varve_config::{BuildContext, Config};
+use varve_config::Config;
 use varve_server::auth::oidc::{IssuerConfig, OidcAuth, OidcConfig, DEFAULT_CLOCK_SKEW_SECS};
 use varve_server::{AuthError, Authenticator, ServerRegistries};
 
@@ -275,10 +275,10 @@ async fn factory_builds_from_toml_and_reports_missing_sections() {
         issuer.toml_issuer()
     );
     let config = Config::from_toml_str(&toml).unwrap();
-    let section = config.section("auth").unwrap();
+    let section = config.section("auth").unwrap().unwrap();
     let auth = registries
         .authenticator
-        .build("oidc", &section, &BuildContext::empty())
+        .build("oidc", &section, &())
         .unwrap();
     assert_eq!(
         auth.authenticate(Some(&sign_primary(&issuer.claims())))
@@ -288,9 +288,9 @@ async fn factory_builds_from_toml_and_reports_missing_sections() {
     );
 
     let config = Config::from_toml_str("[auth]\nbackend = \"oidc\"\n").unwrap();
-    let section = config.section("auth").unwrap();
+    let section = config.section("auth").unwrap().unwrap();
     assert!(registries
         .authenticator
-        .build("oidc", &section, &BuildContext::empty())
+        .build("oidc", &section, &())
         .is_err());
 }

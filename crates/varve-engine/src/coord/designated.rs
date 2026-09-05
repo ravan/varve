@@ -12,7 +12,7 @@ use crate::db::{
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{ComponentFactory, ConfigSection, RegistryError};
 use varve_log::Log;
 use varve_storage::ObjectStore;
 
@@ -98,7 +98,9 @@ impl Coordinator for DesignatedWriter {
 
 pub(crate) struct DesignatedWriterFactory;
 
-impl ComponentFactory<dyn Coordinator> for DesignatedWriterFactory {
+impl ComponentFactory<dyn Coordinator, crate::registries::CoordinatorDependencies>
+    for DesignatedWriterFactory
+{
     fn name(&self) -> &'static str {
         "designated-writer"
     }
@@ -106,21 +108,11 @@ impl ComponentFactory<dyn Coordinator> for DesignatedWriterFactory {
     fn build(
         &self,
         cfg: &ConfigSection,
-        ctx: &BuildContext,
+        ctx: &crate::registries::CoordinatorDependencies,
     ) -> Result<Arc<dyn Coordinator>, RegistryError> {
         let result = (|| -> Result<DesignatedWriter, Box<dyn std::error::Error + Send + Sync>> {
-            let store = ctx.get::<Arc<dyn ObjectStore>>().ok_or_else(|| {
-                std::io::Error::other(
-                    "designated-writer coordinator requires ObjectStore in BuildContext \
-                     (open through Db::open)",
-                )
-            })?;
-            let clock = ctx.get::<Arc<dyn Clock>>().ok_or_else(|| {
-                std::io::Error::other(
-                    "designated-writer coordinator requires Clock in BuildContext \
-                     (open through Db::open)",
-                )
-            })?;
+            let store = Arc::clone(&ctx.store);
+            let clock = Arc::clone(&ctx.clock);
             let tuning: CoordTuning = cfg.get()?;
             let (heartbeat_interval, takeover_after) =
                 tuning.validate().map_err(std::io::Error::other)?;

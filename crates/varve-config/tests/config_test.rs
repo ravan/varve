@@ -24,9 +24,9 @@ struct LogLocal {
 fn reads_sections_and_backend() {
     std::env::remove_var("VARVE__LOG__BACKEND");
     let cfg = Config::from_toml_str(SAMPLE).unwrap();
-    let log = cfg.section("log").unwrap();
-    assert_eq!(log.backend(), Some("local"));
-    let local: LogLocal = log.child("local").unwrap().get().unwrap();
+    let log = cfg.section("log").unwrap().unwrap();
+    assert_eq!(log.backend().unwrap(), Some("local"));
+    let local: LogLocal = log.child("local").unwrap().unwrap().get().unwrap();
     assert_eq!(local.dir, "/tmp/varve-log");
 }
 
@@ -35,7 +35,7 @@ fn reads_sections_and_backend() {
 fn missing_section_is_none() {
     std::env::remove_var("VARVE__LOG__BACKEND");
     let cfg = Config::from_toml_str(SAMPLE).unwrap();
-    assert!(cfg.section("storage").is_none());
+    assert!(cfg.section("storage").unwrap().is_none());
 }
 
 #[test]
@@ -45,7 +45,10 @@ fn env_var_overrides_key() {
     std::env::remove_var("VARVE__LOG__BACKEND");
     std::env::set_var("VARVE__LOG__BACKEND", "memory");
     let cfg = Config::from_toml_str(SAMPLE).unwrap();
-    assert_eq!(cfg.section("log").unwrap().backend(), Some("memory"));
+    assert_eq!(
+        cfg.section("log").unwrap().unwrap().backend().unwrap(),
+        Some("memory")
+    );
     std::env::remove_var("VARVE__LOG__BACKEND");
 }
 
@@ -62,7 +65,9 @@ fn nested_override_applies() {
     let local: LogLocal = cfg
         .section("log")
         .unwrap()
+        .unwrap()
         .child("local")
+        .unwrap()
         .unwrap()
         .get()
         .unwrap();
@@ -85,7 +90,7 @@ fn numeric_override_is_coerced() {
     std::env::remove_var("VARVE__LOG__GROUP_COMMIT_WINDOW_MS");
     std::env::set_var("VARVE__LOG__GROUP_COMMIT_WINDOW_MS", "30");
     let cfg = Config::from_toml_str(SAMPLE).unwrap();
-    let log = cfg.section("log").unwrap();
+    let log = cfg.section("log").unwrap().unwrap();
 
     let as_number = log.get::<GroupCommitWindowNum>().unwrap();
     assert_eq!(as_number.group_commit_window_ms, 30);
@@ -105,7 +110,7 @@ fn bool_override_is_coerced() {
     std::env::remove_var("VARVE__LOG__ENABLED");
     std::env::set_var("VARVE__LOG__ENABLED", "true");
     let cfg = Config::from_toml_str(SAMPLE).unwrap();
-    let log = cfg.section("log").unwrap();
+    let log = cfg.section("log").unwrap().unwrap();
     let flag = log.get::<LogFlag>().unwrap();
     assert!(flag.enabled);
     std::env::remove_var("VARVE__LOG__ENABLED");
@@ -126,7 +131,9 @@ fn deep_nested_override_applies() {
     let s3: S3Config = cfg
         .section("storage")
         .unwrap()
+        .unwrap()
         .child("s3")
+        .unwrap()
         .unwrap()
         .get()
         .unwrap();
@@ -145,7 +152,10 @@ fn override_through_non_table_intermediate_is_skipped() {
     // `log.backend` is a scalar string in SAMPLE; walking through it to set
     // `log.backend.sub` must not panic and must not clobber `backend`.
     let cfg = Config::from_toml_str(SAMPLE).unwrap();
-    assert_eq!(cfg.section("log").unwrap().backend(), Some("local"));
+    assert_eq!(
+        cfg.section("log").unwrap().unwrap().backend().unwrap(),
+        Some("local")
+    );
     std::env::remove_var("VARVE__LOG__BACKEND__SUB");
 }
 
@@ -163,7 +173,7 @@ fn empty_section_has_no_backend_and_deserializes_defaults() {
     }
 
     let empty = ConfigSection::empty();
-    assert!(empty.backend().is_none());
+    assert!(empty.backend().unwrap().is_none());
     assert_eq!(empty.get::<Tuning>().unwrap(), Tuning { knob: 1 });
 }
 
@@ -175,8 +185,42 @@ fn from_file_reads_and_missing_file_is_io_error() {
     let path = dir.path().join("varve.toml");
     std::fs::write(&path, "[log]\nbackend = \"memory\"\n").unwrap();
     let cfg = Config::from_file(&path).unwrap();
-    assert_eq!(cfg.section("log").unwrap().backend(), Some("memory"));
+    assert_eq!(
+        cfg.section("log").unwrap().unwrap().backend().unwrap(),
+        Some("memory")
+    );
 
     let err = Config::from_file(&dir.path().join("absent.toml")).unwrap_err();
     assert!(matches!(err, ConfigError::Io(_)));
+}
+
+#[test]
+fn malformed_sections_and_backends_are_errors_not_defaults() {
+    let cfg = Config::from_toml_str("storage = 123").unwrap();
+    assert!(matches!(
+        cfg.section("storage"),
+        Err(varve_config::ConfigError::InvalidType { .. })
+    ));
+    for value in ["123", "true", "[]", "{}"] {
+        let cfg = Config::from_toml_str(&format!("[log]\nbackend = {value}")).unwrap();
+        let section = cfg.section("log").unwrap().unwrap();
+        let error = section.backend().unwrap_err();
+        assert!(error.to_string().contains("log.backend"));
+    }
+    let cfg = Config::from_toml_str("[storage]\nlocal = 123").unwrap();
+    let section = cfg.section("storage").unwrap().unwrap();
+    assert!(section
+        .child("local")
+        .unwrap_err()
+        .to_string()
+        .contains("storage.local"));
+}
+
+#[test]
+#[serial]
+fn malformed_environment_backend_is_not_a_default() {
+    std::env::set_var("VARVE__LOG__BACKEND", "123");
+    let cfg = Config::from_toml_str(SAMPLE).unwrap();
+    std::env::remove_var("VARVE__LOG__BACKEND");
+    assert!(cfg.section("log").unwrap().unwrap().backend().is_err());
 }

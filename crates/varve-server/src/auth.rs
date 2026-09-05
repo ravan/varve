@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::{collections::HashSet, fmt, sync::Arc};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
-use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{ComponentFactory, ConfigSection, RegistryError};
 
 #[cfg(feature = "oidc")]
 pub mod oidc;
@@ -126,10 +126,10 @@ impl ComponentFactory<dyn Authenticator> for StaticAuthFactory {
     fn build(
         &self,
         cfg: &ConfigSection,
-        _ctx: &BuildContext,
+        _ctx: &(),
     ) -> Result<Arc<dyn Authenticator>, RegistryError> {
         let result = cfg
-            .child("static")
+            .child("static")?
             .ok_or_else(|| AuthConfigError("[auth.static] is required".into()))
             .and_then(|section| {
                 section

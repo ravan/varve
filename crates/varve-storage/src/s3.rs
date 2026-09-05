@@ -8,7 +8,7 @@ use crate::store::{ObjectStore, StorageError};
 use object_store::aws::AmazonS3Builder;
 use serde::Deserialize;
 use std::sync::Arc;
-use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{ComponentFactory, ConfigSection, RegistryError};
 
 /// `[storage.s3]` settings. Credentials may be omitted: the builder starts
 /// from `AmazonS3Builder::from_env()` (standard `AWS_*` variables and the
@@ -76,12 +76,8 @@ impl ComponentFactory<dyn ObjectStore> for S3StoreFactory {
         "s3"
     }
 
-    fn build(
-        &self,
-        cfg: &ConfigSection,
-        _ctx: &BuildContext,
-    ) -> Result<Arc<dyn ObjectStore>, RegistryError> {
-        let section = cfg.child("s3").ok_or_else(|| RegistryError::Build {
+    fn build(&self, cfg: &ConfigSection, _ctx: &()) -> Result<Arc<dyn ObjectStore>, RegistryError> {
+        let section = cfg.child("s3")?.ok_or_else(|| RegistryError::Build {
             kind: "storage",
             name: "s3".into(),
             source: "missing [storage.s3] section (requires `bucket`)"

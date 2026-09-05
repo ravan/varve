@@ -8,7 +8,7 @@ use bytes::Bytes;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
-use varve_config::{BuildContext, ByteSize, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{ByteSize, ComponentFactory, ConfigSection, RegistryError};
 
 /// `range: None` = the whole object; `Some((start, end))` = a half-open
 /// byte range — distinct cache entries.
@@ -159,6 +159,10 @@ impl CachedStore {
 
 #[async_trait::async_trait]
 impl ObjectStore for CachedStore {
+    fn durability(&self) -> varve_types::Durability {
+        self.inner.durability()
+    }
+
     async fn put(&self, key: &str, bytes: Bytes) -> Result<(), StorageError> {
         self.cache.invalidate_path(key);
         self.inner.put(key, bytes).await
@@ -235,13 +239,9 @@ impl ComponentFactory<dyn CacheTier> for MemoryCacheFactory {
         "memory"
     }
 
-    fn build(
-        &self,
-        cfg: &ConfigSection,
-        _ctx: &BuildContext,
-    ) -> Result<Arc<dyn CacheTier>, RegistryError> {
+    fn build(&self, cfg: &ConfigSection, _ctx: &()) -> Result<Arc<dyn CacheTier>, RegistryError> {
         let config: MemoryCacheConfig = cfg
-            .child("memory")
+            .child("memory")?
             .unwrap_or_else(ConfigSection::empty)
             .get()?;
         Ok(Arc::new(MemoryCache::new(config.max_bytes.as_usize())))
@@ -259,7 +259,7 @@ mod tests {
     fn memory_factory_builds_a_one_mibibyte_tier() {
         let config = Config::from_toml_str("[cache.memory]\nmax_bytes = \"1MiB\"\n").unwrap();
         let cache = MemoryCacheFactory
-            .build(&config.section("cache").unwrap(), &BuildContext::empty())
+            .build(&config.section("cache").unwrap().unwrap(), &())
             .unwrap();
         let first = CacheKey {
             path: "first".into(),
@@ -283,7 +283,7 @@ mod tests {
     fn memory_factory_rejects_numeric_byte_sizes() {
         let config = Config::from_toml_str("[cache.memory]\nmax_bytes = 1048576\n").unwrap();
         let error = MemoryCacheFactory
-            .build(&config.section("cache").unwrap(), &BuildContext::empty())
+            .build(&config.section("cache").unwrap().unwrap(), &())
             .err()
             .unwrap();
 

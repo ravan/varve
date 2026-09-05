@@ -25,7 +25,7 @@
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
-use varve_config::{BuildContext, Config};
+use varve_config::Config;
 use varve_storage::{storage_registry, ObjectStore};
 
 /// Image pins. Bump ONLY here, and record the bump in STATUS.md.
@@ -83,9 +83,12 @@ impl S3Params {
     /// factory — never hand-assembled.
     pub fn store(&self) -> Arc<dyn ObjectStore> {
         let config = Config::from_toml_str(&self.storage_toml()).expect("valid storage toml");
-        let section = config.section("storage").expect("[storage] section");
+        let section = config
+            .section("storage")
+            .expect("valid storage section type")
+            .expect("[storage] section");
         storage_registry()
-            .build("s3", &section, &BuildContext::empty())
+            .build("s3", &section, &())
             .expect("s3 store builds")
     }
 }

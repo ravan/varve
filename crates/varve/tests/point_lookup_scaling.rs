@@ -68,7 +68,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use varve::{Config, Db, Registries};
-use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{ComponentFactory, ConfigSection, RegistryError};
 use varve_storage::{ConditionalStore, ObjectStore, StorageError};
 use varve_testkit::db_harness::{toml_escaped_path, wait_for_manifest_count};
 
@@ -89,7 +89,7 @@ impl ComponentFactory<dyn ObjectStore> for CountingStoreFactory {
     fn build(
         &self,
         _cfg: &ConfigSection,
-        _ctx: &BuildContext,
+        _ctx: &(),
     ) -> Result<Arc<dyn ObjectStore>, RegistryError> {
         let inner = varve_storage::local_store(&self.dir).map_err(|e| RegistryError::Build {
             kind: "storage",
@@ -110,6 +110,9 @@ struct CountingStore {
 
 #[async_trait]
 impl ObjectStore for CountingStore {
+    fn durability(&self) -> varve_types::Durability {
+        self.inner.durability()
+    }
     async fn put(&self, key: &str, bytes: Bytes) -> Result<(), StorageError> {
         self.inner.put(key, bytes).await
     }

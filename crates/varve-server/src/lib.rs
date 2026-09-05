@@ -25,7 +25,7 @@ pub use metrics::{MetricsSink, PrometheusMetrics};
 use varve_config::{Registry, RegistryError};
 
 pub struct ServerRegistries {
-    pub frontend: Registry<dyn ProtocolFrontend>,
+    pub frontend: Registry<dyn ProtocolFrontend, FrontendDependencies>,
     pub authenticator: Registry<dyn Authenticator>,
     pub metrics: Registry<dyn MetricsSink>,
 }
@@ -50,4 +50,11 @@ impl ServerRegistries {
             metrics,
         })
     }
+}
+
+/// Required inputs used to configure a protocol frontend.
+pub struct FrontendDependencies {
+    pub db: varve::Db,
+    #[cfg(feature = "http")]
+    pub ingest: IngestConfig,
 }

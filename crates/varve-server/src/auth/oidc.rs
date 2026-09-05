@@ -26,7 +26,7 @@ use std::{
     time::{Duration, Instant},
 };
 use thiserror::Error;
-use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{ComponentFactory, ConfigSection, RegistryError};
 
 /// Signature algorithms a token may name. Symmetric algorithms are refused:
 /// a shared secret would let any verifier mint tokens.
@@ -374,10 +374,10 @@ impl ComponentFactory<dyn Authenticator> for OidcAuthFactory {
     fn build(
         &self,
         cfg: &ConfigSection,
-        _ctx: &BuildContext,
+        _ctx: &(),
     ) -> Result<Arc<dyn Authenticator>, RegistryError> {
         let result = cfg
-            .child("oidc")
+            .child("oidc")?
             .ok_or_else(|| OidcConfigError("[auth.oidc] is required".into()))
             .and_then(|section| {
                 section

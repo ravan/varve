@@ -30,7 +30,7 @@ pub use node::{
     log_lag_records, AppliedProgress, BasisToken, NodeRole, NodeRoles, NodeStatus,
     DEFAULT_BASIS_TIMEOUT_MS, DEFAULT_TAIL_BATCH_RECORDS, DEFAULT_TAIL_POLL_INTERVAL_MS,
 };
-pub use registries::Registries;
+pub use registries::{CoordinatorDependencies, Registries};
 pub use security::SecurityTuning;
 pub use state::DEFAULT_GRAPH;
 pub use varve_storage::{ProbeReport, ProbeVerdict};

@@ -287,7 +287,18 @@ where
                         Some(Value::Float(f)) => b.append_value(*f),
                         // Widened from a mixed Int/Float column: cast the
                         // whole-number rows up to f64 (see `widen_types`).
-                        Some(Value::Int(i)) => b.append_value(*i as f64),
+                        Some(Value::Int(i)) => {
+                            let widened = *i as f64;
+                            // i128 avoids the saturating f64 -> i64 conversion
+                            // falsely accepting i64::MAX rounded up to 2^63.
+                            if widened as i128 != i128::from(*i) {
+                                return Err(IndexError::InexactNumericConversion {
+                                    property: (*name).to_string(),
+                                    value: *i,
+                                });
+                            }
+                            b.append_value(widened);
+                        }
                         _ => b.append_null(),
                     }
                 }
@@ -727,6 +738,66 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["y", "x"]); // reversed file order, not re-sorted
+    }
+
+    #[test]
+    fn mixed_numeric_columns_preserve_exact_integers_or_fail() {
+        for integer in [
+            9_007_199_254_740_993,
+            -9_007_199_254_740_993,
+            i64::MAX,
+            i64::MIN,
+            9_007_199_254_740_992,
+            9_007_199_254_740_994,
+        ] {
+            let node = |entity, value| Event {
+                iid: iid(entity),
+                system_from: us(1),
+                valid_from: us(1),
+                valid_to: Instant::END_OF_TIME,
+                src: None,
+                dst: None,
+                op: Op::Put {
+                    labels: vec!["P".into()],
+                    doc: Doc::from([("score".into(), value)]),
+                },
+            };
+            let a = node(1, Value::Int(integer));
+            let b = node(2, Value::Float(0.5));
+            let mut pairs = vec![
+                (a.iid, std::slice::from_ref(&a)),
+                (b.iid, std::slice::from_ref(&b)),
+            ];
+            pairs.sort_by_key(|(iid, _)| *iid);
+            let result = snapshot_entities(pairs, LabelFilter::All(&[]), &now_bounds(10));
+            let exact = matches!(
+                integer,
+                i64::MIN | 9_007_199_254_740_992 | 9_007_199_254_740_994
+            );
+            if exact {
+                assert!(result.is_ok(), "exact integer {integer}: {result:?}");
+            } else {
+                assert!(
+                    matches!(result, Err(IndexError::InexactNumericConversion { value, .. }) if value == integer)
+                );
+            }
+            // Without a float peer, all i64 values retain their integer type.
+            let result = snapshot_entities(
+                [(a.iid, std::slice::from_ref(&a))],
+                LabelFilter::All(&[]),
+                &now_bounds(10),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                result
+                    .schema()
+                    .field_with_name("score")
+                    .unwrap()
+                    .data_type(),
+                &DataType::Int64
+            );
+        }
     }
 
     /// A property that is `Int` on one row and `Float` on another (across

@@ -88,3 +88,33 @@ startup probe rather than assumed, and its absence is never an error for normal 
 backend that fails the probe simply cannot run `cas-failover`, and falls back to (or stays on)
 `designated-writer`, enforced by the deployment orchestrator instead of the object store. Varve
 will never make CAS a hard requirement for shipping v1 functionality.
+
+## Rust extension contracts
+
+`ComponentFactory<T, D>` and `Registry<T, D>` declare factory dependencies through
+`D`. Configuration-only factories use `D = ()`. The dependency types are:
+
+| Factory family | Dependency type | Fields |
+|---|---|---|
+| Log | `varve_log::LogDependencies` | `store` with the `object-store` feature |
+| Coordinator | `varve_engine::CoordinatorDependencies` | `store`, `clock` |
+| Protocol frontend | `varve_server::FrontendDependencies` | `db`, plus `ingest` with the `http` feature |
+
+These types replace `BuildContext`. Factories receive required components as
+fields, without type-erased lookup. A missing dependency fails compilation.
+
+`Log::durability()` and `ObjectStore::durability()` return
+`varve_types::Durability`: `Durable`, `Volatile`, or `Unknown`. The default for
+custom implementations is `Unknown`. `Db::open_with` requires durable block
+storage unless the log explicitly declares itself volatile. This check is
+independent of registry names. Store wrappers preserve their inner store's
+capability; caches do not change durability.
+
+External `object_store::ObjectStore` implementations also implement
+`varve_storage::BackendDurability` to use Varve's adapter. The built-in memory,
+local filesystem, and S3 backends already declare their capabilities.
+
+`Config::section`, `ConfigSection::child`, and `ConfigSection::backend` return
+`Result<Option<_>, ConfigError>`. Absence returns `Ok(None)`. A present value of
+the wrong type returns an error with its configuration path. Defaults apply
+only after the caller handles that error.

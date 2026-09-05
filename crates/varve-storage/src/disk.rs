@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use varve_config::{BuildContext, ByteSize, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{ByteSize, ComponentFactory, ConfigSection, RegistryError};
 use xxhash_rust::xxh3::xxh3_128;
 
 const MAGIC: &[u8; 4] = b"VCA1";
@@ -296,12 +296,8 @@ impl ComponentFactory<dyn CacheTier> for DiskCacheFactory {
         "disk"
     }
 
-    fn build(
-        &self,
-        cfg: &ConfigSection,
-        _ctx: &BuildContext,
-    ) -> Result<Arc<dyn CacheTier>, RegistryError> {
-        let section = cfg.child("disk").ok_or_else(|| RegistryError::Build {
+    fn build(&self, cfg: &ConfigSection, _ctx: &()) -> Result<Arc<dyn CacheTier>, RegistryError> {
+        let section = cfg.child("disk")?.ok_or_else(|| RegistryError::Build {
             kind: "cache",
             name: "disk".into(),
             source: "missing [cache.disk] section (requires `dir`)"
@@ -343,7 +339,7 @@ mod tests {
         ))
         .unwrap();
         let cache = DiskCacheFactory
-            .build(&config.section("cache").unwrap(), &BuildContext::empty())
+            .build(&config.section("cache").unwrap().unwrap(), &())
             .unwrap();
         let at_limit = key("at-limit", None);
         let at_limit_value = Bytes::from(vec![0; 1024 * 1024 - encode_key(&at_limit).len()]);
@@ -368,7 +364,7 @@ mod tests {
         ))
         .unwrap();
         let error = DiskCacheFactory
-            .build(&config.section("cache").unwrap(), &BuildContext::empty())
+            .build(&config.section("cache").unwrap().unwrap(), &())
             .err()
             .unwrap();
 

@@ -10,7 +10,7 @@ use std::sync::{
     Arc,
 };
 use varve::{Config, Db, RecordBatch, Registries};
-use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{ComponentFactory, ConfigSection, RegistryError};
 use varve_storage::{ObjectStore, StorageError};
 use varve_testkit::db_harness::{
     local_blocks_config as blocks_config, row_count as rows, toml_escaped_path,
@@ -355,7 +355,7 @@ impl ComponentFactory<dyn ObjectStore> for FailingManifestStoreFactory {
     fn build(
         &self,
         _cfg: &ConfigSection,
-        _ctx: &BuildContext,
+        _ctx: &(),
     ) -> Result<Arc<dyn ObjectStore>, RegistryError> {
         let inner = varve_storage::local_store(&self.dir).map_err(|e| RegistryError::Build {
             kind: "storage",
@@ -376,6 +376,9 @@ struct FailingManifestStore {
 
 #[async_trait]
 impl ObjectStore for FailingManifestStore {
+    fn durability(&self) -> varve_types::Durability {
+        self.inner.durability()
+    }
     async fn put(&self, key: &str, bytes: Bytes) -> Result<(), StorageError> {
         if is_manifest_key(key) && self.fail_next_manifest_put.swap(false, Ordering::SeqCst) {
             return Err(StorageError::Io(std::io::Error::other(

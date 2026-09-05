@@ -15,7 +15,7 @@ pub use record::{decode_frames, LogRecord, TableEffects};
 use varve_config::{ComponentFactory, Registry};
 
 /// All built-in log backends, registered under kind "log".
-pub fn log_registry() -> Registry<dyn Log> {
+pub fn log_registry() -> Registry<dyn Log, LogDependencies> {
     let mut reg = Registry::new("log");
     register_builtin(&mut reg, Box::new(MemoryLogFactory));
     register_builtin(&mut reg, Box::new(LocalLogFactory));
@@ -29,8 +29,18 @@ pub fn log_registry() -> Registry<dyn Log> {
 /// is a programming error in this crate, not a runtime configuration
 /// problem, so it must never be turned into a `Result` the caller has to
 /// handle.
-fn register_builtin(reg: &mut Registry<dyn Log>, factory: Box<dyn ComponentFactory<dyn Log>>) {
+fn register_builtin(
+    reg: &mut Registry<dyn Log, LogDependencies>,
+    factory: Box<dyn ComponentFactory<dyn Log, LogDependencies>>,
+) {
     if let Err(e) = reg.register(factory) {
         unreachable!("built-in log factory registration must not collide: {e}");
     }
+}
+
+/// Dependencies shared by log factories. The object-store log uses the raw
+/// block store, bypassing query caches.
+pub struct LogDependencies {
+    #[cfg(feature = "object-store")]
+    pub store: std::sync::Arc<dyn varve_storage::ObjectStore>,
 }

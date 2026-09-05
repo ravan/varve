@@ -14,7 +14,7 @@ use crate::log::{Log, LogError};
 use crate::record::LogRecord;
 use bytes::Bytes;
 use std::sync::Arc;
-use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{ComponentFactory, ConfigSection, RegistryError};
 use varve_storage::{keys, ObjectStore};
 use varve_types::LogPosition;
 
@@ -84,6 +84,10 @@ fn corrupt(key: &str, off: usize, reason: &str) -> LogError {
 
 #[async_trait::async_trait]
 impl Log for ObjectStoreLog {
+    fn durability(&self) -> varve_types::Durability {
+        self.store.durability()
+    }
+
     async fn append(&self, records: Vec<LogRecord>) -> Result<LogPosition, LogError> {
         if records.is_empty() {
             return Err(LogError::EmptyAppend);
@@ -187,11 +191,11 @@ impl Log for ObjectStoreLog {
 }
 
 /// Registry factory: `[log] backend = "object-store"`. Consumes the
-/// already-built storage component from the `BuildContext` (spec §4 ctx) —
+/// already-built storage component from `crate::LogDependencies` —
 /// the log shares the block store's bucket and keyspace (spec §9).
 pub struct ObjectStoreLogFactory;
 
-impl ComponentFactory<dyn Log> for ObjectStoreLogFactory {
+impl ComponentFactory<dyn Log, crate::LogDependencies> for ObjectStoreLogFactory {
     fn name(&self) -> &'static str {
         "object-store"
     }
@@ -199,19 +203,9 @@ impl ComponentFactory<dyn Log> for ObjectStoreLogFactory {
     fn build(
         &self,
         _cfg: &ConfigSection,
-        ctx: &BuildContext,
+        ctx: &crate::LogDependencies,
     ) -> Result<Arc<dyn Log>, RegistryError> {
-        let store = ctx
-            .get::<Arc<dyn ObjectStore>>()
-            .ok_or_else(|| RegistryError::Build {
-                kind: "log",
-                name: "object-store".into(),
-                source: "no storage component in the build context; the \
-                         object-store log shares the [storage] backend — open \
-                         through Db::open, which builds storage first"
-                    .to_string()
-                    .into(),
-            })?;
+        let store = Arc::clone(&ctx.store);
         Ok(Arc::new(ObjectStoreLog::new(store)))
     }
 }

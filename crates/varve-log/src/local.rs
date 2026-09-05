@@ -3,7 +3,7 @@ use crate::record::LogRecord;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{ComponentFactory, ConfigSection, RegistryError};
 use varve_types::LogPosition;
 
 pub const DEFAULT_SEGMENT_MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -342,6 +342,10 @@ fn trim_sync(inner: &Inner, up_to: LogPosition) -> Result<(), LogError> {
 
 #[async_trait::async_trait]
 impl Log for LocalLog {
+    fn durability(&self) -> varve_types::Durability {
+        varve_types::Durability::Durable
+    }
+
     async fn append(&self, records: Vec<LogRecord>) -> Result<LogPosition, LogError> {
         let inner = Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || {
@@ -429,7 +433,7 @@ fn default_segment_max_bytes() -> u64 {
 /// `[log.local]` table (`dir` required, `segment_max_bytes` optional).
 pub struct LocalLogFactory;
 
-impl ComponentFactory<dyn Log> for LocalLogFactory {
+impl ComponentFactory<dyn Log, crate::LogDependencies> for LocalLogFactory {
     fn name(&self) -> &'static str {
         "local"
     }
@@ -437,9 +441,9 @@ impl ComponentFactory<dyn Log> for LocalLogFactory {
     fn build(
         &self,
         cfg: &ConfigSection,
-        _ctx: &BuildContext,
+        _ctx: &crate::LogDependencies,
     ) -> Result<Arc<dyn Log>, RegistryError> {
-        let local = cfg.child("local").ok_or_else(|| RegistryError::Build {
+        let local = cfg.child("local")?.ok_or_else(|| RegistryError::Build {
             kind: "log",
             name: "local".into(),
             source: "missing [log.local] section (requires `dir`)"

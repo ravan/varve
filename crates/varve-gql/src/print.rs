@@ -389,20 +389,20 @@ fn push_temporal_clauses(parts: &mut Vec<String>, temporal: &TemporalClauses) {
 }
 
 fn print_temporal_dimension(dim: &TemporalDimension) -> String {
-    if dim.lower == Instant::MIN && dim.upper == Instant::END_OF_TIME {
+    if dim.lower() == Instant::MIN && dim.upper() == Instant::END_OF_TIME {
         "ALL".to_string()
     } else if dim
-        .lower
+        .lower()
         .as_micros()
         .checked_add(1)
-        .is_some_and(|upper| upper == dim.upper.as_micros())
+        .is_some_and(|upper| upper == dim.upper().as_micros())
     {
-        format!("AS OF {}", print_instant(&dim.lower))
+        format!("AS OF {}", print_instant(&dim.lower()))
     } else {
         format!(
             "FROM {} TO {}",
-            print_instant(&dim.lower),
-            print_instant(&dim.upper)
+            print_instant(&dim.lower()),
+            print_instant(&dim.upper())
         )
     }
 }

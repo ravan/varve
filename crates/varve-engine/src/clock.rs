@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{ComponentFactory, ConfigSection, RegistryError};
 use varve_types::Instant;
 
 /// Transaction-time source (spec §4 `Clock`). `next()` is called once per
@@ -75,11 +75,7 @@ impl ComponentFactory<dyn Clock> for SystemClockFactory {
         "system"
     }
 
-    fn build(
-        &self,
-        _cfg: &ConfigSection,
-        _ctx: &BuildContext,
-    ) -> Result<Arc<dyn Clock>, RegistryError> {
+    fn build(&self, _cfg: &ConfigSection, _ctx: &()) -> Result<Arc<dyn Clock>, RegistryError> {
         Ok(Arc::new(MonotonicClock::new()))
     }
 }
@@ -131,9 +127,9 @@ mod tests {
 
     #[test]
     fn system_factory_builds_a_clock() {
-        use varve_config::{BuildContext, ComponentFactory, ConfigSection};
+        use varve_config::{ComponentFactory, ConfigSection};
         let clock = SystemClockFactory
-            .build(&ConfigSection::empty(), &BuildContext::empty())
+            .build(&ConfigSection::empty(), &())
             .unwrap();
         assert!(clock.next() > Instant::from_micros(0));
     }

@@ -239,7 +239,7 @@ pub fn resolve<'a>(events: &'a [Event], bounds: &TemporalBounds) -> Vec<Resolved
         }
         // Events after the snapshot's system upper bound don't exist for this
         // query — and must not supersede older events either.
-        if event.system_from >= bounds.system.upper {
+        if event.system_from >= bounds.system.upper() {
             continue;
         }
         // Defensive: empty valid ranges affect nothing (engine validates upstream).

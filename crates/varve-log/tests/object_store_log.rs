@@ -8,7 +8,7 @@ use bytes::Bytes;
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use varve_config::{BuildContext, ConfigSection};
+use varve_config::ConfigSection;
 use varve_log::{log_registry, Log, LogError, LogRecord, ObjectStoreLog};
 use varve_storage::{keys, memory_store, ObjectStore, StorageError};
 use varve_types::LogPosition;
@@ -210,24 +210,10 @@ async fn empty_append_is_rejected() {
 }
 
 #[tokio::test]
-async fn factory_requires_the_storage_component() {
-    let reg = log_registry();
-    assert_eq!(reg.names(), vec!["local", "memory", "object-store"]);
-    let err = match reg.build(
-        "object-store",
-        &ConfigSection::empty(),
-        &BuildContext::empty(),
-    ) {
-        Ok(_) => panic!("expected build without a storage component to fail"),
-        Err(e) => e.to_string(),
-    };
-    assert!(err.contains("storage component"), "{err}");
-}
-
-#[tokio::test]
 async fn factory_builds_with_the_storage_component() {
-    let mut ctx = BuildContext::empty();
-    ctx.insert(memory_store());
+    let ctx = varve_log::LogDependencies {
+        store: memory_store(),
+    };
     let log = log_registry()
         .build("object-store", &ConfigSection::empty(), &ctx)
         .unwrap();

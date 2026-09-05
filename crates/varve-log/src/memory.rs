@@ -1,7 +1,7 @@
 use crate::log::{validate_epoch_start, Log, LogError};
 use crate::record::LogRecord;
 use std::sync::{Arc, Mutex};
-use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{ComponentFactory, ConfigSection, RegistryError};
 use varve_types::LogPosition;
 
 struct Inner {
@@ -37,6 +37,10 @@ impl MemoryLog {
 
 #[async_trait::async_trait]
 impl Log for MemoryLog {
+    fn durability(&self) -> varve_types::Durability {
+        varve_types::Durability::Volatile
+    }
+
     async fn append(&self, records: Vec<LogRecord>) -> Result<LogPosition, LogError> {
         if records.is_empty() {
             return Err(LogError::EmptyAppend);
@@ -89,7 +93,7 @@ impl Log for MemoryLog {
 /// Registry factory: `[log] backend = "memory"`.
 pub struct MemoryLogFactory;
 
-impl ComponentFactory<dyn Log> for MemoryLogFactory {
+impl ComponentFactory<dyn Log, crate::LogDependencies> for MemoryLogFactory {
     fn name(&self) -> &'static str {
         "memory"
     }
@@ -97,7 +101,7 @@ impl ComponentFactory<dyn Log> for MemoryLogFactory {
     fn build(
         &self,
         _cfg: &ConfigSection,
-        _ctx: &BuildContext,
+        _ctx: &crate::LogDependencies,
     ) -> Result<Arc<dyn Log>, RegistryError> {
         Ok(Arc::new(MemoryLog::new()))
     }

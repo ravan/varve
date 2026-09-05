@@ -16,6 +16,11 @@ pub enum ConfigError {
     /// the requested type (e.g. a required field is missing).
     #[error("failed to deserialize section: {0}")]
     Deserialize(String),
+    #[error("configuration `{path}` must be {expected}")]
+    InvalidType {
+        path: String,
+        expected: &'static str,
+    },
 }
 
 /// Parsed TOML configuration root (spec §4/§11: one `varve.toml` per
@@ -38,6 +43,7 @@ pub struct Config {
 #[derive(Debug, Clone)]
 pub struct ConfigSection {
     table: toml::Table,
+    path: String,
 }
 
 const ENV_PREFIX: &str = "VARVE__";
@@ -60,11 +66,18 @@ impl Config {
     }
 
     /// Looks up top-level table `[name]` (e.g. `config.section("log")` for
-    /// `[log]`); `None` if `name` is absent or not a table.
-    pub fn section(&self, name: &str) -> Option<ConfigSection> {
+    /// `[log]`); `None` if absent; an error if present but not a table.
+    pub fn section(&self, name: &str) -> Result<Option<ConfigSection>, ConfigError> {
         match self.root.get(name) {
-            Some(toml::Value::Table(t)) => Some(ConfigSection { table: t.clone() }),
-            _ => None,
+            Some(toml::Value::Table(t)) => Ok(Some(ConfigSection {
+                table: t.clone(),
+                path: name.to_string(),
+            })),
+            None => Ok(None),
+            Some(_) => Err(ConfigError::InvalidType {
+                path: name.to_string(),
+                expected: "a table",
+            }),
         }
     }
 }
@@ -76,21 +89,44 @@ impl ConfigSection {
     pub fn empty() -> ConfigSection {
         ConfigSection {
             table: toml::Table::new(),
+            path: String::new(),
         }
     }
 
     /// The section's `backend` key (a [`crate::Registry`] lookup name, e.g.
-    /// `[log] backend = "local"`); `None` if absent or not a string.
-    pub fn backend(&self) -> Option<&str> {
-        self.table.get("backend").and_then(|v| v.as_str())
+    /// `[log] backend = "local"`); `None` if absent; an error if present but not a string.
+    pub fn backend(&self) -> Result<Option<&str>, ConfigError> {
+        match self.table.get("backend") {
+            None => Ok(None),
+            Some(toml::Value::String(value)) => Ok(Some(value)),
+            Some(_) => Err(ConfigError::InvalidType {
+                path: self.key_path("backend"),
+                expected: "a string",
+            }),
+        }
     }
 
     /// Looks up nested table `[section.name]` (e.g. `log.child("local")` for
-    /// `[log.local]`); `None` if `name` is absent or not a table.
-    pub fn child(&self, name: &str) -> Option<ConfigSection> {
+    /// `[log.local]`); `None` if absent; an error if present but not a table.
+    pub fn child(&self, name: &str) -> Result<Option<ConfigSection>, ConfigError> {
         match self.table.get(name) {
-            Some(toml::Value::Table(t)) => Some(ConfigSection { table: t.clone() }),
-            _ => None,
+            Some(toml::Value::Table(t)) => Ok(Some(ConfigSection {
+                table: t.clone(),
+                path: self.key_path(name),
+            })),
+            None => Ok(None),
+            Some(_) => Err(ConfigError::InvalidType {
+                path: self.key_path(name),
+                expected: "a table",
+            }),
+        }
+    }
+
+    fn key_path(&self, name: &str) -> String {
+        if self.path.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}.{name}", self.path)
         }
     }
 

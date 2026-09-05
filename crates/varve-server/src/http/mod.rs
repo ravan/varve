@@ -21,7 +21,7 @@ use std::{
 };
 use url::Url;
 use varve::NodeRole;
-use varve_config::{BuildContext, ByteSize, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{ByteSize, ComponentFactory, ConfigSection, RegistryError};
 
 #[derive(Deserialize)]
 struct HttpConfig {
@@ -84,7 +84,7 @@ impl Default for IngestConfig {
 
 pub(crate) struct HttpFrontendFactory;
 
-impl ComponentFactory<dyn ProtocolFrontend> for HttpFrontendFactory {
+impl ComponentFactory<dyn ProtocolFrontend, crate::FrontendDependencies> for HttpFrontendFactory {
     fn name(&self) -> &'static str {
         "http"
     }
@@ -92,14 +92,12 @@ impl ComponentFactory<dyn ProtocolFrontend> for HttpFrontendFactory {
     fn build(
         &self,
         cfg: &ConfigSection,
-        ctx: &BuildContext,
+        ctx: &crate::FrontendDependencies,
     ) -> Result<Arc<dyn ProtocolFrontend>, RegistryError> {
         let result = (|| -> Result<HttpFrontend, Box<dyn std::error::Error + Send + Sync>> {
-            let db = ctx
-                .get::<varve::Db>()
-                .ok_or_else(|| std::io::Error::other("HttpFrontend requires Db in BuildContext"))?;
+            let db = &ctx.db;
             let config: HttpConfig = cfg
-                .child("http")
+                .child("http")?
                 .unwrap_or_else(ConfigSection::empty)
                 .get()?;
             let listen = config.listen.parse::<SocketAddr>()?;
@@ -124,10 +122,8 @@ impl ComponentFactory<dyn ProtocolFrontend> for HttpFrontendFactory {
             } else {
                 None
             };
-            // `[ingest]` is a top-level section, so `varved` reads it and
-            // inserts an `IngestConfig` into the BuildContext; absent means
-            // defaults (embedded/test callers that never populate it).
-            let ingest = ctx.get::<IngestConfig>().unwrap_or_default();
+            // The composition root supplies the top-level ingest settings.
+            let ingest = ctx.ingest;
             if ingest.chunk_ops == 0 {
                 return Err(std::io::Error::other("[ingest] chunk_ops must be > 0").into());
             }

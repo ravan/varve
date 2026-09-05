@@ -12,7 +12,7 @@ use prometheus::{
     IntGaugeVec, Opts, Registry, TextEncoder,
 };
 use std::{sync::Arc, time::Duration};
-use varve_config::{BuildContext, ComponentFactory, ConfigSection, RegistryError};
+use varve_config::{ComponentFactory, ConfigSection, RegistryError};
 use varve_engine::{log_lag_records, EngineMetricsSnapshot, NodeStatus};
 
 pub trait MetricsSink: Send + Sync {
@@ -346,7 +346,7 @@ impl ComponentFactory<dyn MetricsSink> for PrometheusMetricsFactory {
     fn build(
         &self,
         _cfg: &ConfigSection,
-        _ctx: &BuildContext,
+        _ctx: &(),
     ) -> Result<Arc<dyn MetricsSink>, RegistryError> {
         PrometheusMetrics::new()
             .map(|metrics| Arc::new(metrics) as Arc<dyn MetricsSink>)

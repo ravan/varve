@@ -17,7 +17,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use varve::{Config, Db, RecordBatch, Registries};
-use varve_config::{BuildContext, ComponentFactory, ConfigError, ConfigSection, RegistryError};
+use varve_config::{ComponentFactory, ConfigError, ConfigSection, RegistryError};
 use varve_index::{encode_events, Event, Op};
 use varve_log::{Log, LogRecord, ObjectStoreLog, TableEffects};
 use varve_storage::ObjectStore;
@@ -36,7 +36,7 @@ impl ComponentFactory<dyn ObjectStore> for SharedStoreFactory {
     fn build(
         &self,
         _cfg: &ConfigSection,
-        _ctx: &BuildContext,
+        _ctx: &(),
     ) -> Result<Arc<dyn ObjectStore>, RegistryError> {
         Ok(Arc::clone(&self.0))
     }
