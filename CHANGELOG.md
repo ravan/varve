@@ -4,6 +4,13 @@ All notable changes to Varve are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.1.2 (2026-09-08)
+
+### Changed
+
+- `GET /metrics` is public, like `/healthz`. Every `/v1/*` route still needs a
+  bearer token. Silt's Prometheus scrapes Varve with no credential.
+
 ## 0.1.1 (2026-09-03)
 
 ### Added
