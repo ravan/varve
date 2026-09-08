@@ -237,16 +237,16 @@ pub struct HttpContext {
 pub fn http_router(context: HttpContext) -> Router {
     let public = Router::new()
         .route("/healthz", get(handlers::health))
+        .route("/metrics", get(handlers::metrics))
         .route_layer(middleware::from_fn_with_state(
             context.clone(),
-            observe_health,
+            observe_public,
         ));
     // Standard routes share the configured request body cap.
     let capped = Router::new()
         .route("/v1/query", post(handlers::query))
         .route("/v1/tx", post(handlers::tx))
         .route("/v1/status", get(handlers::status))
-        .route("/metrics", get(handlers::metrics))
         .route("/v1/admin/compact", post(handlers::compact))
         .route("/v1/admin/gc", post(handlers::gc))
         .route("/v1/admin/verify", post(handlers::verify))
@@ -272,16 +272,18 @@ pub fn http_router(context: HttpContext) -> Router {
         .with_state(context)
 }
 
-async fn observe_health(
+async fn observe_public(
     State(context): State<HttpContext>,
     request: Request,
     next: Next,
 ) -> Response {
     let started = Instant::now();
+    let method = static_method(request.method());
+    let route = static_route(request.uri().path());
     let response = next.run(request).await;
     context.frontend.metrics.observe_request(
-        "GET",
-        "/healthz",
+        method,
+        route,
         response.status().as_u16(),
         started.elapsed(),
     );
@@ -346,6 +348,7 @@ fn static_method(method: &axum::http::Method) -> &'static str {
 }
 fn static_route(path: &str) -> &'static str {
     match path {
+        "/healthz" => "/healthz",
         "/v1/query" => "/v1/query",
         "/v1/tx" => "/v1/tx",
         "/v1/ingest" => "/v1/ingest",

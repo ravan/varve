@@ -13,7 +13,7 @@ status code, and body on this page is copied from `crates/varve-server/tests/htt
 | `/v1/tx` | POST | bearer | Mutation; **writer-only**, redirects on a non-writer node. |
 | `/v1/ingest` | POST | bearer | Bulk load (NDJSON / Neo4j-CSV); **writer-only**. Streaming, per-chunk atomic. See [Bulk ingest](bulk-ingest.md). |
 | `/v1/status` | GET | bearer | Roles, applied progress, manifest watermark, probe verdict. |
-| `/metrics` | GET | bearer | Prometheus text format. |
+| `/metrics` | GET | **public** | Prometheus text format. Unauthenticated, like `/healthz`, so a scraper needs no credential (Varve 0.1.2). |
 | `/v1/admin/compact` | POST | bearer | **Compactor-role-only**, redirects otherwise. |
 | `/v1/admin/gc` | POST | bearer | **Compactor-role-only**, redirects otherwise. |
 | `/v1/admin/verify` | POST | bearer | Runs on any node (not role-gated). |

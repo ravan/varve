@@ -120,6 +120,42 @@ async fn health_is_public_but_v1_routes_require_bearer_auth() {
 }
 
 #[tokio::test]
+async fn metrics_is_public() {
+    let app = router();
+    let first = call(app.clone(), Method::GET, "/metrics", None, false).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    assert!(
+        first.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain"),
+        "{:?}",
+        first.headers()["content-type"]
+    );
+    let second = call(app.clone(), Method::GET, "/metrics", None, false).await;
+    let body = String::from_utf8(
+        second
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        body.contains("method=\"GET\",route=\"/metrics\",status=\"200\""),
+        "{body}"
+    );
+    assert_eq!(
+        call(app, Method::GET, "/v1/status", None, false)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
 async fn tx_then_json_query_round_trips() {
     let app = router();
     let tx = call(
