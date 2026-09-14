@@ -11,7 +11,7 @@ default = ["http", "tls", "otel", "oidc"]
 http = ["dep:axum-server", "dep:url", "dep:tower-http", "bulk"]
 # The Neo4j-dialect CSV decoder (only csv-core). Split out from `http` so the
 # CLI can decode CSV for embedded bulk import without pulling axum/tower.
-bulk = ["dep:csv-core"]
+bulk = ["dep:csv-core", "dep:rayon"]
 tls = ["http", "dep:rustls", "axum-server/tls-rustls-no-provider"]
 otel = ["dep:reqwest"]
 # `[auth] backend = "oidc"`: bearer JWTs verified against a JWKS issuer.
@@ -41,6 +41,7 @@ axum = { workspace = true }
 axum-server = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }
 csv-core = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }

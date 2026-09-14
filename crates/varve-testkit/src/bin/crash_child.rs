@@ -136,6 +136,9 @@ async fn main() {
             std::thread::sleep(std::time::Duration::from_secs(3600));
         },
         p @ ("pre-append" | "post-append") => {
+            // The K-th ack's flush runs on its own task; these points test
+            // the (K+1)th tx dying AFTER that flush landed and trimmed.
+            wait_for_flush_to_settle(&work);
             std::fs::write(work.join("trigger"), p).expect("arm trigger");
             // The (K+1)th insert should hit the armed hook inside
             // LocalLog::append and park there; the parent kills us once it

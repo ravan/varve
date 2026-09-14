@@ -120,6 +120,7 @@ pub(crate) async fn merged_snapshot(
             (IidSel::All, Some(needed)) => label_candidates(
                 &core.tries,
                 &core.live,
+                core.sealed.as_deref(),
                 overlay.map(|o| o.table(kind)),
                 &needed,
             )
@@ -127,7 +128,14 @@ pub(crate) async fn merged_snapshot(
             _ => None,
         };
         let sel = narrowed.as_ref().unwrap_or(sel);
-        let live_events = sel.table_events(|iid| core.live.events_for(iid), core.live.entities());
+        // The sealed tail (a flush in flight) is older than live: it goes
+        // first so per-entity arrival order holds.
+        let mut live_events = core
+            .sealed
+            .as_ref()
+            .map(|sealed| sel.table_events(|iid| sealed.events_for(iid), sealed.entities()))
+            .unwrap_or_default();
+        live_events.extend(sel.table_events(|iid| core.live.events_for(iid), core.live.entities()));
         (
             live_events,
             core.tries.clone(),
@@ -191,6 +199,7 @@ pub(crate) async fn merged_snapshot(
 fn label_candidates(
     tries: &[crate::state::PersistedTrie],
     live: &varve_index::LiveTable,
+    sealed: Option<&varve_index::LiveTable>,
     overlay: Option<&varve_index::LiveTable>,
     needed: &[&str],
 ) -> Option<std::collections::BTreeSet<Iid>> {
@@ -202,6 +211,9 @@ fn label_candidates(
         }
     }
     set.extend(live.iids_with_any_label(needed));
+    if let Some(sealed) = sealed {
+        set.extend(sealed.iids_with_any_label(needed));
+    }
     if let Some(overlay) = overlay {
         set.extend(overlay.iids_with_any_label(needed));
     }
@@ -340,23 +352,32 @@ async fn edge_adjacency_impl(
         let table = s
             .graph(graph)
             .ok_or_else(|| EngineError::UnknownGraph(graph.to_string()))?;
-        let live = &table.edges.live;
-        let live_events: Vec<(Iid, Vec<Event>)> = match anchor {
-            Some(node) => {
-                let edge_iids: Vec<Iid> = match direction {
-                    AdjDirection::Out => live.out_edges(&node).cloned().collect(),
-                    AdjDirection::In => live.in_edges(&node).cloned().collect(),
-                };
-                edge_iids
-                    .into_iter()
-                    .filter_map(|e| live.events_for(&e).map(|ev| (e, ev.to_vec())))
-                    .collect()
+        let tail_events = |live: &varve_index::LiveTable| -> Vec<(Iid, Vec<Event>)> {
+            match anchor {
+                Some(node) => {
+                    let edge_iids: Vec<Iid> = match direction {
+                        AdjDirection::Out => live.out_edges(&node).cloned().collect(),
+                        AdjDirection::In => live.in_edges(&node).cloned().collect(),
+                    };
+                    edge_iids
+                        .into_iter()
+                        .filter_map(|e| live.events_for(&e).map(|ev| (e, ev.to_vec())))
+                        .collect()
+                }
+                None => live
+                    .entities()
+                    .map(|(iid, ev)| (*iid, ev.to_vec()))
+                    .collect(),
             }
-            None => live
-                .entities()
-                .map(|(iid, ev)| (*iid, ev.to_vec()))
-                .collect(),
         };
+        // Sealed (flush in flight) before live: older first.
+        let mut live_events = table
+            .edges
+            .sealed
+            .as_deref()
+            .map(tail_events)
+            .unwrap_or_default();
+        live_events.extend(tail_events(&table.edges.live));
         let tries = match direction {
             AdjDirection::Out => table.adj_out.clone(),
             AdjDirection::In => table.adj_in.clone(),

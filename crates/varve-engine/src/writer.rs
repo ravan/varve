@@ -32,6 +32,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinHandle;
 use tracing::Instrument;
 use varve_gql::ast::{
     Clause, Direction, Expr, GraphStmt, InsertStmt, LabelSpec, MatchPart, MutKind, MutateStmt,
@@ -317,6 +318,7 @@ fn stored_labels(labels: &LabelSpec) -> Result<Vec<String>, EngineError> {
 enum Received {
     Command(Option<Command>),
     FlushTimeout,
+    FlushDone(Result<Result<(), EngineError>, tokio::task::JoinError>),
 }
 
 /// Spawns the writer loop on a dedicated task and returns the command handle
@@ -329,16 +331,20 @@ pub(crate) fn spawn_writer(mut state: WriterState, cfg: WriterConfig) -> WriterH
         // table is empty.
         let mut flush_deadline: Option<tokio::time::Instant> = None;
         let mut pending = None;
+        // The one block flush allowed in flight: sealed tails encoding and
+        // PUTting on their own task while commits continue here.
+        let mut inflight: Option<JoinHandle<Result<(), EngineError>>> = None;
         loop {
             let received = match pending.take() {
                 Some(command) => Received::Command(Some(command)),
-                None => match flush_deadline {
-                    Some(deadline) => tokio::select! {
+                None => {
+                    let deadline = flush_deadline.unwrap_or_else(tokio::time::Instant::now);
+                    tokio::select! {
                         command = rx.recv() => Received::Command(command),
-                        _ = tokio::time::sleep_until(deadline) => Received::FlushTimeout,
-                    },
-                    None => Received::Command(rx.recv().await),
-                },
+                        _ = tokio::time::sleep_until(deadline), if flush_deadline.is_some() => Received::FlushTimeout,
+                        result = await_flush(&mut inflight) => Received::FlushDone(result),
+                    }
+                }
             };
             match received {
                 Received::Command(Some(Command::Submit(first))) => {
@@ -348,6 +354,9 @@ pub(crate) fn spawn_writer(mut state: WriterState, cfg: WriterConfig) -> WriterH
                         // the failure so /healthz degrades, drain every
                         // subsequent command with WriterFenced, and stop —
                         // no block flush after fatal.
+                        if let Some(handle) = inflight.take() {
+                            handle.abort();
+                        }
                         publish_fatal(&state, &reason);
                         drain(&mut rx, reason).await;
                         break;
@@ -356,22 +365,19 @@ pub(crate) fn spawn_writer(mut state: WriterState, cfg: WriterConfig) -> WriterH
                     if live_rows(&state) >= cfg.max_block_rows
                         || live_bytes(&state) >= cfg.max_live_bytes
                     {
-                        // A failed flush leaves the live table intact and
-                        // retries at the next trigger (decision 10).
-                        if let Err(error) = crate::flush::flush_block(&mut state).await {
-                            tracing::error!(
-                                error = %error,
-                                "flush_block failed; live table retained, will retry at the next flush trigger"
-                            );
-                            state
-                                .metrics
-                                .flush_failures
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
+                        // Live refilled while a flush was still running:
+                        // wait for it (bounding memory at two blocks) and
+                        // seal the next.
+                        finish_flush(&mut inflight).await;
+                        inflight = begin_flush(&mut state);
                     }
                     flush_deadline = next_deadline(&state, &cfg, flush_deadline);
                 }
                 Received::Command(Some(Command::Compact { ack, full })) => {
+                    // Compaction rewrites the trie inventory and takes the
+                    // next manifest generation: it must see the in-flight
+                    // flush's block, so it waits for it.
+                    finish_flush(&mut inflight).await;
                     // The mid-batch Compact arm in `run_batch` defers to this
                     // very call site whenever `staged` is empty — it returns
                     // the command as `pending` instead of running
@@ -388,20 +394,31 @@ pub(crate) fn spawn_writer(mut state: WriterState, cfg: WriterConfig) -> WriterH
                     flush_deadline = next_deadline(&state, &cfg, flush_deadline);
                 }
                 Received::Command(None) => {
-                    // Sender dropped (Db closed) and channel drained:
-                    // nothing left to do.
+                    // Sender dropped (Db closed) and channel drained: let a
+                    // flush in flight land, then stop.
+                    finish_flush(&mut inflight).await;
                     break;
                 }
                 Received::FlushTimeout => {
-                    if let Err(error) = crate::flush::flush_block(&mut state).await {
-                        tracing::error!(
-                            error = %error,
-                            "flush_block failed; live table retained, will retry at the next flush trigger"
-                        );
+                    if inflight.is_none() {
+                        inflight = begin_flush(&mut state);
+                    }
+                    flush_deadline = next_deadline(&state, &cfg, None);
+                }
+                Received::FlushDone(result) => {
+                    inflight = None;
+                    if let Err(join) = result {
+                        tracing::error!(error = %join, "flush task failed; sealed tail retained");
                         state
                             .metrics
                             .flush_failures
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    // Live may have refilled while the flush ran.
+                    if live_rows(&state) >= cfg.max_block_rows
+                        || live_bytes(&state) >= cfg.max_live_bytes
+                    {
+                        inflight = begin_flush(&mut state);
                     }
                     flush_deadline = next_deadline(&state, &cfg, None);
                 }
@@ -411,8 +428,50 @@ pub(crate) fn spawn_writer(mut state: WriterState, cfg: WriterConfig) -> WriterH
     WriterHandle { sender }
 }
 
+/// Resolves when the in-flight flush task ends; never, when none is.
+async fn await_flush(
+    inflight: &mut Option<JoinHandle<Result<(), EngineError>>>,
+) -> Result<Result<(), EngineError>, tokio::task::JoinError> {
+    match inflight {
+        Some(handle) => handle.await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Seals the live tails and starts their flush on its own task. `None`
+/// when nothing is unflushed or sealing failed (logged; retried at the
+/// next trigger).
+fn begin_flush(state: &mut WriterState) -> Option<JoinHandle<Result<(), EngineError>>> {
+    match crate::flush::seal(state) {
+        Ok(Some(job)) => Some(crate::flush::spawn_flush(state, job)),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::error!(error = %error, "sealing the live tail failed; will retry at the next flush trigger");
+            state
+                .metrics
+                .flush_failures
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            None
+        }
+    }
+}
+
+/// Waits for the in-flight flush (if any) to land; its own task already
+/// logged and counted the outcome.
+async fn finish_flush(inflight: &mut Option<JoinHandle<Result<(), EngineError>>>) {
+    if let Some(handle) = inflight.take() {
+        let _ = handle.await;
+    }
+}
+
 fn live_rows(state: &WriterState) -> usize {
     state.state.read().map(|s| s.live_rows()).unwrap_or(0)
+}
+
+/// Live plus sealed rows: what the flush timer watches, so a sealed tail a
+/// failed flush left behind is retried on the interval.
+fn unflushed_rows(state: &WriterState) -> usize {
+    state.state.read().map(|s| s.unflushed_rows()).unwrap_or(0)
 }
 
 /// Approximate unflushed live-index bytes (Task 11 memory watermark). Same
@@ -430,7 +489,7 @@ fn next_deadline(
     cfg: &WriterConfig,
     current: Option<tokio::time::Instant>,
 ) -> Option<tokio::time::Instant> {
-    if cfg.flush_interval.is_zero() || live_rows(state) == 0 {
+    if cfg.flush_interval.is_zero() || unflushed_rows(state) == 0 {
         return None;
     }
     current.or_else(|| Some(tokio::time::Instant::now() + cfg.flush_interval))

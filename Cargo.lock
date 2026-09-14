@@ -4322,6 +4322,7 @@ name = "varve-index"
 version = "0.1.3"
 dependencies = [
  "arrow",
+ "arrow-ipc",
  "criterion",
  "proptest",
  "thiserror 2.0.18",
@@ -4380,6 +4381,7 @@ dependencies = [
  "http-body-util",
  "jsonwebtoken",
  "prometheus",
+ "rayon",
  "reqwest",
  "rustls",
  "serde",

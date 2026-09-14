@@ -2572,7 +2572,8 @@ impl Db {
     pub fn metrics(&self) -> EngineMetricsSnapshot {
         use std::sync::atomic::Ordering;
         let state = self.inner.state.read().unwrap_or_else(|e| e.into_inner());
-        let live_rows = state.live_rows() as u64;
+        // Live plus sealed: rows a flush has not yet persisted.
+        let live_rows = state.unflushed_rows() as u64;
         let live_bytes = state.live_bytes() as u64;
         let mut persisted_tries: u64 = 0;
         let mut compaction_debt_tries: u64 = 0;
@@ -3302,8 +3303,9 @@ mod tests {
             .await
             .unwrap();
         let s = db.inner.state.read().unwrap();
-        // Two edge events now exist for the edge (Put flushed + Delete live).
-        assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.live.event_count(), 1);
+        // Two edge events now exist for the edge (Put flushed + Delete
+        // unflushed — live, or already sealed for the next block).
+        assert_eq!(s.graph(DEFAULT_GRAPH).unwrap().edges.unflushed_rows(), 1);
     }
 
     #[tokio::test]
@@ -3565,7 +3567,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(byte_watermark_config(dir.path())).await.unwrap();
         let payload: String = "a".repeat(1024);
-        for i in 0..8 {
+        // Five rows cross the 4 KiB watermark once; the rows that land
+        // while that flush runs in the background stay below a second.
+        for i in 0..5 {
             db.execute(&format!("INSERT (:P {{_id: {i}, blob: '{payload}'}})"))
                 .await
                 .unwrap();

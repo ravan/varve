@@ -1,350 +1,422 @@
-//! Block flush: encode the live table, PUT data + meta, PUT the manifest
-//! (spec §9, the ATOMIC COMMIT POINT), then atomically swap the trie
-//! inventory + reset the live table, then best-effort trim the log
-//! (slice-4 plan, decisions 5, 6, 7, 8, 10).
+//! Block flush: seal the live tails, then — off the writer loop — encode
+//! them, PUT data + meta, PUT the manifest (spec §9, the ATOMIC COMMIT
+//! POINT), atomically swap the trie inventory + drop the sealed tails, then
+//! best-effort trim the log (slice-4 plan, decisions 5, 6, 7, 8, 10).
+//!
+//! Sealing is the only step on the writer's critical path: under one write
+//! lock every non-empty live tail becomes that table's `sealed` tail and a
+//! fresh live tail takes its place, so commits keep landing while the
+//! encode and the PUTs run on their own task. Reads see live + sealed + tries
+//! under the same lock they always took. One flush is in flight at a time
+//! (the writer loop enforces it); compaction and shutdown wait for it.
 
 use crate::db::EngineError;
-use crate::state::{PersistedTrie, TableKind, EDGES_TABLE};
+use crate::state::{GraphsState, PersistedTrie, TableKind, EDGES_TABLE};
 use crate::writer::WriterState;
 use bytes::Bytes;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use tokio::task::JoinHandle;
 use tracing::Instrument;
 use varve_index::block::{
     encode_block, encode_block_by, EncodedBlock, LabelIndex, PageMeta, SortOrder,
 };
 use varve_index::LiveTable;
-use varve_storage::{keys, BlockManifest, TableTries, TrieEntry};
+use varve_log::Log;
+use varve_storage::{keys, BlockManifest, ObjectStore, TableTries, TrieEntry};
+use varve_types::LogPosition;
 
 /// Rows per page (spec §9's XTDB `pageLimit`) — Task 6's block-encoding
 /// default, reused verbatim for every flush.
 pub(crate) const PAGE_ROWS: usize = varve_storage::keys::PAGE_LIMIT;
 
-/// Encodes both tables' live tails into ONE L0 block and commits it under a
-/// SINGLE manifest PUT (THE atomic commit point, spec §9) — only once that
-/// succeeds does this atomically push each flushed family's new trie into its
-/// inventory and reset the flushed live tails, then best-effort trim the log.
-/// One flush = one `block_id` = one manifest PUT with up to FOUR `TableTries`
-/// entries: nodes primary, edges primary, and (slice 6) the edges out/in
-/// adjacency families. All families share the block's `trie_key`; object keys
-/// are namespaced by table and, for adjacency, by family.
-///
-/// No-op when both live tails are empty: never writes an empty block/manifest.
-///
-/// Failure keeps serving (decision 10): if any PUT before the manifest
-/// fails, the live tables are untouched and the flush simply retries at the
-/// next trigger. Already-PUT data/meta without a manifest entry are
-/// invisible garbage (GC arrives in slice 8), never corruption.
+/// One graph's share of a flush: its sealed tails and the trie inventory
+/// the manifest must carry forward.
+struct GraphSeal {
+    graph: String,
+    nodes: Option<Arc<LiveTable>>,
+    edges: Option<Arc<LiveTable>>,
+    prior_nodes: Vec<TrieEntry>,
+    prior_edges: Vec<TrieEntry>,
+    prior_adj_out: Vec<TrieEntry>,
+    prior_adj_in: Vec<TrieEntry>,
+}
+
+/// Everything a flush needs once the tails are sealed. Built under the
+/// write lock by [`seal`], consumed off the writer loop by [`spawn_flush`].
+pub(crate) struct FlushJob {
+    block_id: u64,
+    /// The durable log prefix the sealed tails cover — the manifest's
+    /// watermark and the trim point once it lands.
+    watermark: LogPosition,
+    max_tx_id: u64,
+    max_system_us: i64,
+    graphs: Vec<GraphSeal>,
+}
+
+struct GraphEncoded {
+    graph: String,
+    nodes_enc: Option<EncodedBlock>,
+    edges_enc: Option<EncodedBlock>,
+    adj_out_enc: Option<EncodedBlock>,
+    adj_in_enc: Option<EncodedBlock>,
+}
+
+struct PrimaryFlush {
+    graph: String,
+    kind: TableKind,
+    entry: TrieEntry,
+    pages: Vec<PageMeta>,
+    labels: LabelIndex,
+}
+
+struct AdjFlush {
+    graph: String,
+    family: &'static str,
+    entry: TrieEntry,
+    pages: Vec<PageMeta>,
+}
+
+/// Seals every non-empty live tail (a table whose earlier flush failed keeps
+/// its sealed tail and is retried as is) and reserves the block id. `None`
+/// when nothing is unflushed: never writes an empty block/manifest.
+pub(crate) fn seal(state: &mut WriterState) -> Result<Option<FlushJob>, EngineError> {
+    let mut s = state.state.write().map_err(|_| EngineError::Poisoned)?;
+    let mut graphs = Vec::new();
+    let mut max_system_us = 0;
+    let mut dirty = false;
+    for (graph, table) in s.graphs.iter_mut() {
+        let mut seal_core = |core: &mut crate::state::TableCore| -> Option<Arc<LiveTable>> {
+            if core.sealed.is_none() && core.live.event_count() > 0 {
+                core.sealed = Some(Arc::new(std::mem::replace(
+                    &mut core.live,
+                    LiveTable::new(),
+                )));
+            }
+            let sealed = core.sealed.clone()?;
+            max_system_us = max_system_us.max(
+                sealed
+                    .last_system_from()
+                    .map(|t| t.as_micros())
+                    .unwrap_or(0),
+            );
+            dirty = true;
+            Some(sealed)
+        };
+        let nodes = seal_core(&mut table.nodes);
+        let edges = seal_core(&mut table.edges);
+        graphs.push(GraphSeal {
+            graph: graph.clone(),
+            nodes,
+            edges,
+            prior_nodes: table.nodes.tries.iter().map(|t| t.entry.clone()).collect(),
+            prior_edges: table.edges.tries.iter().map(|t| t.entry.clone()).collect(),
+            prior_adj_out: table.adj_out.iter().map(|t| t.entry.clone()).collect(),
+            prior_adj_in: table.adj_in.iter().map(|t| t.entry.clone()).collect(),
+        });
+    }
+    drop(s);
+    if !dirty {
+        return Ok(None);
+    }
+    let block_id = state.next_block_id;
+    state.next_block_id += 1;
+    Ok(Some(FlushJob {
+        block_id,
+        watermark: state.durable_watermark,
+        max_tx_id: state.next_tx_id,
+        max_system_us,
+        graphs,
+    }))
+}
+
+/// Runs a sealed flush to completion on its own task: encode, PUT, manifest,
+/// swap, trim. The writer loop keeps committing meanwhile.
+pub(crate) fn spawn_flush(
+    state: &WriterState,
+    job: FlushJob,
+) -> JoinHandle<Result<(), EngineError>> {
+    let shared = Arc::clone(&state.state);
+    let store = Arc::clone(&state.store);
+    let log = Arc::clone(&state.log);
+    let metrics = Arc::clone(&state.metrics);
+    let block_id = job.block_id;
+    tokio::spawn(
+        async move {
+            let result = run_flush(&shared, &store, &log, job).await;
+            match &result {
+                Ok(()) => {
+                    metrics
+                        .flush_blocks
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        "flush_block failed; sealed tail retained, will retry at the next flush trigger"
+                    );
+                    metrics
+                        .flush_failures
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            result
+        }
+        .instrument(tracing::info_span!("varve.flush_block", block_id)),
+    )
+}
+
+/// Seal + flush, awaited inline: the synchronous shape the tests use.
+#[cfg(test)]
 pub(crate) async fn flush_block(state: &mut WriterState) -> Result<(), EngineError> {
-    struct GraphFlushSnapshot {
-        graph: String,
-        nodes_enc: Option<EncodedBlock>,
-        edges_enc: Option<EncodedBlock>,
-        adj_out_enc: Option<EncodedBlock>,
-        adj_in_enc: Option<EncodedBlock>,
-        prior_nodes: Vec<TrieEntry>,
-        prior_edges: Vec<TrieEntry>,
-        prior_adj_out: Vec<TrieEntry>,
-        prior_adj_in: Vec<TrieEntry>,
+    let Some(job) = seal(state)? else {
+        return Ok(());
+    };
+    match spawn_flush(state, job).await {
+        Ok(result) => result,
+        Err(join) => Err(EngineError::CommitFailed(format!(
+            "flush task failed: {join}"
+        ))),
     }
+}
 
-    struct PrimaryFlush {
-        graph: String,
-        kind: TableKind,
-        entry: TrieEntry,
-        pages: Vec<PageMeta>,
-        labels: LabelIndex,
+fn encode_all(job: &FlushJob) -> Result<Vec<GraphEncoded>, EngineError> {
+    let mut out = Vec::new();
+    for g in &job.graphs {
+        let nodes_enc = match &g.nodes {
+            Some(live) => Some(encode_block(live, PAGE_ROWS)?),
+            None => None,
+        };
+        let (edges_enc, adj_out_enc, adj_in_enc) = match &g.edges {
+            Some(live) => (
+                Some(encode_block(live, PAGE_ROWS)?),
+                Some(encode_block_by(live, PAGE_ROWS, SortOrder::BySrc)?),
+                Some(encode_block_by(live, PAGE_ROWS, SortOrder::ByDst)?),
+            ),
+            None => (None, None, None),
+        };
+        out.push(GraphEncoded {
+            graph: g.graph.clone(),
+            nodes_enc,
+            edges_enc,
+            adj_out_enc,
+            adj_in_enc,
+        });
     }
+    Ok(out)
+}
 
-    struct AdjFlush {
-        graph: String,
-        family: &'static str,
-        entry: TrieEntry,
-        pages: Vec<PageMeta>,
-    }
+/// Failure keeps serving (decision 10): if any PUT before the manifest
+/// fails, the sealed tails stay sealed (still readable) and the flush simply
+/// retries at the next trigger. Already-PUT data/meta without a manifest
+/// entry are invisible garbage (GC, slice 8), never corruption.
+async fn run_flush(
+    shared: &Arc<RwLock<GraphsState>>,
+    store: &Arc<dyn ObjectStore>,
+    log: &Arc<dyn Log>,
+    job: FlushJob,
+) -> Result<(), EngineError> {
+    let block_id = job.block_id;
+    let trie_key = keys::l0_trie_key(block_id);
+    // The encode is pure CPU over the sealed tails: keep it off the async
+    // workers.
+    let (job, encoded) = tokio::task::spawn_blocking(move || {
+        let encoded = encode_all(&job);
+        (job, encoded)
+    })
+    .await
+    .map_err(|join| EngineError::CommitFailed(format!("flush encode failed: {join}")))?;
+    let encoded = encoded?;
 
-    let (snapshots, max_system_us) = {
-        let s = state.state.read().map_err(|_| EngineError::Poisoned)?;
-        let mut snapshots = Vec::new();
-        let mut max_system_us = 0;
-
-        for (graph, table) in &s.graphs {
-            let nodes_enc = if table.nodes.live.event_count() > 0 {
-                max_system_us = max_system_us.max(
-                    table
-                        .nodes
-                        .live
-                        .last_system_from()
-                        .map(|t| t.as_micros())
-                        .unwrap_or(0),
-                );
-                Some(encode_block(&table.nodes.live, PAGE_ROWS)?)
-            } else {
-                None
+    let mut flushed = Vec::new();
+    let mut flushed_adj = Vec::new();
+    for enc in &encoded {
+        for (kind, block) in [
+            (TableKind::Nodes, &enc.nodes_enc),
+            (TableKind::Edges, &enc.edges_enc),
+        ] {
+            let Some(EncodedBlock {
+                data,
+                meta,
+                pages,
+                labels,
+            }) = block
+            else {
+                continue;
             };
-
-            let (edges_enc, adj_out_enc, adj_in_enc) = if table.edges.live.event_count() > 0 {
-                max_system_us = max_system_us.max(
-                    table
-                        .edges
-                        .live
-                        .last_system_from()
-                        .map(|t| t.as_micros())
-                        .unwrap_or(0),
-                );
-                (
-                    Some(encode_block(&table.edges.live, PAGE_ROWS)?),
-                    Some(encode_block_by(
-                        &table.edges.live,
-                        PAGE_ROWS,
-                        SortOrder::BySrc,
-                    )?),
-                    Some(encode_block_by(
-                        &table.edges.live,
-                        PAGE_ROWS,
-                        SortOrder::ByDst,
-                    )?),
+            let entry = TrieEntry {
+                trie_key: trie_key.clone(),
+                row_count: pages.iter().map(|p| p.rows).sum(),
+                data_len: data.len() as u64,
+            };
+            store
+                .put(
+                    &keys::data_key(&enc.graph, kind.name(), &trie_key),
+                    Bytes::from(data.clone()),
                 )
-            } else {
-                (None, None, None)
-            };
-
-            snapshots.push(GraphFlushSnapshot {
-                graph: graph.clone(),
-                nodes_enc,
-                edges_enc,
-                adj_out_enc,
-                adj_in_enc,
-                prior_nodes: table.nodes.tries.iter().map(|t| t.entry.clone()).collect(),
-                prior_edges: table.edges.tries.iter().map(|t| t.entry.clone()).collect(),
-                prior_adj_out: table.adj_out.iter().map(|t| t.entry.clone()).collect(),
-                prior_adj_in: table.adj_in.iter().map(|t| t.entry.clone()).collect(),
+                .await?;
+            store
+                .put(
+                    &keys::meta_key(&enc.graph, kind.name(), &trie_key),
+                    Bytes::from(meta.clone()),
+                )
+                .await?;
+            store
+                .put(
+                    &keys::labels_key(&enc.graph, kind.name(), &trie_key),
+                    Bytes::from(labels.encode()?),
+                )
+                .await?;
+            flushed.push(PrimaryFlush {
+                graph: enc.graph.clone(),
+                kind,
+                entry,
+                pages: pages.clone(),
+                labels: labels.clone(),
             });
         }
 
-        (snapshots, max_system_us)
+        for (family, block) in [
+            (varve_storage::ADJ_OUT, &enc.adj_out_enc),
+            (varve_storage::ADJ_IN, &enc.adj_in_enc),
+        ] {
+            let Some(EncodedBlock {
+                data, meta, pages, ..
+            }) = block
+            else {
+                continue;
+            };
+            let entry = TrieEntry {
+                trie_key: trie_key.clone(),
+                row_count: pages.iter().map(|p| p.rows).sum(),
+                data_len: data.len() as u64,
+            };
+            store
+                .put(
+                    &keys::adj_data_key(&enc.graph, EDGES_TABLE, family, &trie_key),
+                    Bytes::from(data.clone()),
+                )
+                .await?;
+            store
+                .put(
+                    &keys::adj_meta_key(&enc.graph, EDGES_TABLE, family, &trie_key),
+                    Bytes::from(meta.clone()),
+                )
+                .await?;
+            flushed_adj.push(AdjFlush {
+                graph: enc.graph.clone(),
+                family,
+                entry,
+                pages: pages.clone(),
+            });
+        }
+    }
+
+    crash_point("pre-manifest-put");
+
+    let mut tables = Vec::new();
+    for g in &job.graphs {
+        for (kind, prior) in [
+            (TableKind::Nodes, &g.prior_nodes),
+            (TableKind::Edges, &g.prior_edges),
+        ] {
+            let mut tries = prior.clone();
+            if let Some(flush) = flushed
+                .iter()
+                .find(|flush| flush.graph == g.graph && flush.kind == kind)
+            {
+                tries.push(flush.entry.clone());
+            }
+            if !tries.is_empty() {
+                tables.push(TableTries {
+                    graph: g.graph.clone(),
+                    table: kind.name().to_string(),
+                    family: String::new(),
+                    tries,
+                });
+            }
+        }
+
+        for (family, prior) in [
+            (varve_storage::ADJ_OUT, &g.prior_adj_out),
+            (varve_storage::ADJ_IN, &g.prior_adj_in),
+        ] {
+            let mut tries = prior.clone();
+            if let Some(flush) = flushed_adj
+                .iter()
+                .find(|flush| flush.graph == g.graph && flush.family == family)
+            {
+                tries.push(flush.entry.clone());
+            }
+            if !tries.is_empty() {
+                tables.push(TableTries {
+                    graph: g.graph.clone(),
+                    table: EDGES_TABLE.to_string(),
+                    family: family.to_string(),
+                    tries,
+                });
+            }
+        }
+    }
+
+    let manifest = BlockManifest {
+        block_id,
+        watermark: job.watermark.as_u64(),
+        max_tx_id: job.max_tx_id,
+        max_system_time_us: job.max_system_us,
+        tables,
     };
 
-    let has_dirty_graph = snapshots
-        .iter()
-        .any(|s| s.nodes_enc.is_some() || s.edges_enc.is_some());
-    if !has_dirty_graph {
-        return Ok(());
+    // This manifest PUT is not itself epoch-fenced (only the log is) — a
+    // fenced-but-alive writer's in-flight flush could still land this PUT
+    // before the Task-8 post-check lease gate fires. The before+after lease
+    // ack-gate remains the liveness guard: it makes such a writer fatal and
+    // never-acking. Should the stray PUT still land, `latest_manifest`
+    // (slice 11) selects the newest manifest by `(watermark, block_id)`
+    // rather than max `block_id` alone, so a stray manifest with a newer
+    // block id but a stale watermark can never be selected during
+    // recovery/verify/follower reads.
+    store
+        .put(
+            &keys::manifest_key(block_id),
+            Bytes::from(manifest.to_wire()),
+        )
+        .await?;
+
+    crash_point("post-manifest-put");
+
+    {
+        let mut s = shared.write().map_err(|_| EngineError::Poisoned)?;
+        for flush in flushed {
+            let Some(table) = s.graph_mut(&flush.graph) else {
+                continue;
+            };
+            let core = table.core_mut(flush.kind);
+            core.tries.push(PersistedTrie {
+                entry: flush.entry,
+                pages: Arc::new(flush.pages),
+                labels: Some(Arc::new(flush.labels)),
+            });
+            core.sealed = None;
+        }
+        for flush in flushed_adj {
+            let Some(table) = s.graph_mut(&flush.graph) else {
+                continue;
+            };
+            let trie = PersistedTrie {
+                entry: flush.entry,
+                pages: Arc::new(flush.pages),
+                labels: None,
+            };
+            if flush.family == varve_storage::ADJ_OUT {
+                table.adj_out.push(trie);
+            } else {
+                table.adj_in.push(trie);
+            }
+        }
     }
 
-    let block_id = state.next_block_id;
-    // `varve.flush_block` (field `block_id`): wraps everything from here
-    // through the trie-swap/log-trim tail, i.e. every `.await` this
-    // function still has left. An inline `async move` block (rather than a
-    // thin-wrapper `_impl` split) because `GraphFlushSnapshot`/
-    // `PrimaryFlush`/`AdjFlush` are locally-scoped structs that would need
-    // to move to module scope to cross an extracted function boundary.
-    async move {
-        let trie_key = keys::l0_trie_key(block_id);
-        let mut flushed = Vec::new();
-        let mut flushed_adj = Vec::new();
-
-        for snapshot in &snapshots {
-            for (kind, enc) in [
-                (TableKind::Nodes, &snapshot.nodes_enc),
-                (TableKind::Edges, &snapshot.edges_enc),
-            ] {
-                let Some(EncodedBlock {
-                    data,
-                    meta,
-                    pages,
-                    labels,
-                }) = enc
-                else {
-                    continue;
-                };
-                let entry = TrieEntry {
-                    trie_key: trie_key.clone(),
-                    row_count: pages.iter().map(|p| p.rows).sum(),
-                    data_len: data.len() as u64,
-                };
-                state
-                    .store
-                    .put(
-                        &keys::data_key(&snapshot.graph, kind.name(), &trie_key),
-                        Bytes::from(data.clone()),
-                    )
-                    .await?;
-                state
-                    .store
-                    .put(
-                        &keys::meta_key(&snapshot.graph, kind.name(), &trie_key),
-                        Bytes::from(meta.clone()),
-                    )
-                    .await?;
-                state
-                    .store
-                    .put(
-                        &keys::labels_key(&snapshot.graph, kind.name(), &trie_key),
-                        Bytes::from(labels.encode()?),
-                    )
-                    .await?;
-                flushed.push(PrimaryFlush {
-                    graph: snapshot.graph.clone(),
-                    kind,
-                    entry,
-                    pages: pages.clone(),
-                    labels: labels.clone(),
-                });
-            }
-
-            for (family, enc) in [
-                (varve_storage::ADJ_OUT, &snapshot.adj_out_enc),
-                (varve_storage::ADJ_IN, &snapshot.adj_in_enc),
-            ] {
-                let Some(EncodedBlock {
-                    data, meta, pages, ..
-                }) = enc
-                else {
-                    continue;
-                };
-                let entry = TrieEntry {
-                    trie_key: trie_key.clone(),
-                    row_count: pages.iter().map(|p| p.rows).sum(),
-                    data_len: data.len() as u64,
-                };
-                state
-                    .store
-                    .put(
-                        &keys::adj_data_key(&snapshot.graph, EDGES_TABLE, family, &trie_key),
-                        Bytes::from(data.clone()),
-                    )
-                    .await?;
-                state
-                    .store
-                    .put(
-                        &keys::adj_meta_key(&snapshot.graph, EDGES_TABLE, family, &trie_key),
-                        Bytes::from(meta.clone()),
-                    )
-                    .await?;
-                flushed_adj.push(AdjFlush {
-                    graph: snapshot.graph.clone(),
-                    family,
-                    entry,
-                    pages: pages.clone(),
-                });
-            }
-        }
-
-        crash_point("pre-manifest-put");
-
-        let mut tables = Vec::new();
-        for snapshot in &snapshots {
-            for (kind, prior) in [
-                (TableKind::Nodes, &snapshot.prior_nodes),
-                (TableKind::Edges, &snapshot.prior_edges),
-            ] {
-                let mut tries = prior.clone();
-                if let Some(flush) = flushed
-                    .iter()
-                    .find(|flush| flush.graph == snapshot.graph && flush.kind == kind)
-                {
-                    tries.push(flush.entry.clone());
-                }
-                if !tries.is_empty() {
-                    tables.push(TableTries {
-                        graph: snapshot.graph.clone(),
-                        table: kind.name().to_string(),
-                        family: String::new(),
-                        tries,
-                    });
-                }
-            }
-
-            for (family, prior) in [
-                (varve_storage::ADJ_OUT, &snapshot.prior_adj_out),
-                (varve_storage::ADJ_IN, &snapshot.prior_adj_in),
-            ] {
-                let mut tries = prior.clone();
-                if let Some(flush) = flushed_adj
-                    .iter()
-                    .find(|flush| flush.graph == snapshot.graph && flush.family == family)
-                {
-                    tries.push(flush.entry.clone());
-                }
-                if !tries.is_empty() {
-                    tables.push(TableTries {
-                        graph: snapshot.graph.clone(),
-                        table: EDGES_TABLE.to_string(),
-                        family: family.to_string(),
-                        tries,
-                    });
-                }
-            }
-        }
-
-        let manifest = BlockManifest {
-            block_id,
-            watermark: state.durable_watermark.as_u64(),
-            max_tx_id: state.next_tx_id,
-            max_system_time_us: max_system_us,
-            tables,
-        };
-
-        // This manifest PUT is not itself epoch-fenced (only the log is) — a
-        // fenced-but-alive writer's in-flight `flush_block` could still land
-        // this PUT before the Task-8 post-check lease gate fires. The before
-        // +after lease ack-gate remains the liveness guard: it makes such a
-        // writer fatal and never-acking. Should the stray PUT still land,
-        // `latest_manifest` (slice 11) selects the newest manifest by
-        // `(watermark, block_id)` rather than max `block_id` alone, so a
-        // stray manifest with a newer block id but a stale watermark can
-        // never be selected during recovery/verify/follower reads.
-        state
-            .store
-            .put(
-                &keys::manifest_key(block_id),
-                Bytes::from(manifest.to_wire()),
-            )
-            .await?;
-
-        crash_point("post-manifest-put");
-
-        {
-            let mut s = state.state.write().map_err(|_| EngineError::Poisoned)?;
-            for flush in flushed {
-                let Some(table) = s.graph_mut(&flush.graph) else {
-                    continue;
-                };
-                let core = table.core_mut(flush.kind);
-                core.tries.push(PersistedTrie {
-                    entry: flush.entry,
-                    pages: Arc::new(flush.pages),
-                    labels: Some(Arc::new(flush.labels)),
-                });
-                core.live = LiveTable::new();
-            }
-            for flush in flushed_adj {
-                let Some(table) = s.graph_mut(&flush.graph) else {
-                    continue;
-                };
-                let trie = PersistedTrie {
-                    entry: flush.entry,
-                    pages: Arc::new(flush.pages),
-                    labels: None,
-                };
-                if flush.family == varve_storage::ADJ_OUT {
-                    table.adj_out.push(trie);
-                } else {
-                    table.adj_in.push(trie);
-                }
-            }
-        }
-
-        state.next_block_id += 1;
-        let _ = state.log.trim(state.durable_watermark).await;
-        state
-            .metrics
-            .flush_blocks
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
-    }
-    .instrument(tracing::info_span!("varve.flush_block", block_id))
-    .await
+    let _ = log.trim(job.watermark).await;
+    Ok(())
 }
 
 /// Test-only crash hook for the `varve-testkit` `kill -9` harness, mirroring
@@ -673,9 +745,9 @@ mod tests {
         {
             let s = state.read().unwrap();
             assert_eq!(
-                s.graph(DEFAULT_GRAPH).unwrap().nodes.live.event_count(),
+                s.graph(DEFAULT_GRAPH).unwrap().nodes.unflushed_rows(),
                 3,
-                "a failed flush must not touch the live table"
+                "a failed flush must keep every row unflushed (sealed or live)"
             );
             assert!(s.graph(DEFAULT_GRAPH).unwrap().nodes.tries.is_empty());
         }

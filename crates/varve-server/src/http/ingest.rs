@@ -14,8 +14,8 @@
 use super::{handlers, HttpContext};
 use crate::{
     api::bulk::{
-        csv::CsvFramer, BulkOp, Framer, IngestErrorResponse, IngestProgress, IngestResponse,
-        NdjsonFramer,
+        csv::CsvFramer, decode_lazy, BulkOp, Framer, IngestErrorResponse, IngestProgress,
+        IngestResponse, LazyOp, NdjsonFramer,
     },
     Principal,
 };
@@ -28,7 +28,8 @@ use axum::{
 };
 use futures::StreamExt;
 use serde::Deserialize;
-use std::time::Instant;
+use std::{collections::VecDeque, time::Instant};
+use tokio::task::JoinHandle;
 use tracing::Instrument;
 use varve_engine::{EdgePut, EngineError, NodePut, NodeRole, TxReceipt};
 
@@ -102,11 +103,13 @@ pub(super) async fn ingest(
         //    chunk), never the whole payload.
         let started = Instant::now();
         let chunk_ops = c.ingest.chunk_ops;
-        let mut pending: Vec<BulkOp> = Vec::new();
+        let mut pending: Vec<LazyOp> = Vec::new();
         let mut progress = IngestProgress::default();
         let mut bytes: u64 = 0;
         let mut last: Option<TxReceipt> = None;
         let mut stream = body.into_data_stream();
+        let mut inflight =
+            Inflight::new(c.frontend.db.clone(), &graph, &p.subject, INFLIGHT_CHUNKS);
 
         while let Some(frame) = stream.next().await {
             let frame = match frame {
@@ -115,53 +118,55 @@ pub(super) async fn ingest(
                 // chunks stay committed; report progress. The client is
                 // typically gone, but the contract is idempotent retry.
                 Err(_) => {
+                    inflight.settle(&mut progress, &mut last).await;
                     return committed_error(
                         StatusCode::BAD_REQUEST,
                         "request body stream ended before completion".into(),
                         progress,
-                    )
+                    );
                 }
             };
             bytes += frame.len() as u64;
-            let ops = match framer.push(&frame) {
+            let ops = match framer.push_lazy(&frame) {
                 Ok(ops) => ops,
                 Err(error) => {
+                    inflight.settle(&mut progress, &mut last).await;
                     return committed_error(
                         StatusCode::UNPROCESSABLE_ENTITY,
                         error.to_string(),
                         progress,
-                    )
+                    );
                 }
             };
             pending.extend(ops);
             while pending.len() >= chunk_ops {
-                let chunk: Vec<BulkOp> = pending.drain(..chunk_ops).collect();
-                if let Err(response) =
-                    commit(&c, &graph, &p.subject, chunk, &mut progress, &mut last).await
-                {
+                let chunk: Vec<LazyOp> = pending.drain(..chunk_ops).collect();
+                if let Err(response) = inflight.submit(chunk, &mut progress, &mut last).await {
                     return response;
                 }
             }
         }
         // Flush the trailing (un-newlined) line, then any partial final chunk.
-        match framer.finish() {
+        match framer.finish_lazy() {
             Ok(ops) => pending.extend(ops),
             Err(error) => {
+                inflight.settle(&mut progress, &mut last).await;
                 return committed_error(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     error.to_string(),
                     progress,
-                )
+                );
             }
         }
         while !pending.is_empty() {
             let take = pending.len().min(chunk_ops);
-            let chunk: Vec<BulkOp> = pending.drain(..take).collect();
-            if let Err(response) =
-                commit(&c, &graph, &p.subject, chunk, &mut progress, &mut last).await
-            {
+            let chunk: Vec<LazyOp> = pending.drain(..take).collect();
+            if let Err(response) = inflight.submit(chunk, &mut progress, &mut last).await {
                 return response;
             }
+        }
+        if let Err(response) = inflight.finish(&mut progress, &mut last).await {
+            return response;
         }
 
         match last {
@@ -187,36 +192,136 @@ pub(super) async fn ingest(
     .await
 }
 
-/// Commits one non-empty chunk as an atomic `Db::ingest_in_as` transaction
-/// on `graph`, attributed to `user` (write grants enforced under
-/// `[security]`), folding the receipt into `progress`/`last`. On engine
-/// failure returns the committed-progress error `Response` for the caller
-/// to return immediately.
-async fn commit(
-    c: &HttpContext,
-    graph: &str,
-    user: &str,
-    chunk: Vec<BulkOp>,
-    progress: &mut IngestProgress,
-    last: &mut Option<TxReceipt>,
-) -> Result<(), Response> {
-    let mut nodes: Vec<NodePut> = Vec::new();
-    let mut edges: Vec<EdgePut> = Vec::new();
-    for op in chunk {
-        match op {
-            BulkOp::Node(node) => nodes.push(node),
-            BulkOp::Edge(edge) => edges.push(edge),
+/// Chunks the handler lets run ahead of decoding. Decoding chunk N+1 then
+/// overlaps chunk N's commit (log PUT + apply) instead of waiting for it;
+/// memory stays bounded at this many chunks.
+const INFLIGHT_CHUNKS: usize = 4;
+
+/// The in-order queue of submitted-but-unacked chunks. Each is one atomic
+/// `Db::ingest_in_as` transaction; the writer commits them FIFO, so receipts
+/// fold into `progress` in stream order. On a failure the chunks already
+/// queued behind it may still commit — the stream was never atomic, and the
+/// error body reports exactly what did commit.
+struct Inflight {
+    db: varve::Db,
+    graph: String,
+    user: String,
+    limit: usize,
+    queue: VecDeque<JoinHandle<Result<TxReceipt, EngineError>>>,
+}
+
+impl Inflight {
+    fn new(db: varve::Db, graph: &str, user: &str, limit: usize) -> Self {
+        Self {
+            db,
+            graph: graph.to_string(),
+            user: user.to_string(),
+            limit: limit.max(1),
+            queue: VecDeque::new(),
         }
     }
-    match c.frontend.db.ingest_in_as(graph, user, nodes, edges).await {
-        Ok(receipt) => {
-            progress.absorb(&receipt);
-            *last = Some(receipt);
-            Ok(())
+
+    /// Decodes one non-empty chunk (its raw lines in parallel, off the async
+    /// workers) and submits it, first reaping the oldest in-flight chunk if
+    /// the queue is full. Decoding here, not in the spawned task, keeps
+    /// chunks reaching the writer in stream order. A decode failure or a
+    /// reaped failure returns the committed-progress error `Response` for
+    /// the caller to return immediately.
+    async fn submit(
+        &mut self,
+        chunk: Vec<LazyOp>,
+        progress: &mut IngestProgress,
+        last: &mut Option<TxReceipt>,
+    ) -> Result<(), Response> {
+        if self.queue.len() >= self.limit {
+            self.reap_one(progress, last).await?;
         }
-        Err(error) => {
-            let (status, message) = classify_chunk_error(error);
-            Err(committed_error(status, message, progress.clone()))
+        let decoded = match tokio::task::spawn_blocking(move || decode_lazy(chunk)).await {
+            Ok(decoded) => decoded,
+            Err(join) => Err(crate::api::bulk::BulkDecodeError {
+                line: 0,
+                message: format!("decode task failed: {join}"),
+            }),
+        };
+        let chunk = match decoded {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                self.settle(progress, last).await;
+                return Err(committed_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    error.to_string(),
+                    progress.clone(),
+                ));
+            }
+        };
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        let mut nodes: Vec<NodePut> = Vec::new();
+        let mut edges: Vec<EdgePut> = Vec::new();
+        for op in chunk {
+            match op {
+                BulkOp::Node(node) => nodes.push(node),
+                BulkOp::Edge(edge) => edges.push(edge),
+            }
+        }
+        let db = self.db.clone();
+        let graph = self.graph.clone();
+        let user = self.user.clone();
+        self.queue.push_back(tokio::spawn(async move {
+            db.ingest_in_as(&graph, &user, nodes, edges).await
+        }));
+        Ok(())
+    }
+
+    /// Waits for every in-flight chunk, in order.
+    async fn finish(
+        &mut self,
+        progress: &mut IngestProgress,
+        last: &mut Option<TxReceipt>,
+    ) -> Result<(), Response> {
+        while !self.queue.is_empty() {
+            self.reap_one(progress, last).await?;
+        }
+        Ok(())
+    }
+
+    async fn reap_one(
+        &mut self,
+        progress: &mut IngestProgress,
+        last: &mut Option<TxReceipt>,
+    ) -> Result<(), Response> {
+        let Some(handle) = self.queue.pop_front() else {
+            return Ok(());
+        };
+        let result = match handle.await {
+            Ok(result) => result,
+            Err(join) => Err(EngineError::CommitFailed(join.to_string())),
+        };
+        match result {
+            Ok(receipt) => {
+                progress.absorb(&receipt);
+                *last = Some(receipt);
+                Ok(())
+            }
+            Err(error) => {
+                // Chunks queued behind the failure were already submitted:
+                // wait for them so the reported progress is exact.
+                self.settle(progress, last).await;
+                let (status, message) = classify_chunk_error(error);
+                Err(committed_error(status, message, progress.clone()))
+            }
+        }
+    }
+
+    /// Drains the queue folding every success into `progress`; failures are
+    /// dropped (the caller is already reporting an earlier error).
+    async fn settle(&mut self, progress: &mut IngestProgress, last: &mut Option<TxReceipt>) {
+        while let Some(handle) = self.queue.pop_front() {
+            if let Ok(Ok(receipt)) = handle.await {
+                progress.absorb(&receipt);
+                *last = Some(receipt);
+            }
         }
     }
 }

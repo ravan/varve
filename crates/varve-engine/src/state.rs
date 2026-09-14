@@ -48,6 +48,10 @@ pub(crate) struct PersistedTrie {
 /// persisted-trie inventory, in ascending block order (== time order).
 pub(crate) struct TableCore {
     pub live: LiveTable,
+    /// The tail a flush in flight is persisting (or one a failed flush left
+    /// for retry): older than `live`, newer than every trie. Readable the
+    /// whole time; cleared when its block's manifest lands.
+    pub sealed: Option<Arc<LiveTable>>,
     pub tries: Vec<PersistedTrie>,
 }
 
@@ -55,8 +59,14 @@ impl TableCore {
     pub fn new() -> TableCore {
         TableCore {
             live: LiveTable::new(),
+            sealed: None,
             tries: Vec::new(),
         }
+    }
+
+    /// Rows not yet in a persisted block: live plus sealed.
+    pub fn unflushed_rows(&self) -> usize {
+        self.live.event_count() + self.sealed.as_ref().map_or(0, |s| s.event_count())
     }
 }
 
@@ -108,6 +118,10 @@ impl TableState {
     /// memory-watermark flush trigger (Task 11). Never used for correctness.
     pub fn live_bytes(&self) -> usize {
         self.nodes.live.approx_bytes() + self.edges.live.approx_bytes()
+    }
+
+    pub fn unflushed_rows(&self) -> usize {
+        self.nodes.unflushed_rows() + self.edges.unflushed_rows()
     }
 }
 
@@ -205,5 +219,11 @@ impl GraphsState {
     /// memory-watermark flush trigger (Task 11).
     pub fn live_bytes(&self) -> usize {
         self.graphs.values().map(TableState::live_bytes).sum()
+    }
+
+    /// Live plus sealed rows across every graph — what the flush timer
+    /// watches, so a sealed tail a failed flush left behind is retried.
+    pub fn unflushed_rows(&self) -> usize {
+        self.graphs.values().map(TableState::unflushed_rows).sum()
     }
 }

@@ -14,7 +14,6 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::ipc::reader::StreamReader;
-use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -121,7 +120,7 @@ impl LabelIndex {
     pub fn encode(&self) -> Result<Vec<u8>, IndexError> {
         let schema = label_index_schema();
         let mut buf = Vec::new();
-        let mut writer = StreamWriter::try_new(&mut buf, &schema)?;
+        let mut writer = crate::codec::ipc_writer(&mut buf, &schema)?;
         if !self.0.is_empty() {
             let mut label_b = StringBuilder::new();
             let mut iid_b = FixedSizeBinaryBuilder::new(16);
@@ -409,7 +408,7 @@ fn meta_schema() -> Arc<Schema> {
 fn encode_meta(pages: &[PageMeta]) -> Result<Vec<u8>, IndexError> {
     let schema = meta_schema();
     let mut buf = Vec::new();
-    let mut writer = StreamWriter::try_new(&mut buf, &schema)?;
+    let mut writer = crate::codec::ipc_writer(&mut buf, &schema)?;
     if !pages.is_empty() {
         let mut offset_b = UInt64Builder::new();
         let mut len_b = UInt64Builder::new();
@@ -575,6 +574,7 @@ mod tests {
     use crate::event::{Event, Op};
     use crate::live::LiveTable;
     use crate::scan::{snapshot_entities, LabelFilter};
+    use arrow::ipc::writer::StreamWriter;
     use std::collections::BTreeMap;
     use varve_types::{Doc, Iid, Instant, TemporalBounds, TemporalDimension, Value};
 

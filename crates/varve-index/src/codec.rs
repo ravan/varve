@@ -13,7 +13,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::ipc::reader::StreamReader;
-use arrow::ipc::writer::StreamWriter;
+use arrow::ipc::{writer::IpcWriteOptions, writer::StreamWriter, CompressionType};
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 use varve_types::{decode_doc, encode_doc, Doc, Iid, Instant};
@@ -96,12 +96,24 @@ fn decode_put_payload(mut input: &[u8]) -> Result<(Vec<String>, Doc), IndexError
     Ok((labels, doc))
 }
 
+/// Every IPC stream varve writes (log records, block pages, label index,
+/// page meta) goes through here: LZ4-frame buffer compression, which the
+/// Arrow IPC reader undoes transparently.
+pub(crate) fn ipc_writer<'a>(
+    buf: &'a mut Vec<u8>,
+    schema: &arrow::datatypes::Schema,
+) -> Result<StreamWriter<&'a mut Vec<u8>>, IndexError> {
+    let options =
+        IpcWriteOptions::default().try_with_compression(Some(CompressionType::LZ4_FRAME))?;
+    Ok(StreamWriter::try_new_with_options(buf, schema, options)?)
+}
+
 /// Serializes events into one Arrow IPC stream (one RecordBatch; zero
 /// batches for an empty slice).
 pub fn encode_events(events: &[Event]) -> Result<Vec<u8>, IndexError> {
     let schema = event_schema();
     let mut buf = Vec::new();
-    let mut writer = StreamWriter::try_new(&mut buf, &schema)?;
+    let mut writer = ipc_writer(&mut buf, &schema)?;
     if !events.is_empty() {
         let mut iid_b = FixedSizeBinaryBuilder::new(16);
         let mut system_from_b = TimestampMicrosecondBuilder::new().with_timezone("UTC");

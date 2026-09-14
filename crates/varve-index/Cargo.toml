@@ -9,6 +9,7 @@ description = "Bitemporal event encoding, block/trie index, and resolution for V
 [dependencies]
 varve-types = { path = "../varve-types", version = "0.1.1" }
 arrow = { workspace = true }
+arrow-ipc = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

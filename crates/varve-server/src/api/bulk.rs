@@ -68,6 +68,80 @@ impl Framer {
             Framer::Csv(framer) => framer.finish(),
         }
     }
+
+    /// Like `push`, but NDJSON lines come back undecoded for
+    /// [`decode_lazy`] to parse in parallel; CSV rows are decoded as before
+    /// (the CSV reader is stateful) and pass through as `Ready`.
+    pub fn push_lazy(&mut self, frame: &[u8]) -> Result<Vec<LazyOp>, BulkDecodeError> {
+        match self {
+            Framer::Ndjson(framer) => Ok(framer
+                .push_lines(frame)?
+                .into_iter()
+                .map(LazyOp::Line)
+                .collect()),
+            Framer::Csv(framer) => Ok(framer.push(frame)?.into_iter().map(LazyOp::Ready).collect()),
+        }
+    }
+
+    pub fn finish_lazy(self) -> Result<Vec<LazyOp>, BulkDecodeError> {
+        match self {
+            Framer::Ndjson(framer) => Ok(framer
+                .finish_lines()
+                .into_iter()
+                .map(LazyOp::Line)
+                .collect()),
+            Framer::Csv(framer) => Ok(framer.finish()?.into_iter().map(LazyOp::Ready).collect()),
+        }
+    }
+}
+
+/// One record the framer has split off but not yet decoded: a raw NDJSON
+/// line, or an op a stateful framer already produced.
+#[cfg(feature = "bulk")]
+#[derive(Clone, Debug)]
+pub enum LazyOp {
+    Ready(BulkOp),
+    Line(RawLine),
+}
+
+/// Decodes a chunk of lazy records into ordered ops, parsing the raw lines
+/// across the rayon pool. The first failing line (in input order) is the
+/// error. Blocking: call it off the async workers.
+#[cfg(feature = "bulk")]
+pub fn decode_lazy(ops: Vec<LazyOp>) -> Result<Vec<BulkOp>, BulkDecodeError> {
+    use rayon::prelude::*;
+    let decoded: Vec<Result<Option<BulkOp>, BulkDecodeError>> = ops
+        .into_par_iter()
+        .map(|op| match op {
+            LazyOp::Ready(op) => Ok(Some(op)),
+            LazyOp::Line(raw) => raw.decode(),
+        })
+        .collect();
+    let mut out = Vec::with_capacity(decoded.len());
+    for result in decoded {
+        if let Some(op) = result? {
+            out.push(op);
+        }
+    }
+    Ok(out)
+}
+
+/// One non-blank NDJSON line and its 1-based input line number.
+#[derive(Clone, Debug)]
+pub struct RawLine {
+    pub line: usize,
+    pub bytes: Vec<u8>,
+}
+
+impl RawLine {
+    fn decode(&self) -> Result<Option<BulkOp>, BulkDecodeError> {
+        let fail = |message: String| BulkDecodeError {
+            line: self.line,
+            message,
+        };
+        let text = std::str::from_utf8(&self.bytes).map_err(|error| fail(error.to_string()))?;
+        decode_line(text).map_err(fail)
+    }
 }
 
 /// One decoded record, in input order. Order is preserved end-to-end so the
@@ -265,8 +339,31 @@ impl NdjsonFramer {
     /// Feeds one body frame, returning the ops for every line the frame (or
     /// earlier buffered bytes) completed.
     pub fn push(&mut self, frame: &[u8]) -> Result<Vec<BulkOp>, BulkDecodeError> {
-        self.buf.extend_from_slice(frame);
         let mut ops = Vec::new();
+        for raw in self.push_lines(frame)? {
+            if let Some(op) = raw.decode()? {
+                ops.push(op);
+            }
+        }
+        Ok(ops)
+    }
+
+    /// Flushes a trailing line that had no terminating newline.
+    pub fn finish(self) -> Result<Vec<BulkOp>, BulkDecodeError> {
+        let mut ops = Vec::new();
+        for raw in self.finish_lines() {
+            if let Some(op) = raw.decode()? {
+                ops.push(op);
+            }
+        }
+        Ok(ops)
+    }
+
+    /// Feeds one body frame, returning every complete non-blank line it (or
+    /// earlier buffered bytes) completed, undecoded.
+    pub fn push_lines(&mut self, frame: &[u8]) -> Result<Vec<RawLine>, BulkDecodeError> {
+        self.buf.extend_from_slice(frame);
+        let mut lines = Vec::new();
         // Drain every complete (newline-terminated) line from the buffer.
         while let Some(newline) = self.buf.iter().position(|&byte| byte == b'\n') {
             self.line += 1;
@@ -275,10 +372,13 @@ impl NdjsonFramer {
             if newline > self.max_line_bytes {
                 return Err(self.overflow_error());
             }
-            let line: Vec<u8> = self.buf.drain(..=newline).collect();
-            // The `\n` is at the end; decode the bytes before it.
-            if let Some(op) = self.decode_bytes(&line[..line.len() - 1])? {
-                ops.push(op);
+            let mut bytes: Vec<u8> = self.buf.drain(..=newline).collect();
+            bytes.pop(); // the `\n`
+            if !bytes.trim_ascii().is_empty() {
+                lines.push(RawLine {
+                    line: self.line,
+                    bytes,
+                });
             }
         }
         // The remaining, un-newlined tail must stay within the cap.
@@ -286,26 +386,19 @@ impl NdjsonFramer {
             self.line += 1;
             return Err(self.overflow_error());
         }
-        Ok(ops)
+        Ok(lines)
     }
 
-    /// Flushes a trailing line that had no terminating newline.
-    pub fn finish(mut self) -> Result<Vec<BulkOp>, BulkDecodeError> {
-        if self.buf.is_empty() {
-            return Ok(Vec::new());
+    /// The trailing line that had no terminating newline, if any.
+    pub fn finish_lines(mut self) -> Vec<RawLine> {
+        if self.buf.trim_ascii().is_empty() {
+            return Vec::new();
         }
         self.line += 1;
-        let tail = std::mem::take(&mut self.buf);
-        Ok(self.decode_bytes(&tail)?.into_iter().collect())
-    }
-
-    fn decode_bytes(&self, bytes: &[u8]) -> Result<Option<BulkOp>, BulkDecodeError> {
-        let fail = |message: String| BulkDecodeError {
+        vec![RawLine {
             line: self.line,
-            message,
-        };
-        let text = std::str::from_utf8(bytes).map_err(|error| fail(error.to_string()))?;
-        decode_line(text).map_err(fail)
+            bytes: std::mem::take(&mut self.buf),
+        }]
     }
 
     fn overflow_error(&self) -> BulkDecodeError {
