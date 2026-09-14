@@ -26,6 +26,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The published image is multi-architecture: `ghcr.io/ravan/varve:<tag>`
+  now serves `linux/arm64` beside `linux/amd64`. The release workflow
+  builds each on a runner of its own architecture and joins the two
+  digests under one tag, so an arm64 host stops running the server under
+  emulation.
 - New metric `varve_blocks_skipped_total` counts the page reads avoided by
   the per-block key filter.
 
