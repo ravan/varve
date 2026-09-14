@@ -4,6 +4,25 @@ All notable changes to Varve are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.1.4 (2026-09-14)
+
+### Changed
+
+- Block flush is asynchronous. The writer seals the full live table under
+  one lock and continues into a fresh one while a background task encodes,
+  uploads and commits the sealed block. Scans read live, sealed and blocks,
+  so results are unchanged. One flush runs at a time; the writer waits if
+  the live table fills again before the flush lands, which bounds memory at
+  two blocks. Compaction and shutdown await an in-flight flush, and a failed
+  flush keeps the sealed table for a later retry.
+- JSON ingest decodes in parallel. The framer splits lines only; each chunk
+  is decoded on the rayon thread pool, off the async workers, and chunks
+  still reach the writer in stream order. CSV ingest is unchanged.
+- Blocks are written with LZ4 Arrow IPC compression.
+
+Together these cut a 400k-record ingest to object storage from 5.0s to 2.1s
+(0.1.3 took 9.8s).
+
 ## 0.1.3 (2026-09-14)
 
 ### Added
