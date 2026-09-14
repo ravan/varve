@@ -142,7 +142,7 @@ pub(super) async fn ingest(
             while pending.len() >= chunk_ops {
                 let chunk: Vec<LazyOp> = pending.drain(..chunk_ops).collect();
                 if let Err(response) = inflight.submit(chunk, &mut progress, &mut last).await {
-                    return response;
+                    return *response;
                 }
             }
         }
@@ -162,11 +162,11 @@ pub(super) async fn ingest(
             let take = pending.len().min(chunk_ops);
             let chunk: Vec<LazyOp> = pending.drain(..take).collect();
             if let Err(response) = inflight.submit(chunk, &mut progress, &mut last).await {
-                return response;
+                return *response;
             }
         }
         if let Err(response) = inflight.finish(&mut progress, &mut last).await {
-            return response;
+            return *response;
         }
 
         match last {
@@ -232,7 +232,7 @@ impl Inflight {
         chunk: Vec<LazyOp>,
         progress: &mut IngestProgress,
         last: &mut Option<TxReceipt>,
-    ) -> Result<(), Response> {
+    ) -> Result<(), Box<Response>> {
         if self.queue.len() >= self.limit {
             self.reap_one(progress, last).await?;
         }
@@ -247,11 +247,11 @@ impl Inflight {
             Ok(chunk) => chunk,
             Err(error) => {
                 self.settle(progress, last).await;
-                return Err(committed_error(
+                return Err(Box::new(committed_error(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     error.to_string(),
                     progress.clone(),
-                ));
+                )));
             }
         };
         if chunk.is_empty() {
@@ -279,7 +279,7 @@ impl Inflight {
         &mut self,
         progress: &mut IngestProgress,
         last: &mut Option<TxReceipt>,
-    ) -> Result<(), Response> {
+    ) -> Result<(), Box<Response>> {
         while !self.queue.is_empty() {
             self.reap_one(progress, last).await?;
         }
@@ -290,7 +290,7 @@ impl Inflight {
         &mut self,
         progress: &mut IngestProgress,
         last: &mut Option<TxReceipt>,
-    ) -> Result<(), Response> {
+    ) -> Result<(), Box<Response>> {
         let Some(handle) = self.queue.pop_front() else {
             return Ok(());
         };
@@ -309,7 +309,7 @@ impl Inflight {
                 // wait for them so the reported progress is exact.
                 self.settle(progress, last).await;
                 let (status, message) = classify_chunk_error(error);
-                Err(committed_error(status, message, progress.clone()))
+                Err(Box::new(committed_error(status, message, progress.clone())))
             }
         }
     }
