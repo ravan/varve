@@ -14,6 +14,12 @@ on:
         type: boolean
         default: false
 
+# A newer push to the same branch supersedes the older run; only a manual
+# heavy dispatch is allowed to queue on its own.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.heavy || 'normal' }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
