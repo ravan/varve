@@ -4,6 +4,36 @@ All notable changes to Varve are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.1.5 (2026-09-14)
+
+### Changed
+
+- Point lookups skip blocks that cannot hold the key. Node ids are
+  hash-derived, so every block has one page whose key range covers any id,
+  and a point lookup read one page per block; its cost grew with block
+  count. Each block now carries a Bloom filter over its rows' sort keys
+  (`iid` for the primary table, `src`/`dst` for the adjacency families),
+  stored beside data/meta/labels as `keys/<trie>.bin` and held in the
+  footer cache. A point lookup or anchored adjacency hop skips every block
+  whose filter rules the key out. Blocks written before this release have
+  no filter and keep the old path until compaction rewrites them. GC
+  protects and deletes the new object like the others.
+- Block pages are fetched concurrently. A scan issued one page read at a
+  time, so a point lookup over N blocks paid N round trips in sequence.
+  Page reads across all tries now run through a bounded buffered stream
+  (16 in flight); results keep file order within a block and block order
+  across tries.
+
+### Added
+
+- New metric `varve_blocks_skipped_total` counts the page reads avoided by
+  the per-block key filter.
+
+### Fixed
+
+- The config reference generator emits the missing `decoded_page_cache_bytes`
+  row, so the doc pin test passes again.
+
 ## 0.1.4 (2026-09-14)
 
 ### Changed
