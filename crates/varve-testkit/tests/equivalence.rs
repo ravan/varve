@@ -6,7 +6,7 @@ use varve_testkit::ReferenceStore;
 use varve_types::{Iid, Instant, TemporalBounds, TemporalDimension, Value};
 
 fn cases() -> u32 {
-    // 10k in CI; the nightly job raises this via PROPTEST_CASES (roadmap slice 2).
+    // 256 on push; the manual heavy job raises this via PROPTEST_CASES (roadmap slice 2).
     std::env::var("PROPTEST_CASES")
         .ok()
         .and_then(|s| s.parse().ok())

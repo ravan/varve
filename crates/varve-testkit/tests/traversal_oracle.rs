@@ -6,7 +6,7 @@
 //!  1. **Pure layer** — `varve_plan::expand::expand_paths` (the WALK-semantics
 //!     core) must equal `GraphOracle::walk` on identical adjacency, for every
 //!     `(min, max)` with `max <= 4`. No `Db`, no tokio: run at the FULL
-//!     `PROPTEST_CASES` count (10k CI / 200k nightly) — this is the core
+//!     `PROPTEST_CASES` count (256 push / 200k manual heavy) — this is the core
 //!     equivalence check and the whole point of the oracle being written from
 //!     scratch (it does NOT call `expand_paths`).
 //!  2. **E2E layer** — a random graph (`arb_graph`) driven through the real

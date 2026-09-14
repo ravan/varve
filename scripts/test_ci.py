@@ -17,14 +17,20 @@ class CiWorkflowTest(unittest.TestCase):
             self.assertIn(setting, workflow)
 
         check_job = workflow.split("\n  check:\n", 1)[1].split("\n  docs:\n", 1)[0]
-        self.assertIn("cache-targets: false", check_job)
+        # target/ is cached (the cold rebuild dominated the job); the size
+        # guard below is what keeps the runner disk in budget.
+        self.assertNotIn("cache-targets: false", check_job)
+        self.assertIn("Swatinem/rust-cache@v2", check_job)
+        self.assertIn("python3 scripts/test_cache.py guard", check_job)
 
     def test_check_job_runs_full_isolated_nextest_and_doctest_lanes(self) -> None:
         workflow = WORKFLOW.read_text()
         check_job = workflow.split("\n  check:\n", 1)[1].split("\n  docs:\n", 1)[0]
 
         self.assertIn("taiki-e/install-action@nextest", check_job)
-        self.assertIn("PROPTEST_CASES: \"10000\"", check_job)
+        # Push lane matches the justfile fast lane; the manual
+        # property-heavy lane still runs 200000 cases.
+        self.assertIn("PROPTEST_CASES: \"256\"", check_job)
         self.assertIn(
             "cargo nextest run --workspace --cargo-profile workspace-test",
             check_job,

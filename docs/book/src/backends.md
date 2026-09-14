@@ -14,14 +14,14 @@ no conditional-write semantics at all.
 Image pins and probe verdicts below are read directly from
 `crates/varve-testkit/src/backends.rs` and STATUS.md's recorded slice-5 probe run; the CI
 cadence matches `.github/workflows/ci.yml`'s `backend-matrix` (push/PR) and
-`backend-ceph-weekly` (cron) jobs.
+`backend-ceph-heavy` (manual `heavy=true` dispatch) jobs.
 
 | Backend | Version tested (CI pin) | Probe verdict | `cas-failover` | CI cadence |
 |---|---|---|---|---|
 | Garage | `dxflrs/garage:v1.0.1` | Inconsistent (precondition ignored) | refused (by design) | every push/PR |
 | SeaweedFS | `chrislusf/seaweedfs:3.80` | Inconsistent | refused | every push/PR |
 | MinIO | `minio/minio:RELEASE.2025-04-22T22-12-26Z` | Supported | available | every push/PR (legacy note: repo archived 2026-04) |
-| Ceph RGW | `quay.io/ceph/demo:latest-quincy` | (weekly job; verdict recorded when the cron runs) | per probe | weekly |
+| Ceph RGW | `quay.io/ceph/demo:latest-quincy` | (heavy job; verdict recorded when it is dispatched) | per probe | on demand |
 | AWS S3 | n/a | expected Supported | per probe | **not CI-verified** (documented gap; config-compatible via `[storage.s3]`) |
 | Local FS | n/a | Supported (blanket impl) | n/a (single node) | every push/PR |
 

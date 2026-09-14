@@ -14,7 +14,7 @@ use varve_testkit::strategy::{arb_bounds, arb_history};
 use varve_types::Iid;
 
 fn cases() -> u32 {
-    // 10k in CI; the nightly job raises this via PROPTEST_CASES (slice 2).
+    // 256 on push; the manual heavy job raises this via PROPTEST_CASES (slice 2).
     std::env::var("PROPTEST_CASES")
         .ok()
         .and_then(|s| s.parse().ok())
