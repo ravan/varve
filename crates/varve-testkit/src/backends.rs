@@ -31,8 +31,8 @@ use varve_storage::{storage_registry, ObjectStore};
 /// Image pins. Bump ONLY here, and record the bump in STATUS.md.
 pub const GARAGE_IMAGE: &str = "dxflrs/garage:v1.0.1";
 pub const SEAWEEDFS_IMAGE: &str = "chrislusf/seaweedfs:3.80";
-pub const MINIO_IMAGE: &str = "minio/minio:RELEASE.2025-04-22T22-12-26Z";
-pub const MC_IMAGE: &str = "minio/mc:RELEASE.2025-04-16T18-13-26Z";
+pub const MINIO_IMAGE: &str = "quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z";
+pub const MC_IMAGE: &str = "quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z";
 pub const CEPH_IMAGE: &str = "quay.io/ceph/demo:latest-quincy";
 
 pub const ACCESS_KEY: &str = "varve";
