@@ -60,5 +60,8 @@ pub struct EngineMetricsSnapshot {
     pub block_events_decoded: u64,
     /// Of `block_pages_read`, pages served from the decoded-page cache.
     pub block_pages_cached: u64,
+    /// Blocks a point lookup skipped because their sort-key filter ruled the
+    /// key out; each is a page read that never happened.
+    pub blocks_skipped: u64,
     pub cache_tiers: Vec<CacheTierStats>,
 }

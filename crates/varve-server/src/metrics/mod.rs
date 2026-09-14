@@ -58,6 +58,7 @@ pub struct PrometheusMetrics {
     block_pages_read: IntGauge,
     block_events_decoded: IntGauge,
     block_pages_cached: IntGauge,
+    blocks_skipped: IntGauge,
     cache_hits: IntGaugeVec,
     cache_misses: IntGaugeVec,
     ingest_records: IntCounter,
@@ -149,6 +150,11 @@ impl PrometheusMetrics {
             "Of varve_block_pages_read_total, pages served from the decoded-page cache without a decode",
         )
         .map_err(protocol)?;
+        let blocks_skipped = IntGauge::new(
+            "varve_blocks_skipped_total",
+            "Blocks a point lookup skipped because the block's key filter ruled the key out",
+        )
+        .map_err(protocol)?;
         let cache_hits = IntGaugeVec::new(
             Opts::new("varve_cache_hits_total", "Cache-tier hits"),
             &["tier"],
@@ -202,6 +208,7 @@ impl PrometheusMetrics {
             Box::new(block_pages_read.clone()),
             Box::new(block_events_decoded.clone()),
             Box::new(block_pages_cached.clone()),
+            Box::new(blocks_skipped.clone()),
             Box::new(cache_hits.clone()),
             Box::new(cache_misses.clone()),
             Box::new(ingest_records.clone()),
@@ -235,6 +242,7 @@ impl PrometheusMetrics {
             block_pages_read,
             block_events_decoded,
             block_pages_cached,
+            blocks_skipped,
             cache_hits,
             cache_misses,
             ingest_records,
@@ -312,6 +320,8 @@ impl MetricsSink for PrometheusMetrics {
             .set(saturating_i64(snapshot.block_events_decoded));
         self.block_pages_cached
             .set(saturating_i64(snapshot.block_pages_cached));
+        self.blocks_skipped
+            .set(saturating_i64(snapshot.blocks_skipped));
         for tier in &snapshot.cache_tiers {
             self.cache_hits
                 .with_label_values(&[tier.tier.as_str()])

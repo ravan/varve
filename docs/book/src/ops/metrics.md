@@ -44,6 +44,7 @@ is a true `IntCounterVec`.
 | `varve_block_pages_read_total` | gauge, monotone-by-construction | (none) | Block data pages read by the read paths, after page pruning | see events-per-page below |
 | `varve_block_events_decoded_total` | gauge, monotone-by-construction | (none) | Events materialized from those pages. An anchored decode filters on the page's key column before building a row, so rows it rejects are not counted | see events-per-page below |
 | `varve_block_pages_cached_total` | gauge, monotone-by-construction | (none) | Of the pages read, those served from the decoded-page cache (`[query] decoded_page_cache_bytes`) without a decode. Their events do not count in `varve_block_events_decoded_total` | `varve_block_pages_cached_total / varve_block_pages_read_total` |
+| `varve_blocks_skipped_total` | gauge, monotone-by-construction | (none) | Blocks a point lookup (`{_id: …}` or an anchored traversal hop) skipped because the block's sort-key filter ruled the key out. Each is a page read that did not happen; blocks written before the filter existed never count here | rate vs `varve_block_pages_read_total` |
 | `varve_cache_hits_total` | gauge vec, monotone-by-construction | `tier` | Cache-tier hits | see cache hit ratio below |
 | `varve_cache_misses_total` | gauge vec, monotone-by-construction | `tier` | Cache-tier misses | see cache hit ratio below |
 

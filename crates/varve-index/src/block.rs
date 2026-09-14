@@ -79,6 +79,9 @@ pub struct EncodedBlock {
     /// Label → iids of this block's `Put` rows carrying it. Meaningful for the
     /// primary (`ByIid`) order; adjacency families ignore it.
     pub labels: LabelIndex,
+    /// Membership filter over every row's sort key; lets a point lookup skip
+    /// the block outright.
+    pub keys: crate::KeyFilter,
 }
 
 /// Per-block label index: for each label, the sorted, deduplicated iids of
@@ -326,6 +329,7 @@ fn encode_pages_by_keys(
         meta,
         pages,
         labels: LabelIndex::build(rows),
+        keys: crate::KeyFilter::build(keys),
     })
 }
 

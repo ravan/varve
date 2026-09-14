@@ -193,6 +193,7 @@ fn protect_entry(entry: &ScopedTrieKey, protected: &mut BTreeSet<String>) {
     if let Some(labels) = entry.labels_key() {
         protected.insert(labels);
     }
+    protected.insert(entry.keys_key());
 }
 
 fn should_delete_key(
@@ -226,25 +227,32 @@ fn is_graph_data_or_meta_key(key: &str) -> bool {
     let parts: Vec<_> = key.split('/').collect();
     match parts.as_slice() {
         ["v1", "graphs", graph, "tables", table, kind, object] => {
-            !graph.is_empty()
-                && !table.is_empty()
-                && matches!(*kind, "data" | "meta" | "labels")
-                && arrow_object_name(object)
+            !graph.is_empty() && !table.is_empty() && block_object(kind, object, true)
         }
         ["v1", "graphs", graph, "tables", table, family, kind, object] => {
             !graph.is_empty()
                 && !table.is_empty()
                 && !family.is_empty()
-                && matches!(*kind, "data" | "meta")
-                && arrow_object_name(object)
+                && block_object(kind, object, false)
         }
         _ => false,
     }
 }
 
-fn arrow_object_name(object: &str) -> bool {
+/// `data`/`meta` (and `labels` on the primary table) are `.arrow`; the
+/// sort-key filter is `keys/*.bin` on every family.
+fn block_object(kind: &str, object: &str, primary: bool) -> bool {
+    match kind {
+        "data" | "meta" => object_name(object, ".arrow"),
+        "labels" => primary && object_name(object, ".arrow"),
+        "keys" => object_name(object, ".bin"),
+        _ => false,
+    }
+}
+
+fn object_name(object: &str, suffix: &str) -> bool {
     object
-        .strip_suffix(".arrow")
+        .strip_suffix(suffix)
         .is_some_and(|stem| !stem.is_empty())
 }
 

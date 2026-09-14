@@ -20,6 +20,7 @@ use tracing::Instrument;
 use varve_index::block::{
     encode_block, encode_block_by, EncodedBlock, LabelIndex, PageMeta, SortOrder,
 };
+use varve_index::KeyFilter;
 use varve_index::LiveTable;
 use varve_log::Log;
 use varve_storage::{keys, BlockManifest, ObjectStore, TableTries, TrieEntry};
@@ -67,6 +68,7 @@ struct PrimaryFlush {
     entry: TrieEntry,
     pages: Vec<PageMeta>,
     labels: LabelIndex,
+    keys: KeyFilter,
 }
 
 struct AdjFlush {
@@ -74,6 +76,7 @@ struct AdjFlush {
     family: &'static str,
     entry: TrieEntry,
     pages: Vec<PageMeta>,
+    keys: KeyFilter,
 }
 
 /// Seals every non-empty live tail (a table whose earlier flush failed keeps
@@ -239,6 +242,7 @@ async fn run_flush(
                 meta,
                 pages,
                 labels,
+                keys: key_filter,
             }) = block
             else {
                 continue;
@@ -266,12 +270,19 @@ async fn run_flush(
                     Bytes::from(labels.encode()?),
                 )
                 .await?;
+            store
+                .put(
+                    &keys::keys_key(&enc.graph, kind.name(), "", &trie_key),
+                    Bytes::from(key_filter.encode()),
+                )
+                .await?;
             flushed.push(PrimaryFlush {
                 graph: enc.graph.clone(),
                 kind,
                 entry,
                 pages: pages.clone(),
                 labels: labels.clone(),
+                keys: key_filter.clone(),
             });
         }
 
@@ -280,7 +291,11 @@ async fn run_flush(
             (varve_storage::ADJ_IN, &enc.adj_in_enc),
         ] {
             let Some(EncodedBlock {
-                data, meta, pages, ..
+                data,
+                meta,
+                pages,
+                keys: key_filter,
+                ..
             }) = block
             else {
                 continue;
@@ -302,11 +317,18 @@ async fn run_flush(
                     Bytes::from(meta.clone()),
                 )
                 .await?;
+            store
+                .put(
+                    &keys::keys_key(&enc.graph, EDGES_TABLE, family, &trie_key),
+                    Bytes::from(key_filter.encode()),
+                )
+                .await?;
             flushed_adj.push(AdjFlush {
                 graph: enc.graph.clone(),
                 family,
                 entry,
                 pages: pages.clone(),
+                keys: key_filter.clone(),
             });
         }
     }
@@ -395,6 +417,7 @@ async fn run_flush(
                 entry: flush.entry,
                 pages: Arc::new(flush.pages),
                 labels: Some(Arc::new(flush.labels)),
+                keys: Some(Arc::new(flush.keys)),
             });
             core.sealed = None;
         }
@@ -406,6 +429,7 @@ async fn run_flush(
                 entry: flush.entry,
                 pages: Arc::new(flush.pages),
                 labels: None,
+                keys: Some(Arc::new(flush.keys)),
             };
             if flush.family == varve_storage::ADJ_OUT {
                 table.adj_out.push(trie);

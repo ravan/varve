@@ -52,6 +52,17 @@ impl IidSel {
         }
     }
 
+    /// Whether the block's sort-key filter proves this selector touches
+    /// nothing in it. Only a point consults the filter; a set would cost one
+    /// probe per member and mostly comes from label indexes that already
+    /// name the block.
+    fn filtered_out(&self, filter: Option<&varve_index::KeyFilter>) -> bool {
+        match (self, filter) {
+            (IidSel::Point(point), Some(filter)) => !filter.may_contain(point),
+            _ => false,
+        }
+    }
+
     /// `All` reads a page whole; a point or set admits only its own rows.
     fn is_narrow(&self) -> bool {
         !matches!(self, IidSel::All)
@@ -165,14 +176,26 @@ pub(crate) async fn merged_snapshot(
     let (page_cache, stats) = (&*page_cache, &*stats);
     let mut fetches = Vec::new();
     for (block, trie) in tries.iter().enumerate() {
+        if sel.filtered_out(trie.keys.as_deref()) {
+            stats.record_skipped_block();
+            continue;
+        }
         let data_key = Arc::new(keys::data_key(graph, kind.name(), &trie.entry.trie_key));
         for page in trie.pages.iter().filter(|p| sel.selects_page(p, bounds)) {
             let data_key = Arc::clone(&data_key);
             let decode_whole = sel.decode_whole(page);
             fetches.push(async move {
-                page_events(store, page_cache, stats, &data_key, page, narrow, decode_whole)
-                    .await
-                    .map(|events| (block, events))
+                page_events(
+                    store,
+                    page_cache,
+                    stats,
+                    &data_key,
+                    page,
+                    narrow,
+                    decode_whole,
+                )
+                .await
+                .map(|events| (block, events))
             });
         }
     }
@@ -455,6 +478,12 @@ async fn edge_adjacency_impl(
     let (page_cache, stats) = (&*page_cache, &*stats);
     let mut fetches = Vec::new();
     for (block, trie) in tries.iter().enumerate() {
+        if let (Some(node), Some(filter)) = (anchor.as_ref(), trie.keys.as_deref()) {
+            if !filter.may_contain(node) {
+                stats.record_skipped_block();
+                continue;
+            }
+        }
         let key = Arc::new(keys::adj_data_key(
             graph,
             EDGES_TABLE,
@@ -468,9 +497,17 @@ async fn edge_adjacency_impl(
         {
             let key = Arc::clone(&key);
             fetches.push(async move {
-                page_events(store, page_cache, stats, &key, page, narrow, anchor.is_none())
-                    .await
-                    .map(|events| (block, events))
+                page_events(
+                    store,
+                    page_cache,
+                    stats,
+                    &key,
+                    page,
+                    narrow,
+                    anchor.is_none(),
+                )
+                .await
+                .map(|events| (block, events))
             });
         }
     }
@@ -1043,6 +1080,7 @@ mod tests {
                 },
                 pages: Arc::new(block.pages),
                 labels: Some(Arc::new(block.labels)),
+                keys: Some(Arc::new(block.keys)),
             });
         }
         for e in live_events {
@@ -1143,6 +1181,7 @@ mod tests {
             },
             pages: Arc::new(pages),
             labels: None,
+            keys: None,
         });
         let mut graphs = GraphsState::new();
         graphs.graphs.insert(DEFAULT_GRAPH.to_string(), table);
@@ -1163,6 +1202,108 @@ mod tests {
 
         assert_eq!(names(&batch), vec!["Bob"]);
         assert_eq!(range_reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn point_lookup_skips_blocks_the_key_filter_rules_out() {
+        fn raw_put(first: u8, sf: i64, name: &str) -> Event {
+            let mut doc = Doc::new();
+            doc.insert("name".into(), Value::Str(name.into()));
+            Event {
+                iid: raw_iid(first),
+                system_from: us(sf),
+                valid_from: us(sf),
+                valid_to: EOT,
+                src: None,
+                dst: None,
+                op: Op::Put {
+                    labels: vec!["P".into()],
+                    doc,
+                },
+            }
+        }
+
+        // Three blocks; only the middle one holds the target. Every block's
+        // single page has a key range covering the target, so without the
+        // filter each would cost a read.
+        let inner = memory_store();
+        let range_reads = Arc::new(AtomicUsize::new(0));
+        let store: Arc<dyn ObjectStore> = Arc::new(CountingStore {
+            inner: Arc::clone(&inner),
+            range_reads: range_reads.clone(),
+        });
+        let mut table = TableState::new();
+        let target = raw_iid(0x40);
+        for (i, rows) in [
+            vec![raw_put(0x00, 1, "Ada"), raw_put(0x80, 1, "Cy")],
+            vec![raw_put(0x10, 2, "Dee"), raw_put(0x40, 2, "Bob")],
+            vec![raw_put(0x20, 3, "Eve"), raw_put(0xf0, 3, "Fay")],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let block = encode_sorted_events_by(&rows, 1024, SortOrder::ByIid, 0).unwrap();
+            let trie_key = format!("l00-rc-b0{i}");
+            inner
+                .put(
+                    &keys::data_key(DEFAULT_GRAPH, NODES_TABLE, &trie_key),
+                    block.data.into(),
+                )
+                .await
+                .unwrap();
+            table.nodes.tries.push(PersistedTrie {
+                entry: TrieEntry {
+                    trie_key,
+                    row_count: rows.len() as u64,
+                    data_len: block.pages.iter().map(|page| page.len).sum(),
+                },
+                pages: Arc::new(block.pages),
+                labels: Some(Arc::new(block.labels)),
+                keys: Some(Arc::new(block.keys)),
+            });
+        }
+        let mut graphs = GraphsState::new();
+        graphs.graphs.insert(DEFAULT_GRAPH.to_string(), table);
+        let state = Arc::new(RwLock::new(graphs));
+
+        let batch = merged_snapshot(
+            &state,
+            &store,
+            DEFAULT_GRAPH,
+            TableKind::Nodes,
+            LabelFilter::Single("P"),
+            &at(10),
+            &IidSel::Point(target),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(names(&batch), vec!["Bob"]);
+        assert_eq!(range_reads.load(Ordering::SeqCst), 1);
+        let skipped = state
+            .read()
+            .unwrap()
+            .scan_stats
+            .blocks_skipped
+            .load(Ordering::Relaxed);
+        assert_eq!(skipped, 2);
+
+        // An absent key touches no block at all.
+        range_reads.store(0, Ordering::SeqCst);
+        let batch = merged_snapshot(
+            &state,
+            &store,
+            DEFAULT_GRAPH,
+            TableKind::Nodes,
+            LabelFilter::Single("P"),
+            &at(10),
+            &IidSel::Point(raw_iid(0x55)),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(names(&batch).is_empty());
+        assert_eq!(range_reads.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -1216,6 +1357,7 @@ mod tests {
             },
             pages: Arc::new(block.pages),
             labels: Some(Arc::new(block.labels)),
+            keys: Some(Arc::new(block.keys)),
         });
         let mut graphs = GraphsState::new();
         graphs.graphs.insert(DEFAULT_GRAPH.to_string(), table);

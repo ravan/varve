@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use varve_index::block::{LabelIndex, PageMeta};
+use varve_index::KeyFilter;
 use varve_index::LiveTable;
 use varve_storage::TrieEntry;
 use varve_types::Iid;
@@ -42,6 +43,9 @@ pub(crate) struct PersistedTrie {
     /// `None` for adjacency families and for blocks written before the
     /// index existed (a labelled scan then falls back to a full scan).
     pub labels: Option<Arc<LabelIndex>>,
+    /// `None` for blocks written before the filter existed (a point lookup
+    /// then reads the block's covering page as before).
+    pub keys: Option<Arc<KeyFilter>>,
 }
 
 /// One table's queryable state: the live (unflushed) tail plus the
@@ -143,9 +147,15 @@ pub(crate) struct ScanStats {
     /// counted in `block_pages_read` too (the page WAS read), but their
     /// events are not decoded and so never reach `block_events_decoded`.
     pub block_pages_cached: AtomicU64,
+    /// Blocks a point lookup skipped because the sort-key filter ruled them out.
+    pub blocks_skipped: AtomicU64,
 }
 
 impl ScanStats {
+    pub fn record_skipped_block(&self) {
+        self.blocks_skipped.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Records one page read that yielded `events` materialized events.
     pub fn record_page(&self, events: usize) {
         self.block_pages_read.fetch_add(1, Ordering::Relaxed);

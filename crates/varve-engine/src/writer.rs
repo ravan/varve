@@ -642,10 +642,18 @@ async fn compact_once_impl(
             }
             None => None,
         };
+        state
+            .store
+            .put(
+                &job.keys_key(&trie_key),
+                Bytes::from(output.encoded.keys.encode()),
+            )
+            .await?;
         persisted.push(PersistedTrie {
             entry: entry.clone(),
             pages: Arc::new(output.encoded.pages),
             labels,
+            keys: Some(Arc::new(output.encoded.keys)),
         });
         output_entries.push(entry);
     }

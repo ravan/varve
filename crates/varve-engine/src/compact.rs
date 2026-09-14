@@ -114,6 +114,10 @@ impl CompactionJob {
         self.scoped_key(trie_key).labels_key()
     }
 
+    pub(crate) fn keys_key(&self, trie_key: &TrieKey) -> String {
+        self.scoped_key(trie_key).keys_key()
+    }
+
     pub(crate) fn target_sort_order(&self) -> Option<SortOrder> {
         match (self.scope.table.as_str(), self.scope.family.as_str()) {
             (NODES_TABLE, "") | (EDGES_TABLE, "") => Some(SortOrder::ByIid),

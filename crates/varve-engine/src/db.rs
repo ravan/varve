@@ -2619,6 +2619,7 @@ impl Db {
             block_pages_read: scan_stats.block_pages_read.load(Ordering::Relaxed),
             block_events_decoded: scan_stats.block_events_decoded.load(Ordering::Relaxed),
             block_pages_cached: scan_stats.block_pages_cached.load(Ordering::Relaxed),
+            blocks_skipped: scan_stats.blocks_skipped.load(Ordering::Relaxed),
             cache_tiers,
         }
     }
@@ -2704,10 +2705,19 @@ async fn recover(
                         },
                         None => None,
                     };
+                    let keys = match store
+                        .get(&table.scope_ref().keys_key(&entry.trie_key))
+                        .await
+                    {
+                        Ok(bytes) => Some(Arc::new(varve_index::KeyFilter::decode(&bytes)?)),
+                        Err(varve_storage::StorageError::NotFound(_)) => None,
+                        Err(e) => return Err(e.into()),
+                    };
                     dest.push(PersistedTrie {
                         entry: entry.clone(),
                         pages: Arc::new(pages),
                         labels,
+                        keys,
                     });
                 }
             }

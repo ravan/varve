@@ -70,6 +70,11 @@ impl TableScope {
             .then(|| labels_key(&self.graph, &self.table, trie_key))
     }
 
+    /// Sort-key filter object; every family has one.
+    pub fn keys_key(&self, trie_key: &str) -> String {
+        keys_key(&self.graph, &self.table, &self.family, trie_key)
+    }
+
     pub fn scoped_trie_key(&self, trie_key: impl Into<String>) -> ScopedTrieKey {
         ScopedTrieKey::new(self.clone(), trie_key)
     }
@@ -99,6 +104,10 @@ impl ScopedTrieKey {
 
     pub fn labels_key(&self) -> Option<String> {
         self.scope.labels_key(&self.trie_key)
+    }
+
+    pub fn keys_key(&self) -> String {
+        self.scope.keys_key(&self.trie_key)
     }
 
     pub fn parse_trie_key(&self) -> Result<TrieKey, crate::StorageError> {
@@ -320,6 +329,15 @@ pub fn meta_key(graph: &str, table: &str, trie_key: &str) -> String {
 /// Per-block label index (primary tables only).
 pub fn labels_key(graph: &str, table: &str, trie_key: &str) -> String {
     format!("v1/graphs/{graph}/tables/{table}/labels/{trie_key}.arrow")
+}
+
+/// Per-block sort-key filter. A `""` family is the primary table.
+pub fn keys_key(graph: &str, table: &str, family: &str, trie_key: &str) -> String {
+    if family.is_empty() {
+        format!("v1/graphs/{graph}/tables/{table}/keys/{trie_key}.bin")
+    } else {
+        format!("v1/graphs/{graph}/tables/{table}/{family}/keys/{trie_key}.bin")
+    }
 }
 
 /// Adjacency-family names (slice 6): the src-sorted out-adjacency and the
