@@ -573,9 +573,20 @@ async fn compact_once_impl(
             .store
             .put(&job.meta_key(&trie_key), Bytes::from(output.encoded.meta))
             .await?;
+        let labels = match job.labels_key(&trie_key) {
+            Some(key) => {
+                state
+                    .store
+                    .put(&key, Bytes::from(output.encoded.labels.encode()?))
+                    .await?;
+                Some(Arc::new(output.encoded.labels))
+            }
+            None => None,
+        };
         persisted.push(PersistedTrie {
             entry: entry.clone(),
             pages: Arc::new(output.encoded.pages),
+            labels,
         });
         output_entries.push(entry);
     }

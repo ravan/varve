@@ -149,9 +149,11 @@ fn historical_query(system_time: Instant) -> String {
     )
 }
 
-async fn block_store_object_count(dir: &Path) -> usize {
+async fn block_store_objects(dir: &Path) -> Vec<String> {
     let store = varve_storage::local_store(&dir.join("store")).unwrap();
-    store.list("v1/graphs").await.unwrap().len() + store.list("v1/blocks").await.unwrap().len()
+    let mut keys = store.list("v1/graphs").await.unwrap();
+    keys.extend(store.list("v1/blocks").await.unwrap());
+    keys
 }
 
 #[tokio::test]
@@ -173,7 +175,16 @@ async fn storage_object_count_plateaus_under_update_churn() {
         wait_for_l0_data_count(dir.path(), 64).await;
         compact_until_idle(&db).await.unwrap();
         db.gc_once().await.unwrap();
-        let objects = block_store_object_count(dir.path()).await;
+        let keys = block_store_objects(dir.path()).await;
+        // One label index per primary data object; count it apart from the
+        // data/meta/manifest plateau.
+        let labels = keys.iter().filter(|k| k.contains("/labels/")).count();
+        let data = keys
+            .iter()
+            .filter(|k| k.contains("/tables/nodes/data/"))
+            .count();
+        assert_eq!(labels, data, "cycle {cycle}: {keys:#?}");
+        let objects = keys.len() - labels;
         max_objects = max_objects.max(objects);
         assert!(objects <= 12, "cycle {cycle} left {objects} objects");
     }

@@ -190,6 +190,9 @@ fn protect_manifest_entries(manifest: &BlockManifest, protected: &mut BTreeSet<S
 fn protect_entry(entry: &ScopedTrieKey, protected: &mut BTreeSet<String>) {
     protected.insert(entry.data_key());
     protected.insert(entry.meta_key());
+    if let Some(labels) = entry.labels_key() {
+        protected.insert(labels);
+    }
 }
 
 fn should_delete_key(
@@ -225,7 +228,7 @@ fn is_graph_data_or_meta_key(key: &str) -> bool {
         ["v1", "graphs", graph, "tables", table, kind, object] => {
             !graph.is_empty()
                 && !table.is_empty()
-                && matches!(*kind, "data" | "meta")
+                && matches!(*kind, "data" | "meta" | "labels")
                 && arrow_object_name(object)
         }
         ["v1", "graphs", graph, "tables", table, family, kind, object] => {
@@ -248,7 +251,7 @@ fn arrow_object_name(object: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use varve_storage::keys::{data_key, log_key, manifest_key, meta_key};
+    use varve_storage::keys::{data_key, labels_key, log_key, manifest_key, meta_key};
     use varve_storage::{BlockManifest, TableTries, TrieEntry, PROBE_PREFIX};
     use varve_types::LogPosition;
 
@@ -305,14 +308,22 @@ mod tests {
         let listed = vec![
             data_key("default", "nodes", "l00-rc-b09"),
             meta_key("default", "nodes", "l00-rc-b09"),
+            labels_key("default", "nodes", "l00-rc-b09"),
             data_key("default", "nodes", "l00-rc-b10"),
             meta_key("default", "nodes", "l00-rc-b10"),
             data_key("default", "nodes", "l00-rc-b08"),
             meta_key("default", "nodes", "l00-rc-b08"),
+            labels_key("default", "nodes", "l00-rc-b08"),
         ];
 
         let plan = plan(&manifests, listed, config);
 
+        assert!(!plan
+            .delete_keys
+            .contains(&labels_key("default", "nodes", "l00-rc-b09")));
+        assert!(plan
+            .delete_keys
+            .contains(&labels_key("default", "nodes", "l00-rc-b08")));
         assert!(!plan
             .delete_keys
             .contains(&data_key("default", "nodes", "l00-rc-b09")));

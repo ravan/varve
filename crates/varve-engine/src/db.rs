@@ -283,6 +283,13 @@ struct QueryTuning {
     traversal_node_budget: usize,
     #[serde(default = "default_traversal_adjacency_budget")]
     traversal_adjacency_budget: usize,
+    /// Budget for decoded block pages kept in memory; `"0B"` disables.
+    #[serde(default = "default_decoded_page_cache_bytes")]
+    decoded_page_cache_bytes: ByteSize,
+}
+
+fn default_decoded_page_cache_bytes() -> ByteSize {
+    ByteSize::from_bytes(crate::page_cache::DEFAULT_PAGE_CACHE_BYTES)
 }
 
 fn default_max_path_depth() -> u32 {
@@ -333,6 +340,7 @@ impl Default for QueryTuning {
             path_frontier_budget: default_path_frontier_budget(),
             traversal_node_budget: default_traversal_node_budget(),
             traversal_adjacency_budget: default_traversal_adjacency_budget(),
+            decoded_page_cache_bytes: default_decoded_page_cache_bytes(),
         }
     }
 }
@@ -741,14 +749,14 @@ impl std::fmt::Debug for Db {
 /// pruned-but-complete drop-in for the full-scan input, never a replacement:
 /// when `plan_fast_path` returns `None`, `query` uses the full scan verbatim.
 pub(crate) enum FastPath {
-    /// Fixed homogeneous path (all hops `Edge`, one label + direction, no
-    /// bare edge var projected): the shared reachable-edge batch (or `None`
-    /// when nothing is reachable) fed to EVERY `Edge` spec, plus the reachable
-    /// node set pruning every non-anchor `Node` spec. Inline edge props and
+    /// Fixed path (all hops `Edge`, no bare edge var projected): one
+    /// reachable-edge batch per hop label (`None` when nothing is reachable),
+    /// each `Edge` spec taking its own label's batch, plus the reachable node
+    /// set pruning every non-anchor `Node` spec. Inline edge props and
     /// `WHERE`/`RETURN` references to an edge property are re-applied per
-    /// element over this shared batch, so they do not disable it.
+    /// element over these batches, so they do not disable it.
     FixedEdges {
-        batch: Option<RecordBatch>,
+        batches: Arc<BTreeMap<String, Option<RecordBatch>>>,
         nodes: Arc<BTreeSet<Iid>>,
     },
     /// Single quantified hop: the reachable adjacency fed to the `Expand`
@@ -1051,7 +1059,9 @@ async fn scan_input_for(
             )
         }
         varve_plan::SpecKind::Edge { label, .. } => match fast_path {
-            Some(FastPath::FixedEdges { batch, .. }) => varve_plan::ScanInput::Batch(batch.clone()),
+            Some(FastPath::FixedEdges { batches, .. }) => {
+                varve_plan::ScanInput::Batch(batches.get(label).cloned().flatten())
+            }
             _ => {
                 if let Some(sec) = security {
                     if !sec.read_edges.allows(label) {
@@ -1480,7 +1490,10 @@ impl Db {
             Some(c) => c.acquire(&log).await?, // may BLOCK (cas standby)
             None => WriterGrant { epoch: None },
         };
-        let recovered = recover(log.as_ref(), clock.as_ref(), &store).await?; // fence-aware since Task 3
+        let mut recovered = recover(log.as_ref(), clock.as_ref(), &store).await?; // fence-aware since Task 3
+        recovered.state.page_cache = Arc::new(crate::page_cache::PageCache::new(
+            query_tuning.decoded_page_cache_bytes.as_usize(),
+        ));
         if let Some(epoch) = grant.epoch {
             log.start_epoch(epoch).await?;
         }
@@ -2212,8 +2225,7 @@ impl Db {
     /// edges that can lie on a qualifying path, and if so build the pruned
     /// input. Returns `None` — the caller then uses the full-scan path
     /// verbatim — for anything not confidently covered (unanchored start, a
-    /// heterogeneous fixed path, a mix of fixed and quantified hops, a bare
-    /// edge variable in `RETURN`, …). Correctness over speed: the fast path is
+    /// mix of fixed and quantified hops, a bare edge variable in `RETURN`, …). Correctness over speed: the fast path is
     /// a layer over the unchanged, already-correct scan, never a replacement,
     /// so an unsure verdict simply falls back.
     ///
@@ -2387,25 +2399,18 @@ impl Db {
                 _ => return Ok(None),
             }
         }
-        // One LABEL across all hops, so a single batch under that label serves
-        // every `Edge` element. Directions may differ: `reachable_edges` drives
-        // level `i` from `hops[i]`, and falls back to per-level dedup when the
-        // families differ so a node expanded under one direction is still
-        // expanded under another (see its dedup note). The batch itself is
-        // direction-agnostic — it carries `_src_iid` and `_dst_iid`, and each
-        // hop's join picks the side its own direction calls for.
-        let (_, first_label, _) = edge_specs[0];
-        if !edge_specs.iter().all(|(_, l, _)| *l == first_label) {
-            return Ok(None);
-        }
-        // Non-granted edge label: the full path feeds every `Edge` spec an
-        // empty batch without scanning, so short-circuit BEFORE the BFS
-        // (which could exhaust a traversal budget the full path never
-        // touches).
+        // Labels and directions may differ per hop: `reachable_edges` drives
+        // level `i` from `hops[i]` (per-level dedup when the families differ)
+        // and builds one batch per distinct label over the same reachable
+        // edges; each `Edge` element takes its own label's batch.
+        let labels: Vec<&str> = edge_specs.iter().map(|(_, l, _)| *l).collect();
+        // Any non-granted hop label means no path can match: short-circuit
+        // BEFORE the BFS (which could exhaust a traversal budget the full
+        // path never touches).
         if let Some(sec) = security {
-            if !sec.read_edges.allows(first_label) {
+            if labels.iter().any(|l| !sec.read_edges.allows(l)) {
                 return Ok(Some(FastPath::FixedEdges {
-                    batch: None,
+                    batches: Arc::new(BTreeMap::new()),
                     nodes: Arc::new(BTreeSet::from([anchor])),
                 }));
             }
@@ -2468,8 +2473,8 @@ impl Db {
         let hops: Vec<crate::scan::HopSpec> = edge_specs
             .iter()
             .zip(&hop_props)
-            .map(|((_, _, direction), props)| crate::scan::HopSpec {
-                label: first_label,
+            .map(|((_, label, direction), props)| crate::scan::HopSpec {
+                label,
                 props,
                 direction: dir_to_adj(*direction),
             })
@@ -2486,7 +2491,7 @@ impl Db {
             graph,
             anchor,
             &hops,
-            Some(first_label),
+            Some(&labels),
             edge_visible,
             bounds,
             self.inner.query_limits.traversal_node_budget,
@@ -2495,7 +2500,7 @@ impl Db {
         )
         .await?;
         Ok(Some(FastPath::FixedEdges {
-            batch: reachable.batch,
+            batches: Arc::new(reachable.batches),
             nodes: Arc::new(reachable.nodes),
         }))
     }
@@ -2612,6 +2617,7 @@ impl Db {
             compaction_debt_tries,
             block_pages_read: scan_stats.block_pages_read.load(Ordering::Relaxed),
             block_events_decoded: scan_stats.block_events_decoded.load(Ordering::Relaxed),
+            block_pages_cached: scan_stats.block_pages_cached.load(Ordering::Relaxed),
             cache_tiers,
         }
     }
@@ -2689,9 +2695,18 @@ async fn recover(
                     );
                     let meta = store.get(&meta_key).await?;
                     let pages = varve_index::block::decode_meta(&meta)?;
+                    let labels = match table.scope_ref().labels_key(&entry.trie_key) {
+                        Some(key) => match store.get(&key).await {
+                            Ok(bytes) => Some(Arc::new(varve_index::LabelIndex::decode(&bytes)?)),
+                            Err(varve_storage::StorageError::NotFound(_)) => None,
+                            Err(e) => return Err(e.into()),
+                        },
+                        None => None,
+                    };
                     dest.push(PersistedTrie {
                         entry: entry.clone(),
                         pages: Arc::new(pages),
+                        labels,
                     });
                 }
             }

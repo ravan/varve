@@ -105,6 +105,7 @@ Query planning limits (spec §10).
 | `path_frontier_budget` | integer | `100000` | Frontier-size budget for path expansion before it aborts. |
 | `traversal_node_budget` | integer | `100000` | Node budget for general traversal before it aborts. |
 | `traversal_adjacency_budget` | integer | `250000` | Adjacency-edge budget for general traversal before it aborts. |
+| `decoded_page_cache_bytes` | byte size | `"256MiB"` | Memory budget for decoded block pages. Repeat scans of the same page skip the Arrow decode. `"0B"` disables. |
 
 ## `[gc]`
 

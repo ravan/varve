@@ -57,6 +57,7 @@ pub struct PrometheusMetrics {
     compaction_debt_tries: IntGauge,
     block_pages_read: IntGauge,
     block_events_decoded: IntGauge,
+    block_pages_cached: IntGauge,
     cache_hits: IntGaugeVec,
     cache_misses: IntGaugeVec,
     ingest_records: IntCounter,
@@ -143,6 +144,11 @@ impl PrometheusMetrics {
             "Events materialized from those pages, after the key filter: read              against varve_block_pages_read_total, an anchored lookup should              decode its own degree, not a whole page",
         )
         .map_err(protocol)?;
+        let block_pages_cached = IntGauge::new(
+            "varve_block_pages_cached_total",
+            "Of varve_block_pages_read_total, pages served from the decoded-page cache without a decode",
+        )
+        .map_err(protocol)?;
         let cache_hits = IntGaugeVec::new(
             Opts::new("varve_cache_hits_total", "Cache-tier hits"),
             &["tier"],
@@ -195,6 +201,7 @@ impl PrometheusMetrics {
             Box::new(compaction_debt_tries.clone()),
             Box::new(block_pages_read.clone()),
             Box::new(block_events_decoded.clone()),
+            Box::new(block_pages_cached.clone()),
             Box::new(cache_hits.clone()),
             Box::new(cache_misses.clone()),
             Box::new(ingest_records.clone()),
@@ -227,6 +234,7 @@ impl PrometheusMetrics {
             compaction_debt_tries,
             block_pages_read,
             block_events_decoded,
+            block_pages_cached,
             cache_hits,
             cache_misses,
             ingest_records,
@@ -302,6 +310,8 @@ impl MetricsSink for PrometheusMetrics {
             .set(saturating_i64(snapshot.block_pages_read));
         self.block_events_decoded
             .set(saturating_i64(snapshot.block_events_decoded));
+        self.block_pages_cached
+            .set(saturating_i64(snapshot.block_pages_cached));
         for tier in &snapshot.cache_tiers {
             self.cache_hits
                 .with_label_values(&[tier.tier.as_str()])

@@ -43,6 +43,7 @@ is a true `IntCounterVec`.
 | `varve_compaction_debt_tries` | gauge | (none) | I/O-free compaction-debt proxy: Σ over scopes of `max(0, tries(scope) − 1)` (each scope with more than one persisted trie has debt equal to all but its newest) | `varve_compaction_debt_tries`; caveat: this is a count of extra tries, computed without any I/O, and approximates compaction debt but does not measure bytes-to-rewrite or read amplification directly |
 | `varve_block_pages_read_total` | gauge, monotone-by-construction | (none) | Block data pages read by the read paths, after page pruning | see events-per-page below |
 | `varve_block_events_decoded_total` | gauge, monotone-by-construction | (none) | Events materialized from those pages. An anchored decode filters on the page's key column before building a row, so rows it rejects are not counted | see events-per-page below |
+| `varve_block_pages_cached_total` | gauge, monotone-by-construction | (none) | Of the pages read, those served from the decoded-page cache (`[query] decoded_page_cache_bytes`) without a decode. Their events do not count in `varve_block_events_decoded_total` | `varve_block_pages_cached_total / varve_block_pages_read_total` |
 | `varve_cache_hits_total` | gauge vec, monotone-by-construction | `tier` | Cache-tier hits | see cache hit ratio below |
 | `varve_cache_misses_total` | gauge vec, monotone-by-construction | `tier` | Cache-tier misses | see cache hit ratio below |
 

@@ -8,6 +8,7 @@ mod follower;
 mod gc;
 mod metrics;
 mod node;
+mod page_cache;
 pub mod registries;
 mod replay;
 mod scan;

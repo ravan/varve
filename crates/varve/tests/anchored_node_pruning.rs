@@ -876,3 +876,78 @@ async fn anchored_pruning_preserves_results() {
         .unwrap();
     assert_eq!(ids(&batches), BTreeSet::from([1, 2, 3]));
 }
+
+/// Silt's `CollectionOf` shape: a fixed path whose hops carry DIFFERENT
+/// labels. Documents 0..8 each own a collection (HAS_COLLECTION), each
+/// collection owns an artifact (HAS_ARTIFACT), each artifact has a format
+/// (FORMAT). Node ids: doc d, collection 10+d, artifact 20+d, format 30+d.
+async fn build_mixed_label_graph(root: &Path, reads: &Arc<Mutex<Vec<String>>>) {
+    let db = Db::open_with(&counting_config(root), &registries(root, reads))
+        .await
+        .unwrap();
+    for id in 0..PEOPLE {
+        db.execute(&format!("INSERT (:Node {{_id: {id}}})"))
+            .await
+            .unwrap();
+    }
+    for d in 0..8 {
+        for (src, dst, label) in [
+            (d, 10 + d, "HAS_COLLECTION"),
+            (10 + d, 20 + d, "HAS_ARTIFACT"),
+            (20 + d, 30 + d, "FORMAT"),
+        ] {
+            db.execute(&format!(
+                "MATCH (a:Node {{_id: {src}}}), (b:Node {{_id: {dst}}}) \
+                 INSERT (a)-[:{label} {{n: {d}}}]->(b)"
+            ))
+            .await
+            .unwrap();
+        }
+    }
+    wait_for_manifest_count(root, PEOPLE as usize).await;
+    drop(db);
+}
+
+#[tokio::test]
+async fn mixed_label_fixed_path_prunes_and_matches_the_full_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    build_mixed_label_graph(dir.path(), &reads).await;
+    let db = fresh_db(dir.path(), &reads).await;
+
+    let anchored = "MATCH (d:Node {_id: 3})-[:HAS_COLLECTION]->(c:Node)\
+                    -[:HAS_ARTIFACT]->(a:Node)-[:FORMAT]->(f:Node) RETURN f._id";
+    let batches = db.query(anchored).await.unwrap();
+    assert_eq!(ids(&batches), BTreeSet::from([33]));
+    assert_pruned(&reads, "anchored mixed-label 3-hop");
+
+    // Same rows as the unanchored scan filtered to the anchor.
+    let full = db
+        .query(
+            "MATCH (d:Node)-[:HAS_COLLECTION]->(c:Node)-[:HAS_ARTIFACT]->(a:Node)\
+             -[:FORMAT]->(f:Node) WHERE d._id = 3 RETURN f._id",
+        )
+        .await
+        .unwrap();
+    assert_eq!(ids(&full), ids(&batches));
+
+    // Each hop takes its OWN label's batch: swapping two labels finds nothing.
+    let swapped = db
+        .query(
+            "MATCH (d:Node {_id: 3})-[:HAS_ARTIFACT]->(c:Node)-[:HAS_COLLECTION]->(a:Node)\
+             -[:FORMAT]->(f:Node) RETURN f._id",
+        )
+        .await
+        .unwrap();
+    assert_eq!(ids(&swapped), BTreeSet::new());
+
+    // Per-hop edge props still apply to the hop's own batch.
+    let props = db
+        .query(
+            "MATCH (d:Node {_id: 3})-[:HAS_COLLECTION {n: 3}]->(c:Node)\
+             -[:HAS_ARTIFACT {n: 4}]->(a:Node)-[:FORMAT]->(f:Node) RETURN f._id",
+        )
+        .await
+        .unwrap();
+    assert_eq!(ids(&props), BTreeSet::new());
+}

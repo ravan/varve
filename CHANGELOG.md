@@ -4,6 +4,26 @@ All notable changes to Varve are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- Per-block label index (`v1/graphs/{g}/tables/{t}/labels/{trie}.arrow`):
+  a labelled scan (`MATCH (j:Job …)`) now touches only the entities that
+  carry the label instead of decoding every page. Written by flush and
+  compaction; blocks from before this release have none and keep the full
+  scan until `compact_full_once` (or `varve compact --full`) rewrites them.
+  `verify` checks the index against its block.
+- Decoded-page cache, `[query] decoded_page_cache_bytes` (default 256 MiB,
+  `"0B"` disables): repeated block scans skip the Arrow decode. New gauge
+  `varve_block_pages_cached_total`.
+
+### Changed
+
+- The anchored fixed-path fast path accepts hops with different edge labels
+  (one reachable-edge batch per label). Silt's 3-label `CollectionOf` path
+  no longer falls back to five full edge scans per document.
+
 ## 0.1.2 (2026-09-08)
 
 ### Changed

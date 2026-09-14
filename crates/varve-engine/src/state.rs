@@ -1,7 +1,8 @@
+use crate::page_cache::{PageCache, DEFAULT_PAGE_CACHE_BYTES};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use varve_index::block::PageMeta;
+use varve_index::block::{LabelIndex, PageMeta};
 use varve_index::LiveTable;
 use varve_storage::TrieEntry;
 use varve_types::Iid;
@@ -38,6 +39,9 @@ impl TableKind {
 pub(crate) struct PersistedTrie {
     pub entry: TrieEntry,
     pub pages: Arc<Vec<PageMeta>>,
+    /// `None` for adjacency families and for blocks written before the
+    /// index existed (a labelled scan then falls back to a full scan).
+    pub labels: Option<Arc<LabelIndex>>,
 }
 
 /// One table's queryable state: the live (unflushed) tail plus the
@@ -121,6 +125,10 @@ impl TableState {
 pub(crate) struct ScanStats {
     pub block_pages_read: AtomicU64,
     pub block_events_decoded: AtomicU64,
+    /// Pages served from the decoded-page cache ([`crate::page_cache`]):
+    /// counted in `block_pages_read` too (the page WAS read), but their
+    /// events are not decoded and so never reach `block_events_decoded`.
+    pub block_pages_cached: AtomicU64,
 }
 
 impl ScanStats {
@@ -129,6 +137,12 @@ impl ScanStats {
         self.block_pages_read.fetch_add(1, Ordering::Relaxed);
         self.block_events_decoded
             .fetch_add(events as u64, Ordering::Relaxed);
+    }
+
+    /// Records one page served from the decoded-page cache: no decode.
+    pub fn record_cached_page(&self) {
+        self.block_pages_read.fetch_add(1, Ordering::Relaxed);
+        self.block_pages_cached.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -142,6 +156,11 @@ pub(crate) struct GraphsState {
     /// Shared out of the read lock (never reset) so every read path can count
     /// its block work without a new parameter on the scan signatures.
     pub scan_stats: Arc<ScanStats>,
+    /// Decoded block pages, shared the same way as `scan_stats` so the read
+    /// paths reach it through the lock they already take. Sized by
+    /// `[query] decoded_page_cache_bytes`; `Db` open paths replace the
+    /// default-sized instance before the state is shared.
+    pub page_cache: Arc<PageCache>,
 }
 
 impl GraphsState {
@@ -158,6 +177,7 @@ impl GraphsState {
             catalog_graphs: BTreeMap::new(),
             security_epoch: 0,
             scan_stats: Arc::new(ScanStats::default()),
+            page_cache: Arc::new(PageCache::new(DEFAULT_PAGE_CACHE_BYTES)),
         }
     }
 

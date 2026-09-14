@@ -1,4 +1,4 @@
-use crate::event::Event;
+use crate::event::{Event, Op};
 use arrow::record_batch::RecordBatch;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -114,6 +114,21 @@ impl LiveTable {
         self.events
             .iter()
             .map(|(iid, events)| (iid, events.as_slice()))
+    }
+
+    /// Entities with some `Put` carrying one of `labels`, ascending.
+    pub fn iids_with_any_label<'a>(&'a self, labels: &'a [&str]) -> impl Iterator<Item = Iid> + 'a {
+        self.events.iter().filter_map(move |(iid, events)| {
+            events
+                .iter()
+                .any(|e| match &e.op {
+                    Op::Put { labels: have, .. } => {
+                        have.iter().any(|h| labels.iter().any(|l| h == l))
+                    }
+                    _ => false,
+                })
+                .then_some(*iid)
+        })
     }
 
     /// One entity's events in arrival order (point-lookup fast path).

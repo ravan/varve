@@ -1,7 +1,7 @@
 use crate::coord::fence::load_fences;
 use crate::replay::decode_log_record;
 use crate::EngineError;
-use varve_index::{decode_events, decode_meta, IndexError};
+use varve_index::{decode_events, decode_meta, IndexError, LabelIndex};
 use varve_log::Log;
 use varve_storage::{latest_manifest, ObjectStore};
 use varve_types::LogPosition;
@@ -50,6 +50,7 @@ pub(crate) async fn verify_database(
                 let pages = decode_meta(&meta)?;
                 let mut previous_end = 0_u64;
                 let mut trie_rows = 0_u64;
+                let mut all_events = Vec::new();
                 for page in pages {
                     if page.offset < previous_end {
                         return Err(corruption(format!(
@@ -85,6 +86,20 @@ pub(crate) async fn verify_database(
                     report.pages_checked += 1;
                     report.events_checked += events.len();
                     previous_end = end as u64;
+                    all_events.extend(events);
+                }
+                if let Some(labels_key) = scope.labels_key(&entry.trie_key) {
+                    match store.get(&labels_key).await {
+                        Ok(bytes) => {
+                            if LabelIndex::decode(&bytes)? != LabelIndex::build(&all_events) {
+                                return Err(corruption(format!(
+                                    "{labels_key}: label index does not match the block's rows"
+                                )));
+                            }
+                        }
+                        Err(varve_storage::StorageError::NotFound(_)) => {}
+                        Err(e) => return Err(e.into()),
+                    }
                 }
                 if trie_rows != entry.row_count {
                     return Err(corruption(format!(

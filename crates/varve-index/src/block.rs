@@ -9,13 +9,14 @@ use crate::event::{Event, Op};
 use crate::live::{IndexError, LiveTable};
 use arrow::array::{
     ArrayRef, BinaryArray, BinaryBuilder, BooleanArray, BooleanBuilder, FixedSizeBinaryArray,
-    FixedSizeBinaryBuilder, TimestampMicrosecondArray, TimestampMicrosecondBuilder, UInt64Array,
-    UInt64Builder,
+    FixedSizeBinaryBuilder, StringArray, StringBuilder, TimestampMicrosecondArray,
+    TimestampMicrosecondBuilder, UInt64Array, UInt64Builder,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use varve_types::{
     Bucketer, Iid, Instant, TemporalBounds, MAX_TRIE_LEVELS, PAGE_LIMIT, TRIE_BRANCH_FACTOR,
@@ -76,6 +77,112 @@ pub struct EncodedBlock {
     pub data: Vec<u8>,
     pub meta: Vec<u8>,
     pub pages: Vec<PageMeta>,
+    /// Label → iids of this block's `Put` rows carrying it. Meaningful for the
+    /// primary (`ByIid`) order; adjacency families ignore it.
+    pub labels: LabelIndex,
+}
+
+/// Per-block label index: for each label, the sorted, deduplicated iids of
+/// every `Put` in the block that carries it. A labelled scan turns this into
+/// an `IidSel::Set`, which is sound because any entity whose visible version
+/// carries the label has a `Put` with it in some block or in the live tail.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LabelIndex(BTreeMap<String, Vec<Iid>>);
+
+impl LabelIndex {
+    pub fn build(rows: &[Event]) -> LabelIndex {
+        let mut map: BTreeMap<String, Vec<Iid>> = BTreeMap::new();
+        for event in rows {
+            if let Op::Put { labels, .. } = &event.op {
+                for label in labels {
+                    map.entry(label.clone()).or_default().push(event.iid);
+                }
+            }
+        }
+        for iids in map.values_mut() {
+            iids.sort_unstable();
+            iids.dedup();
+        }
+        LabelIndex(map)
+    }
+
+    pub fn iids(&self, label: &str) -> &[Iid] {
+        self.0.get(label).map(Vec::as_slice).unwrap_or_default()
+    }
+
+    pub fn labels(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, IndexError> {
+        let schema = label_index_schema();
+        let mut buf = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut buf, &schema)?;
+        if !self.0.is_empty() {
+            let mut label_b = StringBuilder::new();
+            let mut iid_b = FixedSizeBinaryBuilder::new(16);
+            for (label, iids) in &self.0 {
+                for iid in iids {
+                    label_b.append_value(label);
+                    iid_b.append_value(iid.as_bytes())?;
+                }
+            }
+            let columns: Vec<ArrayRef> = vec![Arc::new(label_b.finish()), Arc::new(iid_b.finish())];
+            writer.write(&RecordBatch::try_new(schema.clone(), columns)?)?;
+        }
+        writer.finish()?;
+        drop(writer);
+        Ok(buf)
+    }
+
+    /// Same panic/allocation guards as [`decode_meta`].
+    pub fn decode(bytes: &[u8]) -> Result<LabelIndex, IndexError> {
+        crate::codec::validate_ipc_framing(bytes)?;
+        match crate::codec::catch_arrow_panic(|| Self::decode_uncaught(bytes)) {
+            Ok(result) => result,
+            Err(_) => Err(IndexError::Codec(
+                "arrow IPC decode panicked (corrupt input)".into(),
+            )),
+        }
+    }
+
+    fn decode_uncaught(bytes: &[u8]) -> Result<LabelIndex, IndexError> {
+        let reader = StreamReader::try_new(std::io::Cursor::new(bytes), None)?;
+        if reader.schema() != label_index_schema() {
+            return Err(IndexError::Codec("label index schema mismatch".into()));
+        }
+        let mut map: BTreeMap<String, Vec<Iid>> = BTreeMap::new();
+        for batch in reader {
+            let batch = batch?;
+            let labels = downcast::<StringArray>(&batch, 0)?;
+            let iids = downcast::<FixedSizeBinaryArray>(&batch, 1)?;
+            for row in 0..batch.num_rows() {
+                let bytes: [u8; 16] = iids
+                    .value(row)
+                    .try_into()
+                    .map_err(|_| IndexError::Codec("label index iid is not 16 bytes".into()))?;
+                map.entry(labels.value(row).to_string())
+                    .or_default()
+                    .push(Iid::from_bytes(bytes));
+            }
+        }
+        for iids in map.values_mut() {
+            iids.sort_unstable();
+            iids.dedup();
+        }
+        Ok(LabelIndex(map))
+    }
+}
+
+fn label_index_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("label", DataType::Utf8, false),
+        Field::new("iid", DataType::FixedSizeBinary(16), false),
+    ]))
 }
 
 /// Which key a block file is sorted (and page-pruned) by (slice-6 decision 4).
@@ -215,7 +322,12 @@ fn encode_pages_by_keys(
     }
 
     let meta = encode_meta(&pages)?;
-    Ok(EncodedBlock { data, meta, pages })
+    Ok(EncodedBlock {
+        data,
+        meta,
+        pages,
+        labels: LabelIndex::build(rows),
+    })
 }
 
 fn shared_page_path(keys: &[Iid], page_path_levels: usize) -> Result<Vec<u8>, IndexError> {
@@ -878,6 +990,38 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/block_meta");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("valid.bin"), &block.meta).unwrap();
+    }
+
+    #[test]
+    fn label_index_round_trips_and_dedups() {
+        let mut ab = put(1, 1, 1, EOT, 0);
+        if let Op::Put { labels, .. } = &mut ab.op {
+            *labels = vec!["A".into(), "B".into()];
+        }
+        let rows = [
+            ab,
+            put(1, 2, 2, EOT, 1), // second version of entity 1: same iid, label P
+            put(2, 3, 3, EOT, 0),
+            erase(3, 4),
+        ];
+        let index = LabelIndex::build(&rows);
+        assert_eq!(index.iids("A"), &[iid(1)]);
+        assert_eq!(index.iids("B"), &[iid(1)]);
+        let mut p = vec![iid(1), iid(2)];
+        p.sort_unstable();
+        assert_eq!(index.iids("P"), p.as_slice());
+        assert!(index.iids("Z").is_empty());
+        assert_eq!(index.labels().collect::<Vec<_>>(), vec!["A", "B", "P"]);
+        assert_eq!(LabelIndex::decode(&index.encode().unwrap()).unwrap(), index);
+
+        let block = encode_block(&table(&rows[..3]), 16).unwrap();
+        assert_eq!(block.labels, LabelIndex::build(&rows[..3]));
+
+        let empty = LabelIndex::default();
+        assert!(LabelIndex::decode(&empty.encode().unwrap())
+            .unwrap()
+            .is_empty());
+        assert!(LabelIndex::decode(b"garbage").is_err());
     }
 
     #[test]

@@ -58,5 +58,7 @@ pub struct EngineMetricsSnapshot {
     /// block-resident traversal cost many times a live-resident one. Pair it
     /// with `live_bytes` when reading traversal latency.
     pub block_events_decoded: u64,
+    /// Of `block_pages_read`, pages served from the decoded-page cache.
+    pub block_pages_cached: u64,
     pub cache_tiers: Vec<CacheTierStats>,
 }

@@ -63,6 +63,13 @@ impl TableScope {
         }
     }
 
+    /// Label-index key; `None` for adjacency families, which have none.
+    pub fn labels_key(&self, trie_key: &str) -> Option<String> {
+        self.family
+            .is_empty()
+            .then(|| labels_key(&self.graph, &self.table, trie_key))
+    }
+
     pub fn scoped_trie_key(&self, trie_key: impl Into<String>) -> ScopedTrieKey {
         ScopedTrieKey::new(self.clone(), trie_key)
     }
@@ -88,6 +95,10 @@ impl ScopedTrieKey {
 
     pub fn meta_key(&self) -> String {
         self.scope.meta_key(&self.trie_key)
+    }
+
+    pub fn labels_key(&self) -> Option<String> {
+        self.scope.labels_key(&self.trie_key)
     }
 
     pub fn parse_trie_key(&self) -> Result<TrieKey, crate::StorageError> {
@@ -304,6 +315,11 @@ pub fn data_key(graph: &str, table: &str, trie_key: &str) -> String {
 
 pub fn meta_key(graph: &str, table: &str, trie_key: &str) -> String {
     format!("v1/graphs/{graph}/tables/{table}/meta/{trie_key}.arrow")
+}
+
+/// Per-block label index (primary tables only).
+pub fn labels_key(graph: &str, table: &str, trie_key: &str) -> String {
+    format!("v1/graphs/{graph}/tables/{table}/labels/{trie_key}.arrow")
 }
 
 /// Adjacency-family names (slice 6): the src-sorted out-adjacency and the

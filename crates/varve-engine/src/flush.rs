@@ -9,7 +9,9 @@ use crate::writer::WriterState;
 use bytes::Bytes;
 use std::sync::Arc;
 use tracing::Instrument;
-use varve_index::block::{encode_block, encode_block_by, EncodedBlock, PageMeta, SortOrder};
+use varve_index::block::{
+    encode_block, encode_block_by, EncodedBlock, LabelIndex, PageMeta, SortOrder,
+};
 use varve_index::LiveTable;
 use varve_storage::{keys, BlockManifest, TableTries, TrieEntry};
 
@@ -50,6 +52,7 @@ pub(crate) async fn flush_block(state: &mut WriterState) -> Result<(), EngineErr
         kind: TableKind,
         entry: TrieEntry,
         pages: Vec<PageMeta>,
+        labels: LabelIndex,
     }
 
     struct AdjFlush {
@@ -145,7 +148,13 @@ pub(crate) async fn flush_block(state: &mut WriterState) -> Result<(), EngineErr
                 (TableKind::Nodes, &snapshot.nodes_enc),
                 (TableKind::Edges, &snapshot.edges_enc),
             ] {
-                let Some(EncodedBlock { data, meta, pages }) = enc else {
+                let Some(EncodedBlock {
+                    data,
+                    meta,
+                    pages,
+                    labels,
+                }) = enc
+                else {
                     continue;
                 };
                 let entry = TrieEntry {
@@ -167,11 +176,19 @@ pub(crate) async fn flush_block(state: &mut WriterState) -> Result<(), EngineErr
                         Bytes::from(meta.clone()),
                     )
                     .await?;
+                state
+                    .store
+                    .put(
+                        &keys::labels_key(&snapshot.graph, kind.name(), &trie_key),
+                        Bytes::from(labels.encode()?),
+                    )
+                    .await?;
                 flushed.push(PrimaryFlush {
                     graph: snapshot.graph.clone(),
                     kind,
                     entry,
                     pages: pages.clone(),
+                    labels: labels.clone(),
                 });
             }
 
@@ -179,7 +196,10 @@ pub(crate) async fn flush_block(state: &mut WriterState) -> Result<(), EngineErr
                 (varve_storage::ADJ_OUT, &snapshot.adj_out_enc),
                 (varve_storage::ADJ_IN, &snapshot.adj_in_enc),
             ] {
-                let Some(EncodedBlock { data, meta, pages }) = enc else {
+                let Some(EncodedBlock {
+                    data, meta, pages, ..
+                }) = enc
+                else {
                     continue;
                 };
                 let entry = TrieEntry {
@@ -294,6 +314,7 @@ pub(crate) async fn flush_block(state: &mut WriterState) -> Result<(), EngineErr
                 core.tries.push(PersistedTrie {
                     entry: flush.entry,
                     pages: Arc::new(flush.pages),
+                    labels: Some(Arc::new(flush.labels)),
                 });
                 core.live = LiveTable::new();
             }
@@ -304,6 +325,7 @@ pub(crate) async fn flush_block(state: &mut WriterState) -> Result<(), EngineErr
                 let trie = PersistedTrie {
                     entry: flush.entry,
                     pages: Arc::new(flush.pages),
+                    labels: None,
                 };
                 if flush.family == varve_storage::ADJ_OUT {
                     table.adj_out.push(trie);

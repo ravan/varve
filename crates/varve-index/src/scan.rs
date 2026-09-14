@@ -78,6 +78,18 @@ pub enum LabelFilter<'a> {
 }
 
 impl LabelFilter<'_> {
+    /// Labels a matching row must carry at least one of, or `None` when the
+    /// filter admits unlabelled rows. `All` needs every label, so any one of
+    /// them is a sound superset; `Any([])` matches nothing (empty list).
+    pub fn needed_labels(&self) -> Option<Vec<&str>> {
+        match self {
+            Self::Single(label) => Some(vec![label]),
+            Self::All(required) => required.first().map(|l| vec![l.as_str()]),
+            Self::Any(allowed) => Some(allowed.iter().map(String::as_str).collect()),
+            Self::Visible { base, .. } => base.needed_labels(),
+        }
+    }
+
     fn matches(&self, labels: &[String]) -> bool {
         match self {
             Self::Single(label) => labels.iter().any(|candidate| candidate == *label),

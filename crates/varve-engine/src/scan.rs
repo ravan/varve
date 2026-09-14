@@ -52,17 +52,22 @@ impl IidSel {
         }
     }
 
-    /// Decodes one primary-table page, materializing only the events this
-    /// selection admits. `All` decodes the page whole; the narrowing variants
-    /// push `admits` down into the codec's `_iid` column pass so a point or
-    /// set lookup never deserializes a non-selected row's doc — the page's
-    /// selected rows, not its rows, bound the cost.
-    fn decode_page(&self, bytes: &[u8]) -> Result<Vec<Event>, varve_index::IndexError> {
+    /// `All` reads a page whole; a point or set admits only its own rows.
+    fn is_narrow(&self) -> bool {
+        !matches!(self, IidSel::All)
+    }
+
+    /// Whether a page is worth decoding whole (and caching) even under a
+    /// narrowing selector: a set that covers at least half the page's rows.
+    /// A point or a sparse set keeps the degree-bound keyed decode.
+    fn decode_whole(&self, page: &PageMeta) -> bool {
         match self {
-            IidSel::All => decode_events(bytes),
-            _ => varve_index::decode_events_keyed(bytes, varve_index::SortOrder::ByIid, &|iid| {
-                self.admits(&iid)
-            }),
+            IidSel::All => true,
+            IidSel::Point(_) => false,
+            IidSel::Set(set) => {
+                page.min_iid <= page.max_iid
+                    && set.range(page.min_iid..=page.max_iid).count() * 2 >= page.rows as usize
+            }
         }
     }
 
@@ -103,15 +108,35 @@ pub(crate) async fn merged_snapshot(
     // 1. Atomic snapshot under ONE read lock (decision 8). Live events are
     //    cloned — bounded by max_block_rows; a point lookup clones one
     //    entity, a set only its members. The trie inventory is Arc-cheap.
-    let (live_events, tries, stats) = {
+    let (live_events, tries, stats, narrowed) = {
         let s = state.read().map_err(|_| EngineError::Poisoned)?;
         let table = s
             .graph(graph)
             .ok_or_else(|| EngineError::UnknownGraph(graph.to_string()))?;
         let core = table.core(kind);
+        // A labelled whole-table scan narrows to the entities the per-block
+        // label indexes (plus the live tail and overlay) say carry the label.
+        let narrowed = match (sel, label.needed_labels()) {
+            (IidSel::All, Some(needed)) => label_candidates(
+                &core.tries,
+                &core.live,
+                overlay.map(|o| o.table(kind)),
+                &needed,
+            )
+            .map(|set| IidSel::Set(Arc::new(set))),
+            _ => None,
+        };
+        let sel = narrowed.as_ref().unwrap_or(sel);
         let live_events = sel.table_events(|iid| core.live.events_for(iid), core.live.entities());
-        (live_events, core.tries.clone(), Arc::clone(&s.scan_stats))
+        (
+            live_events,
+            core.tries.clone(),
+            (Arc::clone(&s.scan_stats), Arc::clone(&s.page_cache)),
+            narrowed,
+        )
     };
+    let (stats, page_cache) = stats;
+    let sel = narrowed.as_ref().unwrap_or(sel);
     let overlay_events: Vec<(Iid, Vec<Event>)> = overlay
         .map(|overlay| {
             let table = overlay.table(kind);
@@ -130,11 +155,20 @@ pub(crate) async fn merged_snapshot(
         let data_key = keys::data_key(graph, kind.name(), &trie.entry.trie_key);
         let mut block_events: Vec<Event> = Vec::new();
         for page in trie.pages.iter().filter(|p| sel.selects_page(p, bounds)) {
-            let bytes = store
-                .get_range(&data_key, page.offset..page.offset + page.len)
-                .await?;
-            let decoded = sel.decode_page(&bytes)?;
-            stats.record_page(decoded.len());
+            let admits = |iid: Iid| sel.admits(&iid);
+            let narrow: Option<(varve_index::SortOrder, &(dyn Fn(Iid) -> bool + Sync))> = sel
+                .is_narrow()
+                .then_some((varve_index::SortOrder::ByIid, &admits));
+            let decoded = page_events(
+                store,
+                &page_cache,
+                &stats,
+                &data_key,
+                page,
+                narrow,
+                sel.decode_whole(page),
+            )
+            .await?;
             block_events.extend(decoded);
         }
         blocks.push(block_events);
@@ -149,6 +183,83 @@ pub(crate) async fn merged_snapshot(
         label,
         bounds,
     )?)
+}
+
+/// Every entity that may carry one of `needed` at any version: the union of
+/// the blocks' label indexes plus the live tail and overlay. `None` when a
+/// block predates the index, so the caller keeps the full scan.
+fn label_candidates(
+    tries: &[crate::state::PersistedTrie],
+    live: &varve_index::LiveTable,
+    overlay: Option<&varve_index::LiveTable>,
+    needed: &[&str],
+) -> Option<std::collections::BTreeSet<Iid>> {
+    let mut set = std::collections::BTreeSet::new();
+    for trie in tries {
+        let index = trie.labels.as_ref()?;
+        for label in needed {
+            set.extend(index.iids(label).iter().copied());
+        }
+    }
+    set.extend(live.iids_with_any_label(needed));
+    if let Some(overlay) = overlay {
+        set.extend(overlay.iids_with_any_label(needed));
+    }
+    Some(set)
+}
+
+/// One page read through the decoded-page cache. A hit is filtered by
+/// `narrow` without decoding. A miss decodes the page whole and caches it
+/// when `decode_whole` is set; otherwise it uses the keyed decode, which
+/// materializes only admitted rows and is not cached (a subset).
+#[allow(clippy::too_many_arguments)]
+async fn page_events(
+    store: &Arc<dyn ObjectStore>,
+    cache: &crate::page_cache::PageCache,
+    stats: &crate::state::ScanStats,
+    key: &str,
+    page: &PageMeta,
+    narrow: Option<(varve_index::SortOrder, &(dyn Fn(Iid) -> bool + Sync))>,
+    decode_whole: bool,
+) -> Result<Vec<Event>, EngineError> {
+    let filter = |events: &[Event]| -> Vec<Event> {
+        match narrow {
+            None => events.to_vec(),
+            Some((order, admits)) => events
+                .iter()
+                .filter(|e| event_key(e, order).is_some_and(admits))
+                .cloned()
+                .collect(),
+        }
+    };
+    if let Some(cached) = cache.get(key, page.offset) {
+        stats.record_cached_page();
+        return Ok(filter(&cached));
+    }
+    let bytes = store
+        .get_range(key, page.offset..page.offset + page.len)
+        .await?;
+    Ok(match narrow {
+        Some((order, admits)) if !decode_whole => {
+            let decoded = varve_index::decode_events_keyed(&bytes, order, admits)?;
+            stats.record_page(decoded.len());
+            decoded
+        }
+        _ => {
+            let decoded = Arc::new(decode_events(&bytes)?);
+            stats.record_page(decoded.len());
+            cache.insert(key, page.offset, Arc::clone(&decoded));
+            filter(&decoded)
+        }
+    })
+}
+
+fn event_key(event: &Event, order: varve_index::SortOrder) -> Option<Iid> {
+    match order {
+        varve_index::SortOrder::ByIid => Some(event.iid),
+        varve_index::SortOrder::BySrc => event.src,
+        varve_index::SortOrder::ByDst => event.dst,
+    }
 }
 
 /// Which adjacency family a lookup traverses: `Out` follows `src → dst` (the
@@ -250,8 +361,13 @@ async fn edge_adjacency_impl(
             AdjDirection::Out => table.adj_out.clone(),
             AdjDirection::In => table.adj_in.clone(),
         };
-        (live_events, tries, Arc::clone(&s.scan_stats))
+        (
+            live_events,
+            tries,
+            (Arc::clone(&s.scan_stats), Arc::clone(&s.page_cache)),
+        )
     };
+    let (stats, page_cache) = stats;
     let overlay_events: Vec<(Iid, Vec<Event>)> = overlay
         .map(|overlay| {
             let live = &overlay.edges;
@@ -295,20 +411,25 @@ async fn edge_adjacency_impl(
             .iter()
             .filter(|p| p.selected(bounds, anchor.as_ref()))
         {
-            let bytes = store
-                .get_range(&key, page.offset..page.offset + page.len)
-                .await?;
             // Page pruning gets the lookup down to the ONE page that can hold
             // the anchor's run; decoding that page whole would still cost
             // O(page_rows) doc deserializations for an O(degree) answer, which
             // is what made a block-resident traversal 30× a live-resident one
             // (docs/plans/2026-07-28-degree-bound-lookups.md). Push the anchor
             // into the decode so only its own rows are materialized.
-            let decoded = match anchor {
-                Some(node) => varve_index::decode_events_keyed(&bytes, sort_key, &|k| k == node)?,
-                None => decode_events(&bytes)?,
-            };
-            stats.record_page(decoded.len());
+            let admits = |k: Iid| anchor == Some(k);
+            let narrow: Option<(varve_index::SortOrder, &(dyn Fn(Iid) -> bool + Sync))> =
+                anchor.is_some().then_some((sort_key, &admits));
+            let decoded = page_events(
+                store,
+                &page_cache,
+                &stats,
+                &key,
+                page,
+                narrow,
+                anchor.is_none(),
+            )
+            .await?;
             block_events.extend(decoded);
         }
         blocks.push(block_events);
@@ -472,7 +593,8 @@ pub(crate) struct HopSpec<'a> {
 /// prunes those elements' node scans via [`IidSel::Set`].
 pub(crate) struct ReachableEdges {
     pub entries: Vec<AdjacencyEntry>,
-    pub batch: Option<RecordBatch>,
+    /// One snapshot batch per requested label, over the same reachable edges.
+    pub batches: BTreeMap<String, Option<RecordBatch>>,
     pub nodes: std::collections::BTreeSet<Iid>,
 }
 
@@ -503,10 +625,11 @@ pub(crate) struct ReachableEdges {
 /// is the price of supporting the shape at all. `node_budget` counts
 /// expansions either way, so the bound is unchanged.
 ///
-/// `batch_label` selects the single label the batch is built under (all fixed
-/// `Edge` specs share it); pass `None` to skip the batch (a quantified hop
-/// needs only `entries`, and skipping avoids cloning every surviving edge's
-/// event list).
+/// `batch_labels` lists the labels to build batches under — one batch per
+/// distinct label, each over the same reachable edge set, so a fixed path
+/// whose hops carry different labels is served per hop. `None` skips the
+/// batches (a quantified hop needs only `entries`, and skipping avoids
+/// cloning every surviving edge's event list).
 ///
 /// `edge_visible` makes the BFS security-aware: when a principal's edge read
 /// grants are name-scoped, each per-node adjacency lookup skips edges
@@ -524,7 +647,7 @@ pub(crate) async fn reachable_edges(
     graph: &str,
     anchor: Iid,
     hops: &[HopSpec<'_>],
-    batch_label: Option<&str>,
+    batch_labels: Option<&[&str]>,
     edge_visible: Option<&std::collections::BTreeSet<String>>,
     bounds: &TemporalBounds,
     node_budget: usize,
@@ -547,7 +670,7 @@ pub(crate) async fn reachable_edges(
     // can re-encounter the same edge). `BTreeMap` keeps batch rows in a stable
     // iid order (deterministic output).
     let mut edge_events: BTreeMap<Iid, Vec<Event>> = BTreeMap::new();
-    let collect = batch_label.is_some();
+    let collect = batch_labels.is_some();
     for hop in hops {
         if frontier.is_empty() {
             break;
@@ -607,26 +730,28 @@ pub(crate) async fn reachable_edges(
     entries.sort_by_key(|e| (e.node, e.neighbor, e.edge, e.valid_from, e.system_from));
     entries.dedup();
 
-    let batch = match batch_label {
-        Some(label) => {
-            let single = LabelFilter::Single(label);
-            let filter = match edge_visible {
-                Some(allowed) => LabelFilter::Visible {
-                    base: &single,
-                    allowed,
-                },
-                None => LabelFilter::Single(label),
-            };
-            snapshot_entities(
-                edge_events
-                    .iter()
-                    .map(|(iid, events)| (*iid, events.as_slice())),
-                filter,
-                bounds,
-            )?
+    let mut batches = BTreeMap::new();
+    for label in batch_labels.unwrap_or_default() {
+        if batches.contains_key(*label) {
+            continue;
         }
-        None => None,
-    };
+        let single = LabelFilter::Single(label);
+        let filter = match edge_visible {
+            Some(allowed) => LabelFilter::Visible {
+                base: &single,
+                allowed,
+            },
+            None => LabelFilter::Single(label),
+        };
+        let batch = snapshot_entities(
+            edge_events
+                .iter()
+                .map(|(iid, events)| (*iid, events.as_slice())),
+            filter,
+            bounds,
+        )?;
+        batches.insert((*label).to_string(), batch);
+    }
     let mut nodes = std::collections::BTreeSet::from([anchor]);
     for entry in &entries {
         nodes.insert(entry.node);
@@ -634,7 +759,7 @@ pub(crate) async fn reachable_edges(
     }
     Ok(ReachableEdges {
         entries,
-        batch,
+        batches,
         nodes,
     })
 }
@@ -876,6 +1001,7 @@ mod tests {
                     data_len,
                 },
                 pages: Arc::new(block.pages),
+                labels: Some(Arc::new(block.labels)),
             });
         }
         for e in live_events {
@@ -975,6 +1101,7 @@ mod tests {
                 data_len: pages.iter().map(|page| page.len).sum(),
             },
             pages: Arc::new(pages),
+            labels: None,
         });
         let mut graphs = GraphsState::new();
         graphs.graphs.insert(DEFAULT_GRAPH.to_string(), table);
@@ -1047,6 +1174,7 @@ mod tests {
                 data_len: block.pages.iter().map(|page| page.len).sum(),
             },
             pages: Arc::new(block.pages),
+            labels: Some(Arc::new(block.labels)),
         });
         let mut graphs = GraphsState::new();
         graphs.graphs.insert(DEFAULT_GRAPH.to_string(), table);
