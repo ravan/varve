@@ -334,6 +334,12 @@ fn sections() -> Vec<Section> {
                     default: code(250_000),
                     description: "Adjacency-edge budget for general traversal before it aborts.",
                 },
+                Entry {
+                    key: "decoded_page_cache_bytes",
+                    r#type: "byte size",
+                    default: iec(256 * 1024 * 1024),
+                    description: "Memory budget for decoded block pages. Repeat scans of the same page skip the Arrow decode. `\"0B\"` disables.",
+                },
             ],
         },
         Section {

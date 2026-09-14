@@ -158,29 +158,25 @@ pub(crate) async fn merged_snapshot(
     //    per-entity grouping/reversal/concat with the live tail is
     //    `varve_index::merge_sources`'s job (decision 9), shared with the
     //    flush-equivalence property test.
-    let mut blocks: Vec<Vec<Event>> = Vec::new();
-    for trie in &tries {
-        let data_key = keys::data_key(graph, kind.name(), &trie.entry.trie_key);
-        let mut block_events: Vec<Event> = Vec::new();
+    let admits = |iid: Iid| sel.admits(&iid);
+    let narrow: Option<(varve_index::SortOrder, &(dyn Fn(Iid) -> bool + Sync))> = sel
+        .is_narrow()
+        .then_some((varve_index::SortOrder::ByIid, &admits));
+    let (page_cache, stats) = (&*page_cache, &*stats);
+    let mut fetches = Vec::new();
+    for (block, trie) in tries.iter().enumerate() {
+        let data_key = Arc::new(keys::data_key(graph, kind.name(), &trie.entry.trie_key));
         for page in trie.pages.iter().filter(|p| sel.selects_page(p, bounds)) {
-            let admits = |iid: Iid| sel.admits(&iid);
-            let narrow: Option<(varve_index::SortOrder, &(dyn Fn(Iid) -> bool + Sync))> = sel
-                .is_narrow()
-                .then_some((varve_index::SortOrder::ByIid, &admits));
-            let decoded = page_events(
-                store,
-                &page_cache,
-                &stats,
-                &data_key,
-                page,
-                narrow,
-                sel.decode_whole(page),
-            )
-            .await?;
-            block_events.extend(decoded);
+            let data_key = Arc::clone(&data_key);
+            let decode_whole = sel.decode_whole(page);
+            fetches.push(async move {
+                page_events(store, page_cache, stats, &data_key, page, narrow, decode_whole)
+                    .await
+                    .map(|events| (block, events))
+            });
         }
-        blocks.push(block_events);
     }
+    let blocks = collect_blocks(tries.len(), fetches).await?;
 
     // 3. Merge persisted blocks with the committed live tail and then the
     //    statement overlay, which is newest within a program.
@@ -218,6 +214,30 @@ fn label_candidates(
         set.extend(overlay.iids_with_any_label(needed));
     }
     Some(set)
+}
+
+/// Concurrent page reads in flight per scan. Bounds the burst against the
+/// object store on a wide full scan; a point lookup's handful of pages all
+/// go out at once.
+const PAGE_FETCH_CONCURRENCY: usize = 16;
+
+/// Runs the page fetches concurrently (bounded) and regroups the results into
+/// one Vec per block. `buffered` yields in submission order, so file order
+/// within a block and block order across tries both survive.
+async fn collect_blocks<F>(blocks: usize, fetches: Vec<F>) -> Result<Vec<Vec<Event>>, EngineError>
+where
+    F: std::future::Future<Output = Result<(usize, Vec<Event>), EngineError>>,
+{
+    use futures::{StreamExt, TryStreamExt};
+    let pages: Vec<(usize, Vec<Event>)> = futures::stream::iter(fetches)
+        .buffered(PAGE_FETCH_CONCURRENCY)
+        .try_collect()
+        .await?;
+    let mut out: Vec<Vec<Event>> = (0..blocks).map(|_| Vec::new()).collect();
+    for (block, events) in pages {
+        out[block].extend(events);
+    }
+    Ok(out)
 }
 
 /// One page read through the decoded-page cache. A hit is filtered by
@@ -423,38 +443,38 @@ async fn edge_adjacency_impl(
         AdjDirection::Out => varve_index::SortOrder::BySrc,
         AdjDirection::In => varve_index::SortOrder::ByDst,
     };
-    let mut blocks: Vec<Vec<Event>> = Vec::new();
-    for trie in &tries {
-        let key = keys::adj_data_key(graph, EDGES_TABLE, family, &trie.entry.trie_key);
-        let mut block_events = Vec::new();
+    // Page pruning gets the lookup down to the ONE page that can hold
+    // the anchor's run; decoding that page whole would still cost
+    // O(page_rows) doc deserializations for an O(degree) answer, which
+    // is what made a block-resident traversal 30× a live-resident one
+    // (docs/plans/2026-07-28-degree-bound-lookups.md). Push the anchor
+    // into the decode so only its own rows are materialized.
+    let admits = |k: Iid| anchor == Some(k);
+    let narrow: Option<(varve_index::SortOrder, &(dyn Fn(Iid) -> bool + Sync))> =
+        anchor.is_some().then_some((sort_key, &admits));
+    let (page_cache, stats) = (&*page_cache, &*stats);
+    let mut fetches = Vec::new();
+    for (block, trie) in tries.iter().enumerate() {
+        let key = Arc::new(keys::adj_data_key(
+            graph,
+            EDGES_TABLE,
+            family,
+            &trie.entry.trie_key,
+        ));
         for page in trie
             .pages
             .iter()
             .filter(|p| p.selected(bounds, anchor.as_ref()))
         {
-            // Page pruning gets the lookup down to the ONE page that can hold
-            // the anchor's run; decoding that page whole would still cost
-            // O(page_rows) doc deserializations for an O(degree) answer, which
-            // is what made a block-resident traversal 30× a live-resident one
-            // (docs/plans/2026-07-28-degree-bound-lookups.md). Push the anchor
-            // into the decode so only its own rows are materialized.
-            let admits = |k: Iid| anchor == Some(k);
-            let narrow: Option<(varve_index::SortOrder, &(dyn Fn(Iid) -> bool + Sync))> =
-                anchor.is_some().then_some((sort_key, &admits));
-            let decoded = page_events(
-                store,
-                &page_cache,
-                &stats,
-                &key,
-                page,
-                narrow,
-                anchor.is_none(),
-            )
-            .await?;
-            block_events.extend(decoded);
+            let key = Arc::clone(&key);
+            fetches.push(async move {
+                page_events(store, page_cache, stats, &key, page, narrow, anchor.is_none())
+                    .await
+                    .map(|events| (block, events))
+            });
         }
-        blocks.push(block_events);
     }
+    let blocks = collect_blocks(tries.len(), fetches).await?;
 
     // 3. Merge (one Vec per edge iid), resolve per edge, keep edges whose
     //    visible version is a Put carrying `label`, emit sorted entries.
