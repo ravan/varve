@@ -2224,8 +2224,9 @@ impl Db {
     /// the bounded reachable-edge BFS provably covers with a SUPERSET of the
     /// edges that can lie on a qualifying path, and if so build the pruned
     /// input. Returns `None` — the caller then uses the full-scan path
-    /// verbatim — for anything not confidently covered (unanchored start, a
-    /// mix of fixed and quantified hops, a bare edge variable in `RETURN`, …). Correctness over speed: the fast path is
+    /// verbatim — for anything not confidently covered (no `_id`-anchored end,
+    /// a mix of fixed and quantified hops, a bare edge variable in `RETURN`,
+    /// …). Correctness over speed: the fast path is
     /// a layer over the unchanged, already-correct scan, never a replacement,
     /// so an unsure verdict simply falls back.
     ///
@@ -2243,6 +2244,14 @@ impl Db {
     /// `Visible` filter as the full edge scan, and the quantified adjacency
     /// keeps only hops with both endpoints visible, computed over the
     /// reachable set instead of the whole graph.
+    ///
+    /// A fixed path may be anchored at either end. The BFS walks the hops in
+    /// reverse (each direction flipped) from an end anchor, which collects the
+    /// same kind of superset: every node on a qualifying path is reachable from
+    /// both of its ends. When both ends are anchored, the one whose first hop
+    /// fans out less is the start — one adjacency read per end decides it. This
+    /// is what keeps a `(one {_id})-->...-->(other {_id})` lookup from walking
+    /// the whole neighbourhood of the wide end just to find the narrow one.
     async fn plan_fast_path(
         &self,
         graph: &str,
@@ -2253,18 +2262,24 @@ impl Db {
         security: Option<&GraphGrants>,
     ) -> Result<Option<FastPath>, EngineError> {
         use varve_gql::ast::Direction;
-        // Require a point-anchored start node and at least one hop.
-        let Some(varve_plan::ScanSpec {
-            kind:
-                varve_plan::SpecKind::Node {
-                    iid_point: Some(anchor),
-                    ..
-                },
-            ..
-        }) = specs.first()
-        else {
-            return Ok(None);
+        // Require a point-anchored node at one end (or both) and at least one hop.
+        let point_of = |spec: Option<&varve_plan::ScanSpec>| match spec {
+            Some(varve_plan::ScanSpec {
+                kind:
+                    varve_plan::SpecKind::Node {
+                        iid_point: Some(iid),
+                        ..
+                    },
+                ..
+            }) => Some(*iid),
+            _ => None,
         };
+        let start_anchor = point_of(specs.first());
+        let end_anchor = point_of(specs.last());
+        if start_anchor.is_none() && end_anchor.is_none() {
+            return Ok(None);
+        }
+        let anchors: BTreeSet<Iid> = start_anchor.into_iter().chain(end_anchor).collect();
         // `match_shape`, not `degenerate_query`: pruning only needs the MATCH
         // structure, and `RETURN` modifiers (`DISTINCT`/`ORDER BY`/`SKIP`/
         // `LIMIT`) are applied after the pattern binds, so they cannot change
@@ -2276,7 +2291,6 @@ impl Db {
         let Ok(query) = varve_plan::exec::match_shape(q) else {
             return Ok(None);
         };
-        let anchor = *anchor;
         let Some(path) = query.paths.first() else {
             return Ok(None);
         };
@@ -2295,7 +2309,8 @@ impl Db {
         // adjacency yields identical walks to the full one. No edge doc columns
         // exist for a quantified hop (adjacency is iid-only), so no schema
         // check is needed.
-        if specs.len() == 3 {
+        // A quantified walk is only ever driven from its start node.
+        if let (3, Some(anchor)) = (specs.len(), start_anchor) {
             if let varve_plan::SpecKind::Expand {
                 label,
                 direction,
@@ -2411,7 +2426,7 @@ impl Db {
             if labels.iter().any(|l| !sec.read_edges.allows(l)) {
                 return Ok(Some(FastPath::FixedEdges {
                     batches: Arc::new(BTreeMap::new()),
-                    nodes: Arc::new(BTreeSet::from([anchor])),
+                    nodes: Arc::new(anchors),
                 }));
             }
         }
@@ -2485,6 +2500,36 @@ impl Db {
         let edge_visible = security
             .filter(|sec| !sec.read_edges.wildcard)
             .map(|sec| &sec.read_edges.names);
+        // Walked from the end anchor, the path is the same hops in reverse,
+        // each taken from its other endpoint.
+        fn reversed<'h>(hops: &[crate::scan::HopSpec<'h>]) -> Vec<crate::scan::HopSpec<'h>> {
+            hops.iter()
+                .rev()
+                .map(|hop| crate::scan::HopSpec {
+                    direction: hop.direction.flip(),
+                    ..*hop
+                })
+                .collect()
+        }
+        let (anchor, hops) = match (start_anchor, end_anchor) {
+            (Some(start), None) => (start, hops),
+            (None, Some(end)) => (end, reversed(&hops)),
+            (Some(start), Some(end)) => {
+                let backwards = reversed(&hops);
+                let forward_fan = self
+                    .first_hop_fan_out(graph, start, &hops[0], edge_visible, bounds)
+                    .await?;
+                let backward_fan = self
+                    .first_hop_fan_out(graph, end, &backwards[0], edge_visible, bounds)
+                    .await?;
+                if backward_fan < forward_fan {
+                    (end, backwards)
+                } else {
+                    (start, hops)
+                }
+            }
+            (None, None) => return Ok(None),
+        };
         let reachable = crate::scan::reachable_edges(
             &self.inner.state,
             &self.inner.store,
@@ -2503,6 +2548,42 @@ impl Db {
             batches: Arc::new(reachable.batches),
             nodes: Arc::new(reachable.nodes),
         }))
+    }
+
+    /// How many edges `hop` leaves `anchor` by: the cost signal that picks which
+    /// anchored end a fixed path is walked from. A fan-out past the adjacency
+    /// budget counts as unbounded rather than failing the query: the other end
+    /// may still be cheap, and if it is not, the BFS reports the budget itself.
+    async fn first_hop_fan_out(
+        &self,
+        graph: &str,
+        anchor: Iid,
+        hop: &crate::scan::HopSpec<'_>,
+        edge_visible: Option<&BTreeSet<String>>,
+        bounds: &varve_types::TemporalBounds,
+    ) -> Result<usize, EngineError> {
+        let budget = self.inner.query_limits.traversal_adjacency_budget;
+        match crate::scan::edge_adjacency(
+            &self.inner.state,
+            &self.inner.store,
+            graph,
+            hop.label,
+            hop.props,
+            hop.direction,
+            Some(anchor),
+            bounds,
+            Some(budget),
+            edge_visible,
+            None,
+        )
+        .await
+        {
+            Ok(entries) => Ok(entries.len()),
+            Err(EngineError::Plan(varve_plan::PlanError::DataFusion(
+                datafusion::error::DataFusionError::ResourcesExhausted(_),
+            ))) => Ok(usize::MAX),
+            Err(e) => Err(e),
+        }
     }
 
     /// Report-only capability probe (spec §12, D5): classifies whether the

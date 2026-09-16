@@ -951,3 +951,90 @@ async fn mixed_label_fixed_path_prunes_and_matches_the_full_scan() {
         .unwrap();
     assert_eq!(ids(&props), BTreeSet::new());
 }
+
+/// A hub (`_id` 0) with 31 spokes, each spoke leading on to one leaf: the
+/// shape of a wide release fanning out to the documents it contains. Walked
+/// from the hub, a two-hop fixed path reaches all 62 other nodes; walked from
+/// a leaf it reaches 2.
+async fn build_hub_graph(root: &Path, reads: &Arc<Mutex<Vec<String>>>) {
+    let db = Db::open_with(&counting_config(root), &registries(root, reads))
+        .await
+        .unwrap();
+    for id in 0..PEOPLE {
+        db.execute(&format!("INSERT (:Person {{_id: {id}}})"))
+            .await
+            .unwrap();
+    }
+    for spoke in 1..=31 {
+        for (src, dst) in [(0, spoke), (spoke, spoke + 31)] {
+            db.execute(&format!(
+                "MATCH (a:Person {{_id: {src}}}), (b:Person {{_id: {dst}}}) \
+                 INSERT (a)-[:KNOWS]->(b)"
+            ))
+            .await
+            .unwrap();
+        }
+    }
+    wait_for_manifest_count(root, PEOPLE as usize).await;
+    drop(db);
+}
+
+/// Both ends anchored: the walk must start at the narrow end, not at the hub
+/// the pattern happens to name first.
+#[tokio::test]
+async fn both_ends_anchored_walks_from_the_narrow_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    build_hub_graph(dir.path(), &reads).await;
+    let db = fresh_db(dir.path(), &reads).await;
+
+    let batches = db
+        .query(
+            "MATCH (hub:Person {_id: 0})-[:KNOWS]->(spoke:Person)-[:KNOWS]->(leaf:Person {_id: 40}) \
+             RETURN spoke._id",
+        )
+        .await
+        .unwrap();
+    assert_eq!(ids(&batches), BTreeSet::from([9]));
+    assert_pruned(&reads, "hub-first two-hop with an anchored leaf");
+}
+
+/// Only the far end anchored: previously a full scan, now walked backwards
+/// from that anchor.
+#[tokio::test]
+async fn end_anchored_only_still_prunes() {
+    let dir = tempfile::tempdir().unwrap();
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    build_hub_graph(dir.path(), &reads).await;
+    let db = fresh_db(dir.path(), &reads).await;
+
+    let batches = db
+        .query(
+            "MATCH (hub:Person)-[:KNOWS]->(spoke:Person)-[:KNOWS]->(leaf:Person {_id: 40}) \
+             RETURN hub._id, spoke._id",
+        )
+        .await
+        .unwrap();
+    assert_eq!(ids(&batches), BTreeSet::from([0]));
+    assert_pruned(&reads, "unanchored-start two-hop with an anchored leaf");
+}
+
+/// Inbound hops walked backwards: only the hub, named LAST, is anchored, so the
+/// walk starts there with each `<-` hop flipped to an `Out` lookup. A wrong
+/// flip would find nothing; the full scan finds every (spoke, leaf) pair.
+#[tokio::test]
+async fn reversed_walk_flips_each_hop_direction() {
+    let dir = tempfile::tempdir().unwrap();
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    build_hub_graph(dir.path(), &reads).await;
+    let db = fresh_db(dir.path(), &reads).await;
+
+    let batches = db
+        .query(
+            "MATCH (leaf:Person)<-[:KNOWS]-(spoke:Person)<-[:KNOWS]-(hub:Person {_id: 0}) \
+             RETURN leaf._id",
+        )
+        .await
+        .unwrap();
+    assert_eq!(ids(&batches), (32..=62).collect::<BTreeSet<i64>>());
+}

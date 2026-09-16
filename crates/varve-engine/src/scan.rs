@@ -328,6 +328,16 @@ pub(crate) enum AdjDirection {
     In,
 }
 
+impl AdjDirection {
+    /// The same hop walked from its other endpoint.
+    pub(crate) fn flip(self) -> Self {
+        match self {
+            AdjDirection::Out => AdjDirection::In,
+            AdjDirection::In => AdjDirection::Out,
+        }
+    }
+}
+
 /// One traversable edge *version* at the query bounds: `node` is the
 /// anchor-side endpoint (src for `Out`, dst for `In`), `neighbor` the other
 /// endpoint, `edge` the edge's own iid, and the four instants are the visible
