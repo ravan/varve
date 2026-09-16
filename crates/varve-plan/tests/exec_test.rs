@@ -335,7 +335,7 @@ async fn inline_absent_property_matching_returns_no_iids_not_unknown_column() {
 mod pushdown {
     use std::collections::BTreeMap;
     use varve_gql::ast::{Expr, Literal, Statement};
-    use varve_plan::{effective_bounds, iid_point, scan_specs_for_stmt, SpecKind};
+    use varve_plan::{effective_bounds, iid_point, scan_specs_for_stmt, IidAnchor, SpecKind};
     use varve_types::{Iid, Instant, TemporalDimension, Value};
 
     fn query(gql: &str) -> varve_gql::ast::QueryStmt {
@@ -445,10 +445,85 @@ mod pushdown {
         assert!(matches!(
             &specs[0].kind,
             SpecKind::Node {
-                iid_point: Some(iid),
+                anchor: Some(IidAnchor::Point(iid)),
                 ..
             } if *iid == expected
         ));
+    }
+
+    #[test]
+    fn id_in_list_derives_a_set_anchor() {
+        let derive = |v: Value| Iid::derive("default", "nodes", &v.id_bytes().unwrap());
+        let params = BTreeMap::from([(
+            "ids".to_string(),
+            Value::List(vec![Value::Int(1), Value::Str("x".into())]),
+        )]);
+        let expected: std::collections::BTreeSet<Iid> =
+            [derive(Value::Int(1)), derive(Value::Str("x".into()))].into();
+
+        let q = query("MATCH (p:P) WHERE p._id IN $ids RETURN p.name");
+        let specs = scan_specs_for_stmt(&q, "default", 10, &params).unwrap();
+        assert!(matches!(
+            &specs[0].kind,
+            SpecKind::Node {
+                anchor: Some(IidAnchor::Set(set)),
+                ..
+            } if **set == expected
+        ));
+
+        let q = query("MATCH (p:P) WHERE p._id IN [1, 'x'] RETURN p.name");
+        let specs = scan_specs_for_stmt(&q, "default", 10, &params).unwrap();
+        assert!(matches!(
+            &specs[0].kind,
+            SpecKind::Node {
+                anchor: Some(IidAnchor::Set(set)),
+                ..
+            } if **set == expected
+        ));
+
+        // A point beats a set on the same variable; the IN stays a filter.
+        let q = query("MATCH (p:P) WHERE p._id IN $ids AND p._id = 1 RETURN p.name");
+        let specs = scan_specs_for_stmt(&q, "default", 10, &params).unwrap();
+        assert!(matches!(
+            &specs[0].kind,
+            SpecKind::Node {
+                anchor: Some(IidAnchor::Point(iid)),
+                ..
+            } if *iid == derive(Value::Int(1))
+        ));
+
+        // An empty list selects nothing, like `IN []`.
+        let q = query("MATCH (p:P) WHERE p._id IN [] RETURN p.name");
+        let specs = scan_specs_for_stmt(&q, "default", 10, &params).unwrap();
+        assert!(matches!(
+            &specs[0].kind,
+            SpecKind::Node {
+                anchor: Some(IidAnchor::Set(set)),
+                ..
+            } if set.is_empty()
+        ));
+    }
+
+    #[test]
+    fn id_in_list_with_a_non_id_member_stays_unanchored() {
+        // A Float can never be derived to an iid; dropping it would narrow the
+        // scan past what the filter decides, so the whole pushdown is declined.
+        let params = BTreeMap::from([(
+            "ids".to_string(),
+            Value::List(vec![Value::Int(1), Value::Float(2.0)]),
+        )]);
+        for gql in [
+            "MATCH (p:P) WHERE p._id IN $ids RETURN p.name",
+            "MATCH (p:P) WHERE p._id IN [1, 2.0] RETURN p.name",
+            "MATCH (p:P) WHERE p._id IN [1, p.other] RETURN p.name",
+            "MATCH (p:P) WHERE p.name IN ['a'] RETURN p.name",
+        ] {
+            let specs = scan_specs_for_stmt(&query(gql), "default", 10, &params).unwrap();
+            assert!(
+                matches!(&specs[0].kind, SpecKind::Node { anchor: None, .. }),
+                "{gql}"
+            );
+        }
     }
 
     #[test]

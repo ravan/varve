@@ -220,3 +220,63 @@ async fn local_log_with_memory_storage_is_rejected() {
     assert!(matches!(err, EngineError::VolatileBlockStore), "{err}");
     assert!(err.to_string().contains("[storage]"), "{err}");
 }
+
+/// An `_id IN` anchor over flushed blocks: the set selector prunes node and
+/// adjacency pages, and must still answer exactly like the plain filter.
+#[tokio::test]
+async fn in_list_anchor_reads_flushed_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = Db::open(blocks_config(dir.path(), 4)).await.unwrap();
+        for i in 1..=6 {
+            db.execute(&format!(
+                "INSERT (a:A {{_id: 'a{i}'}}), (b:B {{_id: 'b{i}'}}), \
+                        (a)-[:K {{_id: 'k{i}'}}]->(b)"
+            ))
+            .await
+            .unwrap();
+        }
+        wait_for_flush(dir.path()).await;
+    }
+
+    let db = Db::open(blocks_config(dir.path(), 4)).await.unwrap();
+    let ids = std::collections::BTreeMap::from([(
+        "ids".to_string(),
+        varve_types::Value::List(
+            ["a2", "a5", "nope"]
+                .iter()
+                .map(|s| varve_types::Value::Str(s.to_string()))
+                .collect(),
+        ),
+    )]);
+    let anchored = db
+        .query("MATCH (a:A)-[:K]->(b:B) WHERE a._id IN $ids RETURN b._id AS id")
+        .params(ids)
+        .await
+        .unwrap();
+    let filtered = db
+        .query("MATCH (a:A)-[:K]->(b:B) WHERE a._id = 'a2' OR a._id = 'a5' RETURN b._id AS id")
+        .await
+        .unwrap();
+    assert_eq!(rows(&anchored), 2);
+    let ids_of = |batches: &[varve::RecordBatch]| -> Vec<String> {
+        batches
+            .iter()
+            .flat_map(|b| {
+                let col: &arrow::array::StringArray = b
+                    .column_by_name("id")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref()
+                    .unwrap();
+                (0..arrow::array::Array::len(col))
+                    .map(|i| col.value(i).to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    let (mut anchored, mut filtered) = (ids_of(&anchored), ids_of(&filtered));
+    anchored.sort();
+    filtered.sort();
+    assert_eq!(anchored, filtered);
+}

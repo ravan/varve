@@ -165,6 +165,67 @@ pub fn iid_from_conjuncts(
         .map(|bytes| Iid::derive(graph, table, &bytes))
 }
 
+/// The set a `WHERE <var>._id IN <list>` conjunct pins `var` to: an inline
+/// list of literals/params, or a list-valued parameter. `None` when there is
+/// no such conjunct, or when any member cannot be an id (a Float, a Null, a
+/// nested expression) — the scan then stays wide and the filter still decides.
+pub fn iid_set_from_conjuncts(
+    conjuncts: &[&Expr],
+    var: &str,
+    params: &BTreeMap<String, Value>,
+    graph: &str,
+    table: &str,
+) -> Option<BTreeSet<Iid>> {
+    let values = conjuncts
+        .iter()
+        .find_map(|expr| iid_values_from_in(expr, var, params))?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .id_bytes()
+                .ok()
+                .map(|bytes| Iid::derive(graph, table, &bytes))
+        })
+        .collect()
+}
+
+fn iid_values_from_in(
+    expr: &Expr,
+    var: &str,
+    params: &BTreeMap<String, Value>,
+) -> Option<Vec<Value>> {
+    let Expr::Binary {
+        op: BinaryOp::In,
+        lhs,
+        rhs,
+    } = expr
+    else {
+        return None;
+    };
+    let Expr::Prop {
+        var: prop_var,
+        prop,
+    } = lhs.as_ref()
+    else {
+        return None;
+    };
+    if prop_var != var || prop != "_id" {
+        return None;
+    }
+    match rhs.as_ref() {
+        Expr::List(items) => items
+            .iter()
+            .map(|item| expr_to_iid_value(item, params))
+            .collect(),
+        Expr::Param(name) => match params.get(name) {
+            Some(Value::List(items)) => Some(items.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub fn iid_from_expr(
     expr: &Expr,
     params: &BTreeMap<String, Value>,

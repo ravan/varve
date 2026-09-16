@@ -18,8 +18,8 @@ use crate::expand::{
     CoincidenceAxes, EdgeAdjacency, PathExpandLimits, PathExpandNode, WalkIntervalCols,
 };
 use crate::expr::{
-    iid_from_conjuncts, iid_from_expr, lower_expr, split_conjuncts, ElementCols, ExistsConjunct,
-    Scope,
+    iid_from_conjuncts, iid_from_expr, iid_set_from_conjuncts, lower_expr, split_conjuncts,
+    ElementCols, ExistsConjunct, Scope,
 };
 use crate::functions::{lower_aggregate, session_context, FunctionRegistry};
 use crate::PlanError;
@@ -45,7 +45,7 @@ use varve_types::{Iid, TemporalDimension, Value};
 /// component of an entity's derived IID.
 pub(crate) const DEFAULT_GRAPH: &str = "default";
 /// Nodes table name, for inline-`_id` IID derivation (mirrors the engine's
-/// `NODES_TABLE`; edges never take an iid_point).
+/// `NODES_TABLE`; edges never take an anchor).
 const NODES_TABLE: &str = "nodes";
 /// Fallback path-depth cap for the `LiveTable`-direct [`crate::exec::run_query`]
 /// helper; the engine passes its own `[query] max_path_depth`.
@@ -79,11 +79,23 @@ pub struct ScanSpec {
     pub kind: SpecKind,
 }
 
+/// The entities a node element's `_id` predicate pins its scan to. Pure
+/// access-path narrowing: the predicate is re-applied as a filter afterwards,
+/// so `None` only widens the scan, never the result.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IidAnchor {
+    /// `{_id: x}` or `WHERE v._id = x`: one entity.
+    Point(Iid),
+    /// `WHERE v._id IN [...]` or `IN $list`: a fixed set. Empty is legal and
+    /// selects nothing, exactly as `IN []` matches nothing.
+    Set(Arc<BTreeSet<Iid>>),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SpecKind {
     Node {
         labels: LabelSpec,
-        iid_point: Option<Iid>,
+        anchor: Option<IidAnchor>,
     },
     Edge {
         label: String,
@@ -619,35 +631,35 @@ fn node_spec(
         var: element_var(node.var.as_deref(), idx),
         kind: SpecKind::Node {
             labels: node.labels.clone(),
-            iid_point: node_iid_point(node, graph, where_clause, params),
+            anchor: node_anchor(node, graph, where_clause, params),
         },
     })
 }
 
 /// IID pushdown for a node (spec §10): an inline `{_id: <lit>}` prop, else a
-/// `WHERE <this var>._id = <lit>` equality, pins the scan to one entity. Pure
-/// access-path optimization — the same equality is re-applied as a filter, so
-/// dropping to `None` only widens the scan, never the result.
-fn node_iid_point(
+/// `WHERE <this var>._id = <lit>` equality, pins the scan to one entity; else
+/// a `WHERE <this var>._id IN <list>` pins it to that set. A point wins over a
+/// set when both are present (narrower, and the IN is re-applied as a filter).
+fn node_anchor(
     node: &NodePattern,
     graph: &str,
     where_clause: &Option<Expr>,
     params: &BTreeMap<String, Value>,
-) -> Option<Iid> {
+) -> Option<IidAnchor> {
     for (k, v) in &node.props {
         if k == "_id" {
             if let Some(iid) = iid_from_expr(v, params, graph, NODES_TABLE) {
-                return Some(iid);
+                return Some(IidAnchor::Point(iid));
             }
         }
     }
-    if let (Some(uvar), Some(where_clause)) = (node.var.as_deref(), where_clause.as_ref()) {
-        let (_, rest) = split_conjuncts(Some(where_clause));
-        if let Some(iid) = iid_from_conjuncts(&rest, uvar, params, graph, NODES_TABLE) {
-            return Some(iid);
-        }
+    let (uvar, where_clause) = (node.var.as_deref()?, where_clause.as_ref()?);
+    let (_, rest) = split_conjuncts(Some(where_clause));
+    if let Some(iid) = iid_from_conjuncts(&rest, uvar, params, graph, NODES_TABLE) {
+        return Some(IidAnchor::Point(iid));
     }
-    None
+    iid_set_from_conjuncts(&rest, uvar, params, graph, NODES_TABLE)
+        .map(|set| IidAnchor::Set(Arc::new(set)))
 }
 
 fn edge_spec(
@@ -2750,7 +2762,7 @@ mod tests {
             specs[0].kind,
             SpecKind::Node {
                 labels: LabelSpec::All(vec!["A".to_string(), "B".to_string()]),
-                iid_point: None,
+                anchor: None,
             }
         );
     }

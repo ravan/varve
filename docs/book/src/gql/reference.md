@@ -246,6 +246,10 @@ MATCH (v:Vulnerability) WHERE v.vulnID IN $names RETURN v.vulnID
 *(run with `params = {"names": ["cve-2018-11040", "cve-2026-46600"]}`; an empty list matches
 nothing)*
 
+`WHERE v._id IN $ids` (inline or parameter) reads only the listed entities and seeds an
+anchored traversal from them, exactly as `WHERE v._id = $id` does for one. Reads of a set of
+known ids should be written this way rather than as a label scan filtered afterwards.
+
 ## CASE
 
 ```gql

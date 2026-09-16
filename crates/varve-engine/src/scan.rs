@@ -63,6 +63,15 @@ impl IidSel {
         }
     }
 
+    /// The selected iids; `None` for `All`.
+    pub(crate) fn members(&self) -> Option<Vec<Iid>> {
+        match self {
+            IidSel::All => None,
+            IidSel::Point(point) => Some(vec![*point]),
+            IidSel::Set(set) => Some(set.iter().copied().collect()),
+        }
+    }
+
     /// `All` reads a page whole; a point or set admits only its own rows.
     pub(crate) fn is_narrow(&self) -> bool {
         !matches!(self, IidSel::All)
@@ -370,18 +379,19 @@ fn traversal_budget_exhausted(kind: &str, budget: usize) -> EngineError {
 }
 
 /// Visible-edge adjacency at `bounds` (slice 6, decision 11): the live edge
-/// tail (narrowed by the live adjacency views when `anchor` is `Some`) merged
-/// with the persisted adjacency family, whose pages are pruned by the anchor
-/// via `PageMeta::selected` (the anchor is the family's sort-key point) and
-/// then filtered exactly. Each surviving edge is resolved at `bounds`; edges
+/// tail (narrowed by the live adjacency views when `sel` is narrow) merged
+/// with the persisted adjacency family, whose pages are pruned by `sel` via
+/// [`IidSel::selects_page`] (the selected nodes are the family's sort-key
+/// points) and then filtered exactly. A set selector answers one BFS level
+/// in a single read instead of one read per frontier node. Each surviving edge is resolved at `bounds`; edges
 /// whose visible version is a `Put` become one entry when `label` is `None`
 /// (any label matches — the label-blind variant used by `incident_edges`) or
 /// when `label` is `Some` and one of the edge's labels matches it exactly.
 /// Output is sorted by `(node, neighbor, edge)` and — because `merge_sources`
 /// keys by edge iid — carries exactly one entry per edge. Deterministic.
 ///
-/// Correctness contract: for any anchor, the anchored result equals the full
-/// (`anchor == None`) result filtered to that node.
+/// Correctness contract: for any selector, the narrowed result equals the
+/// full (`IidSel::All`) result filtered to the selected nodes.
 ///
 /// When `collect_events` is set, the surviving (matched) edges' merged event
 /// lists are returned alongside the entries — the raw rows the task-12
@@ -395,13 +405,14 @@ async fn edge_adjacency_impl(
     label: Option<&str>,
     props: &[(String, Value)],
     direction: AdjDirection,
-    anchor: Option<Iid>,
+    sel: &IidSel,
     bounds: &TemporalBounds,
     collect_events: bool,
     adjacency_budget: Option<usize>,
     edge_visible: Option<&std::collections::BTreeSet<String>>,
     overlay: Option<&Overlay>,
 ) -> Result<(Vec<AdjacencyEntry>, Vec<(Iid, Vec<Event>)>), EngineError> {
+    let seeds = sel.members();
     // 1. One read lock: live edge events (narrowed by the live adjacency
     //    views when anchored) + the persisted family's trie list.
     let (live_events, tries, stats) = {
@@ -410,17 +421,20 @@ async fn edge_adjacency_impl(
             .graph(graph)
             .ok_or_else(|| EngineError::UnknownGraph(graph.to_string()))?;
         let tail_events = |live: &varve_index::LiveTable| -> Vec<(Iid, Vec<Event>)> {
-            match anchor {
-                Some(node) => {
-                    let edge_iids: Vec<Iid> = match direction {
-                        AdjDirection::Out => live.out_edges(&node).cloned().collect(),
-                        AdjDirection::In => live.in_edges(&node).cloned().collect(),
-                    };
-                    edge_iids
-                        .into_iter()
-                        .filter_map(|e| live.events_for(&e).map(|ev| (e, ev.to_vec())))
-                        .collect()
-                }
+            match &seeds {
+                // An edge has one src and one dst, so no two seeds share an
+                // edge in one direction: no dedup needed across seeds.
+                Some(nodes) => nodes
+                    .iter()
+                    .flat_map(|node| {
+                        let edge_iids: Vec<Iid> = match direction {
+                            AdjDirection::Out => live.out_edges(node).cloned().collect(),
+                            AdjDirection::In => live.in_edges(node).cloned().collect(),
+                        };
+                        edge_iids
+                    })
+                    .filter_map(|e| live.events_for(&e).map(|ev| (e, ev.to_vec())))
+                    .collect(),
                 None => live
                     .entities()
                     .map(|(iid, ev)| (*iid, ev.to_vec()))
@@ -449,17 +463,20 @@ async fn edge_adjacency_impl(
     let overlay_events: Vec<(Iid, Vec<Event>)> = overlay
         .map(|overlay| {
             let live = &overlay.edges;
-            match anchor {
-                Some(node) => {
-                    let edge_iids: Vec<Iid> = match direction {
-                        AdjDirection::Out => live.out_edges(&node).cloned().collect(),
-                        AdjDirection::In => live.in_edges(&node).cloned().collect(),
-                    };
-                    edge_iids
-                        .into_iter()
-                        .filter_map(|e| live.events_for(&e).map(|ev| (e, ev.to_vec())))
-                        .collect()
-                }
+            match &seeds {
+                // An edge has one src and one dst, so no two seeds share an
+                // edge in one direction: no dedup needed across seeds.
+                Some(nodes) => nodes
+                    .iter()
+                    .flat_map(|node| {
+                        let edge_iids: Vec<Iid> = match direction {
+                            AdjDirection::Out => live.out_edges(node).cloned().collect(),
+                            AdjDirection::In => live.in_edges(node).cloned().collect(),
+                        };
+                        edge_iids
+                    })
+                    .filter_map(|e| live.events_for(&e).map(|ev| (e, ev.to_vec())))
+                    .collect(),
                 None => live
                     .entities()
                     .map(|(iid, ev)| (*iid, ev.to_vec()))
@@ -468,9 +485,9 @@ async fn edge_adjacency_impl(
         })
         .unwrap_or_default();
 
-    // 2. Persisted family pages, pruned by the anchor as the sort-key point
-    //    (decision 4 — min_iid/max_iid on adj pages record src/dst), then
-    //    filtered exactly to the anchor endpoint.
+    // 2. Persisted family pages, pruned by the selected nodes as sort-key
+    //    points (decision 4 — min_iid/max_iid on adj pages record src/dst),
+    //    then filtered exactly to those endpoints.
     let family = match direction {
         AdjDirection::Out => varve_storage::ADJ_OUT,
         AdjDirection::In => varve_storage::ADJ_IN,
@@ -486,17 +503,15 @@ async fn edge_adjacency_impl(
     // is what made a block-resident traversal 30× a live-resident one
     // (docs/plans/2026-07-28-degree-bound-lookups.md). Push the anchor
     // into the decode so only its own rows are materialized.
-    let admits = |k: Iid| anchor == Some(k);
+    let admits = |k: Iid| sel.admits(&k);
     let narrow: Option<(varve_index::SortOrder, &(dyn Fn(Iid) -> bool + Sync))> =
-        anchor.is_some().then_some((sort_key, &admits));
+        sel.is_narrow().then_some((sort_key, &admits));
     let (page_cache, stats) = (&*page_cache, &*stats);
     let mut fetches = Vec::new();
     for (block, trie) in tries.iter().enumerate() {
-        if let (Some(node), Some(filter)) = (anchor.as_ref(), trie.keys.as_deref()) {
-            if !filter.may_contain(node) {
-                stats.record_skipped_block();
-                continue;
-            }
+        if sel.filtered_out(trie.keys.as_deref()) {
+            stats.record_skipped_block();
+            continue;
         }
         let key = Arc::new(keys::adj_data_key(
             graph,
@@ -504,24 +519,13 @@ async fn edge_adjacency_impl(
             family,
             &trie.entry.trie_key,
         ));
-        for page in trie
-            .pages
-            .iter()
-            .filter(|p| p.selected(bounds, anchor.as_ref()))
-        {
+        for page in trie.pages.iter().filter(|p| sel.selects_page(p, bounds)) {
             let key = Arc::clone(&key);
+            let decode_whole = sel.decode_whole(page);
             fetches.push(async move {
-                page_events(
-                    store,
-                    page_cache,
-                    stats,
-                    &key,
-                    page,
-                    narrow,
-                    anchor.is_none(),
-                )
-                .await
-                .map(|events| (block, events))
+                page_events(store, page_cache, stats, &key, page, narrow, decode_whole)
+                    .await
+                    .map(|events| (block, events))
             });
         }
     }
@@ -607,7 +611,7 @@ pub(crate) async fn edge_adjacency(
     label: &str,
     props: &[(String, Value)],
     direction: AdjDirection,
-    anchor: Option<Iid>,
+    sel: &IidSel,
     bounds: &TemporalBounds,
     adjacency_budget: Option<usize>,
     edge_visible: Option<&std::collections::BTreeSet<String>>,
@@ -620,7 +624,7 @@ pub(crate) async fn edge_adjacency(
         Some(label),
         props,
         direction,
-        anchor,
+        sel,
         bounds,
         false,
         adjacency_budget,
@@ -652,7 +656,7 @@ pub(crate) async fn incident_edges(
         None,
         &[],
         direction,
-        Some(node),
+        &IidSel::Point(node),
         bounds,
         false,
         None,
@@ -690,9 +694,11 @@ pub(crate) struct ReachableEdges {
     pub nodes: std::collections::BTreeSet<Iid>,
 }
 
-/// Anchor-reachable edge pruning (task 12): a bounded BFS from `anchor`
-/// collecting the SUPERSET of every edge that can lie on a qualifying path
-/// within the hop bound. `hops[i]` drives level `i`.
+/// Anchor-reachable edge pruning (task 12): a bounded BFS from the `seeds`
+/// (one `_id` point, or the members of an `_id IN` set) collecting the
+/// SUPERSET of every edge that can lie on a qualifying path within the hop
+/// bound. `hops[i]` drives level `i`, and each level is one set-selected
+/// adjacency read for the whole frontier.
 ///
 /// Superset proof (layered, `hops.len()` levels). Let `F0 = {anchor}` and
 /// `F(i+1)` = the endpoints reached by expanding every node of `Fi` under
@@ -737,7 +743,7 @@ pub(crate) async fn reachable_edges(
     state: &Arc<RwLock<GraphsState>>,
     store: &Arc<dyn ObjectStore>,
     graph: &str,
-    anchor: Iid,
+    seeds: &std::collections::BTreeSet<Iid>,
     hops: &[HopSpec<'_>],
     batch_labels: Option<&[&str]>,
     edge_visible: Option<&std::collections::BTreeSet<String>>,
@@ -746,7 +752,7 @@ pub(crate) async fn reachable_edges(
     adjacency_budget: usize,
     overlay: Option<&Overlay>,
 ) -> Result<ReachableEdges, EngineError> {
-    let mut frontier: Vec<Iid> = vec![anchor];
+    let mut frontier: std::collections::BTreeSet<Iid> = seeds.clone();
     // Sound only when one expansion serves every level — see the dedup note on
     // this function. `props` compare by value; `HopSpec` is `Copy`, so this is
     // a cheap scan of at most `hops.len()` entries.
@@ -767,50 +773,45 @@ pub(crate) async fn reachable_edges(
         if frontier.is_empty() {
             break;
         }
-        let mut next_frontier: Vec<Iid> = Vec::new();
-        let mut next_seen: HashSet<Iid> = HashSet::new();
         // Heterogeneous hops start each level with a fresh dedup set, so a node
         // already expanded under a DIFFERENT family is expanded again here.
         if !homogeneous {
             expanded.clear();
         }
-        for node in std::mem::take(&mut frontier) {
-            if !expanded.insert(node) {
-                continue;
-            }
-            expansions += 1;
-            if expansions > node_budget {
-                return Err(traversal_budget_exhausted("node", node_budget));
-            }
-            let (node_entries, node_edges) = edge_adjacency_impl(
-                state,
-                store,
-                graph,
-                Some(hop.label),
-                hop.props,
-                hop.direction,
-                Some(node),
-                bounds,
-                collect,
-                Some(adjacency_budget),
-                edge_visible,
-                overlay,
-            )
-            .await?;
-            if entries.len().saturating_add(node_entries.len()) > adjacency_budget {
-                return Err(traversal_budget_exhausted("adjacency", adjacency_budget));
-            }
-            for e in &node_entries {
-                if next_seen.insert(e.neighbor) {
-                    next_frontier.push(e.neighbor);
-                }
-            }
-            for (edge, events) in node_edges {
-                edge_events.entry(edge).or_insert(events);
-            }
-            entries.extend(node_entries);
+        let level: std::collections::BTreeSet<Iid> = std::mem::take(&mut frontier)
+            .into_iter()
+            .filter(|node| expanded.insert(*node))
+            .collect();
+        expansions += level.len();
+        if expansions > node_budget {
+            return Err(traversal_budget_exhausted("node", node_budget));
         }
-        frontier = next_frontier;
+        if level.is_empty() {
+            break;
+        }
+        let (level_entries, level_edges) = edge_adjacency_impl(
+            state,
+            store,
+            graph,
+            Some(hop.label),
+            hop.props,
+            hop.direction,
+            &IidSel::Set(Arc::new(level)),
+            bounds,
+            collect,
+            Some(adjacency_budget),
+            edge_visible,
+            overlay,
+        )
+        .await?;
+        if entries.len().saturating_add(level_entries.len()) > adjacency_budget {
+            return Err(traversal_budget_exhausted("adjacency", adjacency_budget));
+        }
+        frontier = level_entries.iter().map(|e| e.neighbor).collect();
+        for (edge, events) in level_edges {
+            edge_events.entry(edge).or_insert(events);
+        }
+        entries.extend(level_entries);
     }
     // A homogeneous walk expands each node once, so entries are already unique;
     // a heterogeneous one can re-collect the same edge at another level (and
@@ -844,7 +845,7 @@ pub(crate) async fn reachable_edges(
         )?;
         batches.insert((*label).to_string(), batch);
     }
-    let mut nodes = std::collections::BTreeSet::from([anchor]);
+    let mut nodes = seeds.clone();
     for entry in &entries {
         nodes.insert(entry.node);
         nodes.insert(entry.neighbor);
@@ -998,7 +999,7 @@ mod tests {
                     "KNOWS",
                     &[],
                     AdjDirection::Out,
-                    None,
+                    &IidSel::All,
                     &bounds,
                     None,
                     edge_visible.as_ref(),
@@ -1035,7 +1036,7 @@ mod tests {
             &state,
             &store,
             DEFAULT_GRAPH,
-            iid(1),
+            &BTreeSet::from([iid(1)]),
             &hops,
             None,
             Some(&allowed),

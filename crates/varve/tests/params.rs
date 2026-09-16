@@ -263,3 +263,63 @@ async fn list_param_cannot_be_stored_as_property() {
     let batches = db.query("MATCH (n:P) RETURN n._id AS id").await.unwrap();
     assert_eq!(ints(&batches, "id"), Vec::<i64>::new());
 }
+
+/// `WHERE v._id IN <list>` seeds the same anchored walk as `_id = x`: every
+/// shape (start, end, both ends, quantified) must equal the plain filter.
+#[tokio::test]
+async fn in_list_on_id_anchors_a_walk() {
+    let db = Db::memory();
+    db.execute(
+        "INSERT (a1:A {_id: 'a1'}), (a2:A {_id: 'a2'}), (a3:A {_id: 'a3'}), \
+                (b1:B {_id: 'b1'}), (b2:B {_id: 'b2'}), (b3:B {_id: 'b3'}), \
+                (c1:C {_id: 'c1'}), (c2:C {_id: 'c2'}), \
+                (a1)-[:K {_id: 'k1'}]->(b1), (a2)-[:K {_id: 'k2'}]->(b2), \
+                (a3)-[:K {_id: 'k3'}]->(b3), (a1)-[:K {_id: 'k4'}]->(b2), \
+                (b1)-[:L {_id: 'l1'}]->(c1), (b2)-[:L {_id: 'l2'}]->(c2), \
+                (b3)-[:L {_id: 'l3'}]->(c1)",
+    )
+    .await
+    .unwrap();
+    let ids = one_param("ids", list_of_strs(&["a1", "a3", "missing"]));
+
+    let anchored = db
+        .query("MATCH (a:A)-[:K]->(b:B)-[:L]->(c:C) WHERE a._id IN $ids RETURN c._id AS id")
+        .params(ids.clone())
+        .await
+        .unwrap();
+    let filtered = db
+        .query(
+            "MATCH (a:A)-[:K]->(b:B)-[:L]->(c:C) WHERE a._id = 'a1' OR a._id = 'a3' \
+             RETURN c._id AS id",
+        )
+        .await
+        .unwrap();
+    assert_eq!(strings(&anchored, "id"), strings(&filtered, "id"));
+    assert_eq!(strings(&anchored, "id").len(), 3);
+
+    let end = db
+        .query("MATCH (a:A)-[:K]->(b:B) WHERE b._id IN ['b2', 'b3'] RETURN a._id AS id")
+        .await
+        .unwrap();
+    assert_eq!(strings(&end, "id"), vec!["a1", "a2", "a3"]);
+
+    let both = db
+        .query("MATCH (a:A {_id: 'a1'})-[:K]->(b:B) WHERE b._id IN ['b2', 'b3'] RETURN b._id AS id")
+        .await
+        .unwrap();
+    assert_eq!(strings(&both, "id"), vec!["b2"]);
+
+    let quantified = db
+        .query("MATCH (a:A)-[:K]->{1,2}(x) WHERE a._id IN $ids RETURN x._id AS id")
+        .params(ids)
+        .await
+        .unwrap();
+    assert_eq!(strings(&quantified, "id"), vec!["b1", "b2", "b3"]);
+
+    let none = db
+        .query("MATCH (a:A)-[:K]->(b:B) WHERE a._id IN $ids RETURN b._id AS id")
+        .params(one_param("ids", Value::List(vec![])))
+        .await
+        .unwrap();
+    assert_eq!(strings(&none, "id"), Vec::<String>::new());
+}

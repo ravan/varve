@@ -1061,12 +1061,16 @@ async fn scan_input_for(
     // set is already cheap, and an overlay is the writer's business.
     let lazy = mode == ScanMode::Lazy && overlay.is_none();
     Ok(match &spec.kind {
-        varve_plan::SpecKind::Node { labels, iid_point } => {
-            // Anchor keeps its point lookup; every other node element of a
-            // fast-pathed pattern only ever binds to an anchor-reachable
-            // node, so its scan prunes to that set instead of the label scan.
-            let sel = match (iid_point, fast_path) {
-                (Some(iid), _) => crate::scan::IidSel::Point(*iid),
+        varve_plan::SpecKind::Node { labels, anchor } => {
+            // An anchor keeps its own point or set lookup; every other node
+            // element of a fast-pathed pattern only ever binds to an
+            // anchor-reachable node, so its scan prunes to that set instead
+            // of the label scan.
+            let sel = match (anchor, fast_path) {
+                (Some(varve_plan::IidAnchor::Point(iid)), _) => crate::scan::IidSel::Point(*iid),
+                (Some(varve_plan::IidAnchor::Set(set)), _) => {
+                    crate::scan::IidSel::Set(Arc::clone(set))
+                }
                 (None, Some(fast_path)) => crate::scan::IidSel::Set(Arc::clone(fast_path.nodes())),
                 (None, None) => crate::scan::IidSel::All,
             };
@@ -1196,7 +1200,7 @@ async fn scan_input_for(
                     label,
                     &const_props(props, params)?,
                     adj_direction,
-                    None,
+                    &crate::scan::IidSel::All,
                     bounds,
                     Some(query_limits.traversal_adjacency_budget),
                     edge_visible,
@@ -2368,24 +2372,32 @@ impl Db {
         security: Option<&GraphGrants>,
     ) -> Result<Option<FastPath>, EngineError> {
         use varve_gql::ast::Direction;
-        // Require a point-anchored node at one end (or both) and at least one hop.
-        let point_of = |spec: Option<&varve_plan::ScanSpec>| match spec {
+        // Require an `_id`-anchored node (a point, or an `IN` set) at one end
+        // (or both) and at least one hop.
+        let anchor_of = |spec: Option<&varve_plan::ScanSpec>| match spec {
             Some(varve_plan::ScanSpec {
                 kind:
                     varve_plan::SpecKind::Node {
-                        iid_point: Some(iid),
+                        anchor: Some(anchor),
                         ..
                     },
                 ..
-            }) => Some(*iid),
+            }) => Some(match anchor {
+                varve_plan::IidAnchor::Point(iid) => Arc::new(BTreeSet::from([*iid])),
+                varve_plan::IidAnchor::Set(set) => Arc::clone(set),
+            }),
             _ => None,
         };
-        let start_anchor = point_of(specs.first());
-        let end_anchor = point_of(specs.last());
+        let start_anchor = anchor_of(specs.first());
+        let end_anchor = anchor_of(specs.last());
         if start_anchor.is_none() && end_anchor.is_none() {
             return Ok(None);
         }
-        let anchors: BTreeSet<Iid> = start_anchor.into_iter().chain(end_anchor).collect();
+        let anchors: BTreeSet<Iid> = start_anchor
+            .iter()
+            .chain(&end_anchor)
+            .flat_map(|set| set.iter().copied())
+            .collect();
         // `match_shape`, not `degenerate_query`: pruning only needs the MATCH
         // structure, and `RETURN` modifiers (`DISTINCT`/`ORDER BY`/`SKIP`/
         // `LIMIT`) are applied after the pattern binds, so they cannot change
@@ -2416,7 +2428,7 @@ impl Db {
         // exist for a quantified hop (adjacency is iid-only), so no schema
         // check is needed.
         // A quantified walk is only ever driven from its start node.
-        if let (3, Some(anchor)) = (specs.len(), start_anchor) {
+        if let (3, Some(anchor)) = (specs.len(), start_anchor.as_ref()) {
             if let varve_plan::SpecKind::Expand {
                 label,
                 direction,
@@ -2434,7 +2446,7 @@ impl Db {
                     if !sec.read_edges.allows(label) {
                         return Ok(Some(FastPath::QuantifiedAdjacency {
                             adjacency: Arc::new(varve_plan::EdgeAdjacency::default()),
-                            nodes: Arc::new(BTreeSet::from([anchor])),
+                            nodes: Arc::clone(anchor),
                         }));
                     }
                 }
@@ -2623,10 +2635,10 @@ impl Db {
             (Some(start), Some(end)) => {
                 let backwards = reversed(&hops);
                 let forward_fan = self
-                    .first_hop_fan_out(graph, start, &hops[0], edge_visible, bounds)
+                    .first_hop_fan_out(graph, &start, &hops[0], edge_visible, bounds)
                     .await?;
                 let backward_fan = self
-                    .first_hop_fan_out(graph, end, &backwards[0], edge_visible, bounds)
+                    .first_hop_fan_out(graph, &end, &backwards[0], edge_visible, bounds)
                     .await?;
                 if backward_fan < forward_fan {
                     (end, backwards)
@@ -2640,7 +2652,7 @@ impl Db {
             &self.inner.state,
             &self.inner.store,
             graph,
-            anchor,
+            &anchor,
             &hops,
             Some(&labels),
             edge_visible,
@@ -2656,14 +2668,14 @@ impl Db {
         }))
     }
 
-    /// How many edges `hop` leaves `anchor` by: the cost signal that picks which
-    /// anchored end a fixed path is walked from. A fan-out past the adjacency
+    /// How many edges `hop` leaves the `anchor` set by (one set-selected read):
+    /// the cost signal that picks which anchored end a fixed path is walked from. A fan-out past the adjacency
     /// budget counts as unbounded rather than failing the query: the other end
     /// may still be cheap, and if it is not, the BFS reports the budget itself.
     async fn first_hop_fan_out(
         &self,
         graph: &str,
-        anchor: Iid,
+        anchor: &Arc<BTreeSet<Iid>>,
         hop: &crate::scan::HopSpec<'_>,
         edge_visible: Option<&BTreeSet<String>>,
         bounds: &varve_types::TemporalBounds,
@@ -2676,7 +2688,7 @@ impl Db {
             hop.label,
             hop.props,
             hop.direction,
-            Some(anchor),
+            &crate::scan::IidSel::Set(Arc::clone(anchor)),
             bounds,
             Some(budget),
             edge_visible,
@@ -4205,7 +4217,7 @@ mod tests {
                 "KNOWS",
                 &[],
                 AdjDirection::Out,
-                Some(ada),
+                &crate::scan::IidSel::Point(ada),
                 &bounds,
                 None,
                 None,
@@ -4222,7 +4234,7 @@ mod tests {
                 "KNOWS",
                 &[],
                 AdjDirection::Out,
-                None,
+                &crate::scan::IidSel::All,
                 &bounds,
                 None,
                 None,
@@ -4243,7 +4255,7 @@ mod tests {
                 "KNOWS",
                 &[],
                 AdjDirection::Out,
-                Some(cyd),
+                &crate::scan::IidSel::Point(cyd),
                 &bounds,
                 None,
                 None,
@@ -4269,7 +4281,7 @@ mod tests {
                 "KNOWS",
                 &[],
                 AdjDirection::In,
-                Some(bob),
+                &crate::scan::IidSel::Point(bob),
                 &bounds,
                 None,
                 None,
@@ -4285,7 +4297,7 @@ mod tests {
                 "KNOWS",
                 &[],
                 AdjDirection::In,
-                None,
+                &crate::scan::IidSel::All,
                 &bounds,
                 None,
                 None,
@@ -4332,7 +4344,7 @@ mod tests {
                 "KNOWS",
                 &[],
                 AdjDirection::Out,
-                Some(ada),
+                &crate::scan::IidSel::Point(ada),
                 &bounds,
                 None,
                 None,
@@ -4351,7 +4363,7 @@ mod tests {
                 "KNOWS",
                 &[],
                 AdjDirection::Out,
-                None,
+                &crate::scan::IidSel::All,
                 &bounds,
                 None,
                 None,
