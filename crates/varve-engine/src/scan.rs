@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, RwLock};
 use varve_index::{decode_events, snapshot_entities, Event, LabelFilter, Op, PageMeta};
 use varve_storage::{keys, ObjectStore};
-use varve_types::{Iid, Instant, TemporalBounds, Value};
+use varve_types::{Bucketer, Iid, Instant, TemporalBounds, Value};
 
 /// Which entities a merged scan touches: everything, one derived-iid point
 /// (`{_id: …}` / `WHERE v._id = …`), or an explicit set — the anchored fast
@@ -47,19 +47,37 @@ impl IidSel {
             IidSel::Set(set) => {
                 page.selected(bounds, None)
                     && page.min_iid <= page.max_iid
-                    && set.range(page.min_iid..=page.max_iid).next().is_some()
+                    && set
+                        .range(page.min_iid..=page.max_iid)
+                        .any(|iid| page.path.is_empty() || Bucketer::contains(&page.path, iid))
             }
         }
     }
 
-    /// Whether the block's sort-key filter proves this selector touches
-    /// nothing in it. Only a point consults the filter; a set would cost one
-    /// probe per member and mostly comes from label indexes that already
-    /// name the block.
-    pub(crate) fn filtered_out(&self, filter: Option<&varve_index::KeyFilter>) -> bool {
-        match (self, filter) {
-            (IidSel::Point(point), Some(filter)) => !filter.may_contain(point),
-            _ => false,
+    /// This selector narrowed to what the block's sort-key filter admits:
+    /// `None` when the filter proves the block holds nothing selected. A set
+    /// keeps only the members that may be in the block, so page pruning
+    /// probes a per-block subset instead of the whole set. Iids are hashes,
+    /// so without this every block's pages overlap a set of any size.
+    pub(crate) fn for_block(&self, filter: Option<&varve_index::KeyFilter>) -> Option<IidSel> {
+        let Some(filter) = filter else {
+            return Some(self.clone());
+        };
+        match self {
+            IidSel::All => Some(IidSel::All),
+            IidSel::Point(point) => filter.may_contain(point).then(|| self.clone()),
+            IidSel::Set(set) => {
+                let kept: std::collections::BTreeSet<Iid> = set
+                    .iter()
+                    .copied()
+                    .filter(|iid| filter.may_contain(iid))
+                    .collect();
+                match kept.len() {
+                    0 => None,
+                    n if n == set.len() => Some(self.clone()),
+                    _ => Some(IidSel::Set(Arc::new(kept))),
+                }
+            }
         }
     }
 
@@ -185,14 +203,18 @@ pub(crate) async fn merged_snapshot(
     let (page_cache, stats) = (&*page_cache, &*stats);
     let mut fetches = Vec::new();
     for (block, trie) in tries.iter().enumerate() {
-        if sel.filtered_out(trie.keys.as_deref()) {
+        let Some(block_sel) = sel.for_block(trie.keys.as_deref()) else {
             stats.record_skipped_block();
             continue;
-        }
+        };
         let data_key = Arc::new(keys::data_key(graph, kind.name(), &trie.entry.trie_key));
-        for page in trie.pages.iter().filter(|p| sel.selects_page(p, bounds)) {
+        for page in trie
+            .pages
+            .iter()
+            .filter(|p| block_sel.selects_page(p, bounds))
+        {
             let data_key = Arc::clone(&data_key);
-            let decode_whole = sel.decode_whole(page);
+            let decode_whole = block_sel.decode_whole(page);
             fetches.push(async move {
                 page_events(
                     store,
@@ -509,19 +531,23 @@ async fn edge_adjacency_impl(
     let (page_cache, stats) = (&*page_cache, &*stats);
     let mut fetches = Vec::new();
     for (block, trie) in tries.iter().enumerate() {
-        if sel.filtered_out(trie.keys.as_deref()) {
+        let Some(block_sel) = sel.for_block(trie.keys.as_deref()) else {
             stats.record_skipped_block();
             continue;
-        }
+        };
         let key = Arc::new(keys::adj_data_key(
             graph,
             EDGES_TABLE,
             family,
             &trie.entry.trie_key,
         ));
-        for page in trie.pages.iter().filter(|p| sel.selects_page(p, bounds)) {
+        for page in trie
+            .pages
+            .iter()
+            .filter(|p| block_sel.selects_page(p, bounds))
+        {
             let key = Arc::clone(&key);
-            let decode_whole = sel.decode_whole(page);
+            let decode_whole = block_sel.decode_whole(page);
             fetches.push(async move {
                 page_events(store, page_cache, stats, &key, page, narrow, decode_whole)
                     .await
@@ -1424,6 +1450,76 @@ mod tests {
         let set = Arc::new(std::collections::BTreeSet::from([raw_iid(0x40)]));
         assert!(!IidSel::Set(set).selects_page(&page, &at(10)));
         assert!(!IidSel::Point(raw_iid(0x40)).selects_page(&page, &at(10)));
+    }
+
+    #[test]
+    fn for_block_drops_set_members_the_key_filter_rejects() {
+        let in_block: Vec<Iid> = (0..64u8).map(raw_iid).collect();
+        let filter = varve_index::KeyFilter::build(&in_block);
+        let stranger = raw_iid(0xF0);
+        assert!(!filter.may_contain(&stranger), "test needs a filter miss");
+
+        // Only strangers: the block is skipped outright.
+        let only = IidSel::Set(Arc::new(std::collections::BTreeSet::from([stranger])));
+        assert!(only.for_block(Some(&filter)).is_none());
+
+        // Mixed: the block keeps only its own members, so page pruning
+        // cannot be widened by strangers whose iids fall inside a page range.
+        let mixed = IidSel::Set(Arc::new(std::collections::BTreeSet::from([
+            raw_iid(0x10),
+            stranger,
+        ])));
+        match mixed.for_block(Some(&filter)) {
+            Some(IidSel::Set(kept)) => {
+                assert_eq!(
+                    kept.iter().copied().collect::<Vec<_>>(),
+                    vec![raw_iid(0x10)]
+                );
+            }
+            other => panic!(
+                "expected a narrowed set, got {:?}",
+                other.map(|s| s.members())
+            ),
+        }
+
+        // No filter on the block: nothing to narrow by.
+        assert!(matches!(mixed.for_block(None), Some(IidSel::Set(_))));
+        assert!(matches!(
+            IidSel::All.for_block(Some(&filter)),
+            Some(IidSel::All)
+        ));
+        assert!(IidSel::Point(stranger).for_block(Some(&filter)).is_none());
+    }
+
+    #[test]
+    fn set_prune_honours_page_trie_path() {
+        // A page under trie path [bucket of 0x80..] must not be selected by a
+        // set whose only in-range member lives in another bucket.
+        let member = raw_iid(0x40);
+        let page = PageMeta {
+            path: vec![Bucketer::bucket(&raw_iid(0x80), 0).unwrap()],
+            offset: 0,
+            len: 1,
+            rows: 1,
+            min_iid: raw_iid(0x00),
+            max_iid: raw_iid(0xFF),
+            min_system_from: us(1),
+            max_system_from: us(1),
+            min_valid_from: us(1),
+            max_valid_from: us(1),
+            min_valid_to: EOT,
+            max_valid_to: EOT,
+            has_erase: false,
+        };
+        assert!(Bucketer::bucket(&member, 0) != Bucketer::bucket(&raw_iid(0x80), 0));
+        let set = Arc::new(std::collections::BTreeSet::from([member]));
+        assert!(!IidSel::Set(Arc::clone(&set)).selects_page(&page, &at(10)));
+        assert!(!IidSel::Point(member).selects_page(&page, &at(10)));
+        let own = PageMeta {
+            path: vec![Bucketer::bucket(&member, 0).unwrap()],
+            ..page
+        };
+        assert!(IidSel::Set(set).selects_page(&own, &at(10)));
     }
 
     #[tokio::test]

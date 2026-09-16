@@ -4,6 +4,19 @@ All notable changes to Varve are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- Set-anchored reads (`_id IN`, and every level of the anchored walk since
+  0.1.7) skipped the per-block key filter and the per-page trie path. Iids
+  are hashes, so a set of any size overlapped pages in every block and each
+  BFS level fetched far more pages than the one-node-at-a-time walk it
+  replaced; anchored traversals on block-resident graphs ran 40–90% slower
+  than 0.1.6. A set is now narrowed to the members each block's filter
+  admits before its pages are pruned, and a page is selected only when a
+  member falls under its trie path.
+
 ## 0.1.7 (2026-09-16)
 
 ### Changed

@@ -207,14 +207,14 @@ pub(crate) fn plan_lazy_scan(
 
     let mut tries = Vec::with_capacity(core.tries.len());
     for trie in &core.tries {
-        if sel.filtered_out(trie.keys.as_deref()) {
+        let Some(block_sel) = sel.for_block(trie.keys.as_deref()) else {
             s.scan_stats.record_skipped_block();
             continue;
-        }
+        };
         let pages: Vec<PageMeta> = trie
             .pages
             .iter()
-            .filter(|page| sel.selects_page(page, bounds))
+            .filter(|page| block_sel.selects_page(page, bounds))
             .cloned()
             .collect();
         if pages.is_empty() {
