@@ -1,4 +1,4 @@
-import type { Basis, JsonScalar, QueryParameters } from '../types';
+import type { Basis, JsonParam, JsonScalar, QueryParameters } from '../types';
 
 export type ValidationResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -44,6 +44,10 @@ function isJsonScalar(value: unknown): value is JsonScalar {
   return typeof value === 'object' && !Array.isArray(value) && isBytes(value);
 }
 
+function isJsonParam(value: unknown): value is JsonParam {
+  return Array.isArray(value) ? value.every(isJsonScalar) : isJsonScalar(value);
+}
+
 export function validateParameters(input: string): ValidationResult<QueryParameters> {
   let parsed: unknown;
 
@@ -58,8 +62,8 @@ export function validateParameters(input: string): ValidationResult<QueryParamet
   }
 
   for (const [field, value] of Object.entries(parsed)) {
-    if (!isJsonScalar(value)) {
-      return { ok: false, error: `Parameter "${field}" must be a Varve scalar` };
+    if (!isJsonParam(value)) {
+      return { ok: false, error: `Parameter "${field}" must be a Varve scalar or a list of scalars` };
     }
   }
 

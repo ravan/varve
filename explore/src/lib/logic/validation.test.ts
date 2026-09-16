@@ -21,11 +21,19 @@ describe('validateParameters', () => {
     });
   });
 
-  it('rejects arrays before sending them to Varve', () => {
-    expect(validateParameters('{"bad":[1]}')).toMatchObject({
+  it('accepts flat lists of scalars', () => {
+    expect(validateParameters('{"names":["a",1,null,{"$bytes":"AAEC"}],"empty":[]}')).toEqual({
+      ok: true,
+      value: { names: ['a', 1, null, { $bytes: 'AAEC' }], empty: [] },
+    });
+  });
+
+  it('rejects nested arrays before sending them to Varve', () => {
+    expect(validateParameters('{"bad":[[1]]}')).toMatchObject({
       ok: false,
       error: expect.stringContaining('bad'),
     });
+    expect(validateParameters('{"bad":[{"x":1}]}')).toMatchObject({ ok: false });
   });
 
   it('rejects nested objects other than an exact $bytes value', () => {

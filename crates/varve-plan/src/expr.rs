@@ -292,17 +292,17 @@ fn lower_binary(
     functions: &FunctionRegistry,
 ) -> Result<DfExpr, PlanError> {
     if matches!(op, BinaryOp::In) {
-        let Expr::List(items) = rhs else {
+        let Some(items) = in_list_members(rhs, scope, params, functions)? else {
             return Err(PlanError::Unsupported(
-                "IN requires a list right-hand side".into(),
+                "IN requires a list right-hand side (inline or a list-valued parameter)".into(),
             ));
         };
         let lhs = lower_expr(lhs, scope, params, functions)?;
-        let mut lowered_items = Vec::with_capacity(items.len());
-        for item in items {
-            lowered_items.push(lower_expr(item, scope, params, functions)?);
+        if items.is_empty() {
+            // `x IN []` is false for every row; DataFusion rejects an empty IN list.
+            return Ok(lit(false));
         }
-        return Ok(lhs.in_list(lowered_items, false));
+        return Ok(lhs.in_list(items, false));
     }
 
     let lhs = lower_expr(lhs, scope, params, functions)?;
@@ -483,7 +483,39 @@ fn value_to_df_literal(value: &Value) -> Result<DfExpr, PlanError> {
                 "byte-array parameters are not supported in expressions".into(),
             ));
         }
+        Value::List(items) => {
+            return Ok(datafusion::functions_nested::expr_fn::make_array(
+                list_param_literals(items)?,
+            ));
+        }
     })
+}
+
+fn list_param_literals(items: &[Value]) -> Result<Vec<DfExpr>, PlanError> {
+    items.iter().map(value_to_df_literal).collect()
+}
+
+/// The members of an `IN` right-hand side: an inline list, or a parameter
+/// bound to a list. `None` when `rhs` is neither.
+fn in_list_members(
+    rhs: &Expr,
+    scope: &Scope<'_>,
+    params: &BTreeMap<String, Value>,
+    functions: &FunctionRegistry,
+) -> Result<Option<Vec<DfExpr>>, PlanError> {
+    match rhs {
+        Expr::List(items) => items
+            .iter()
+            .map(|item| lower_expr(item, scope, params, functions))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        Expr::Param(name) => match params.get(name) {
+            None => Err(PlanError::MissingParam(name.clone())),
+            Some(Value::List(items)) => list_param_literals(items).map(Some),
+            Some(_) => Ok(None),
+        },
+        _ => Ok(None),
+    }
 }
 
 fn literal_value(lit: &Literal) -> Value {

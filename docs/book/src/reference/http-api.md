@@ -93,8 +93,22 @@ before giving up. A basis that never arrives within the timeout is `408 Request 
 Binary property values round-trip through JSON as a single-key object with a `$bytes` key holding
 standard base64: `{"$bytes": "<base64>"}`. This is handled symmetrically by
 `params_from_json`/`scalar_from_json` on the way in and `batches_to_json`/the CLI's
-`TaggedBytesEncoder` on the way out; arrays and any other multi-key or nested object shape are
-rejected as invalid parameters.
+`TaggedBytesEncoder` on the way out. Any other multi-key or nested object shape is rejected as an
+invalid parameter.
+
+## List parameters
+
+A parameter may also be a flat JSON array of scalars (or `$bytes` objects). It binds as a list,
+which is what `IN` needs on its right-hand side:
+
+```json
+{"gql": "MATCH (v:Vulnerability) WHERE v.vulnID IN $names RETURN v.vulnID",
+ "params": {"names": ["cve-2018-11040", "cve-2026-46600"]}}
+```
+
+An empty list matches nothing. Nested arrays are rejected with `400 invalid_request`. A list
+parameter cannot be stored as a property value (`INSERT (:P {tags: $list})` fails), and a scalar
+parameter on the right of `IN` fails with `422 query_error`.
 
 ## Error responses
 

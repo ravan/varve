@@ -237,6 +237,15 @@ n;`, then `DROP GRAPH g;`)*
 example). This is how the HTTP API's `params` field and the CLI's JSONL import both pass
 values without string-building GQL.
 
+A parameter may be a scalar or a flat list of scalars. A list parameter is the right-hand side
+of `IN`; it cannot be stored as a property value:
+
+```gql
+MATCH (v:Vulnerability) WHERE v.vulnID IN $names RETURN v.vulnID
+```
+*(run with `params = {"names": ["cve-2018-11040", "cve-2026-46600"]}`; an empty list matches
+nothing)*
+
 ## CASE
 
 ```gql

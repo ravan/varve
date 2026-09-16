@@ -9,6 +9,9 @@ pub enum Value {
     Float(f64),
     Str(String),
     Bytes(Vec<u8>),
+    /// Query-parameter only: the right-hand side of `IN $names`. The writer
+    /// rejects lists as stored property values.
+    List(Vec<Value>),
 }
 
 /// Property document. BTreeMap for deterministic iteration order.
@@ -21,6 +24,7 @@ const TAG_INT: u8 = 0x02;
 const TAG_FLOAT: u8 = 0x03;
 const TAG_STR: u8 = 0x04;
 const TAG_BYTES: u8 = 0x05;
+const TAG_LIST: u8 = 0x06;
 
 fn take<'a>(input: &mut &'a [u8], n: usize) -> Result<&'a [u8], TypeError> {
     if input.len() < n {
@@ -50,7 +54,7 @@ fn write_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) {
 impl Value {
     /// Canonical bytes for IID derivation (type-tagged to avoid cross-type collisions).
     /// NOTE: these tags (0x01–0x04) are unrelated to the canonical wire-format tags
-    /// (0x00–0x05) used by encode_into/decode_from. IID and codec are independent.
+    /// (0x00–0x06) used by encode_into/decode_from. IID and codec are independent.
     pub fn id_bytes(&self) -> Result<Vec<u8>, TypeError> {
         match self {
             Value::Int(i) => {
@@ -69,7 +73,7 @@ impl Value {
                 Ok(b)
             }
             Value::Bool(v) => Ok(vec![0x04, *v as u8]),
-            other @ (Value::Float(_) | Value::Null) => {
+            other @ (Value::Float(_) | Value::Null | Value::List(_)) => {
                 Err(TypeError::InvalidId(format!("{other:?}")))
             }
         }
@@ -99,6 +103,13 @@ impl Value {
             Value::Bytes(bytes) => {
                 out.push(TAG_BYTES);
                 write_len_prefixed(out, bytes);
+            }
+            Value::List(items) => {
+                out.push(TAG_LIST);
+                out.extend_from_slice(&(items.len() as u32).to_le_bytes());
+                for item in items {
+                    item.encode_into(out);
+                }
             }
         }
     }
@@ -140,6 +151,14 @@ impl Value {
                 let len = read_u32(input)? as usize;
                 Ok(Value::Bytes(take(input, len)?.to_vec()))
             }
+            TAG_LIST => {
+                let count = read_u32(input)?;
+                let mut items = Vec::with_capacity(count.min(1024) as usize);
+                for _ in 0..count {
+                    items.push(Value::decode_from(input)?);
+                }
+                Ok(Value::List(items))
+            }
             other => Err(TypeError::MalformedEncoding(format!(
                 "unknown tag {other:#04x}"
             ))),
@@ -176,6 +195,17 @@ pub fn decode_doc(input: &mut &[u8]) -> Result<Doc, TypeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_roundtrips_through_wire_encoding_and_is_not_an_id() {
+        let v = Value::List(vec![Value::Int(1), Value::Str("a".into()), Value::List(vec![])]);
+        let mut out = Vec::new();
+        v.encode_into(&mut out);
+        let mut input = out.as_slice();
+        assert_eq!(Value::decode_from(&mut input).unwrap(), v);
+        assert!(input.is_empty());
+        assert!(v.id_bytes().is_err());
+    }
 
     #[test]
     fn int_and_str_ids_do_not_collide() {

@@ -462,7 +462,7 @@ it('drops entries with invalid Varve parameters instead of serializing arbitrary
   const validHistory = historyEntry({ gql: 'RETURN $value', params: { value: 1 } });
   const invalidHistory = historyEntry({
     gql: 'RETURN $value',
-    params: { value: ['arbitrary'] } as unknown as QueryParameters,
+    params: { value: [['arbitrary']] } as unknown as QueryParameters,
   });
   const nonFiniteHistory = historyEntry({
     gql: 'RETURN $value',

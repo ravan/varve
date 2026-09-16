@@ -36,6 +36,7 @@ fn doc_approx_bytes(doc: &Doc) -> usize {
                 + match value {
                     Value::Str(s) => s.len(),
                     Value::Bytes(b) => b.len(),
+                    Value::List(items) => items.len() * 8,
                     Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) => 8,
                 }
         })

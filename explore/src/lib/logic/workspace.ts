@@ -1,4 +1,4 @@
-import type { Basis, ExecutionMode, JsonScalar, QueryParameters } from '../types';
+import type { Basis, ExecutionMode, JsonParam, JsonScalar, QueryParameters } from '../types';
 import { extractQueryShape } from './gql';
 import { extractObservedSchema, mergeObservedSchema, type ObservedSchema } from './schema';
 import { parseBasis, validateParameters } from './validation';
@@ -609,7 +609,7 @@ function decodeQueryParameters(value: unknown): QueryParameters | null {
     !hasSafePrototype(value) ||
     containsForbiddenKey(value) ||
     Object.keys(value).some(isSensitiveParameterKey) ||
-    !Object.values(value).every(isParameterScalarShape)
+    !Object.values(value).every(isParameterShape)
   ) {
     return null;
   }
@@ -622,8 +622,12 @@ function decodeQueryParameters(value: unknown): QueryParameters | null {
   }
   if (!result.ok) return null;
   return createSafeRecord(
-    Object.entries(result.value).map(([key, scalar]) => [key, cloneJsonScalar(scalar)]),
+    Object.entries(result.value).map(([key, param]) => [key, cloneJsonParam(param)]),
   );
+}
+
+function isParameterShape(value: unknown): boolean {
+  return Array.isArray(value) ? value.every(isParameterScalarShape) : isParameterScalarShape(value);
 }
 
 function isParameterScalarShape(value: unknown): boolean {
@@ -636,6 +640,10 @@ function isParameterScalarShape(value: unknown): boolean {
   return (
     hasExactKeys(value, ['$bytes']) && hasSafePrototype(value) && typeof value.$bytes === 'string'
   );
+}
+
+function cloneJsonParam(value: JsonParam): JsonParam {
+  return Array.isArray(value) ? value.map(cloneJsonScalar) : cloneJsonScalar(value);
 }
 
 function cloneJsonScalar(value: JsonScalar): JsonScalar {

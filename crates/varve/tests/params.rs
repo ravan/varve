@@ -172,3 +172,90 @@ async fn unary_negation_rejects_param_operand_in_insert_props() {
     let batches = db.query("MATCH (n:P) RETURN n._id AS id").await.unwrap();
     assert_eq!(ints(&batches, "id"), Vec::<i64>::new());
 }
+
+fn list_of_strs(items: &[&str]) -> Value {
+    Value::List(items.iter().map(|s| Value::Str(s.to_string())).collect())
+}
+
+#[tokio::test]
+async fn list_param_on_in_right_hand_side() {
+    let db = Db::memory();
+    for (id, name) in [(1, "Ada"), (2, "Bob"), (3, "Cy")] {
+        db.execute(&format!("INSERT (:P {{_id: {id}, name: '{name}'}})"))
+            .await
+            .unwrap();
+    }
+
+    let params = one_param("names", list_of_strs(&["Ada", "Cy", "Nobody"]));
+    let batches = db
+        .query("MATCH (n:P) WHERE n.name IN $names RETURN n.name AS name")
+        .params(params)
+        .await
+        .unwrap();
+    assert_eq!(strings(&batches, "name"), vec!["Ada", "Cy"]);
+
+    let params = one_param("ids", Value::List(vec![Value::Int(2), Value::Int(3)]));
+    let batches = db
+        .query("MATCH (n:P) WHERE n._id IN $ids RETURN n._id AS id")
+        .params(params)
+        .await
+        .unwrap();
+    assert_eq!(ints(&batches, "id"), vec![2, 3]);
+
+    let params = one_param("names", list_of_strs(&["Bob"]));
+    let batches = db
+        .query("MATCH (n:P) WHERE NOT n.name IN $names RETURN n.name AS name")
+        .params(params)
+        .await
+        .unwrap();
+    assert_eq!(strings(&batches, "name"), vec!["Ada", "Cy"]);
+}
+
+#[tokio::test]
+async fn empty_list_param_matches_nothing() {
+    let db = Db::memory();
+    db.execute("INSERT (:P {_id: 1, name: 'Ada'})").await.unwrap();
+
+    let params = one_param("names", Value::List(vec![]));
+    let batches = db
+        .query("MATCH (n:P) WHERE n.name IN $names RETURN n.name AS name")
+        .params(params.clone())
+        .await
+        .unwrap();
+    assert_eq!(strings(&batches, "name"), Vec::<String>::new());
+
+    let batches = db
+        .query("MATCH (n:P) WHERE n.name IN [] RETURN n.name AS name")
+        .await
+        .unwrap();
+    assert_eq!(strings(&batches, "name"), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn scalar_param_on_in_right_hand_side_is_rejected() {
+    let db = Db::memory();
+    db.execute("INSERT (:P {_id: 1, name: 'Ada'})").await.unwrap();
+
+    let params = one_param("names", Value::Str("Ada".into()));
+    let err = db
+        .query("MATCH (n:P) WHERE n.name IN $names RETURN n.name AS name")
+        .params(params)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("IN requires a list"), "{err}");
+}
+
+#[tokio::test]
+async fn list_param_cannot_be_stored_as_property() {
+    let db = Db::memory();
+    let params = one_param("tags", list_of_strs(&["a", "b"]));
+
+    let err = db
+        .execute_with("INSERT (:P {_id: 1, tags: $tags})", &params)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("cannot be stored"), "{err}");
+
+    let batches = db.query("MATCH (n:P) RETURN n._id AS id").await.unwrap();
+    assert_eq!(ints(&batches, "id"), Vec::<i64>::new());
+}

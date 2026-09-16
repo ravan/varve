@@ -180,6 +180,42 @@ async fn tx_then_json_query_round_trips() {
 }
 
 #[tokio::test]
+async fn list_params_drive_in_filters_and_echo_as_json_arrays() {
+    let app = router();
+    for (id, name) in [(1, "Ada"), (2, "Bob"), (3, "Cy")] {
+        let tx = call(
+            app.clone(),
+            Method::POST,
+            "/v1/tx",
+            Some(json!({"gql":"INSERT (:Person {_id: $id, name: $name})","params":{"id":id,"name":name}})),
+            true,
+        )
+        .await;
+        assert_eq!(tx.status(), StatusCode::OK, "{}", json_body(tx).await);
+    }
+    let query = call(
+        app,
+        Method::POST,
+        "/v1/query",
+        Some(json!({
+            "gql":"MATCH (p:Person) WHERE p.name IN $names RETURN p.name AS name, $names AS names ORDER BY name",
+            "params":{"names":["Ada","Cy","Nobody"]},
+            "basis":3
+        })),
+        true,
+    )
+    .await;
+    assert_eq!(query.status(), StatusCode::OK, "{}", json_body(query).await);
+    assert_eq!(
+        json_body(query).await["rows"],
+        json!([
+            {"name":"Ada","names":["Ada","Cy","Nobody"]},
+            {"name":"Cy","names":["Ada","Cy","Nobody"]}
+        ])
+    );
+}
+
+#[tokio::test]
 async fn invalid_requests_negotiation_timeout_and_internal_errors_are_stable() {
     let malformed = call(
         router(),
@@ -196,7 +232,7 @@ async fn invalid_requests_negotiation_timeout_and_internal_errors_are_stable() {
         router(),
         Method::POST,
         "/v1/query",
-        Some(json!({"gql":"MATCH (p) RETURN p", "params":{"bad":[1]}})),
+        Some(json!({"gql":"MATCH (p) RETURN p", "params":{"bad":[[1]]}})),
         true,
     )
     .await;

@@ -39,7 +39,8 @@ fn value_type(v: &Value) -> Option<DataType> {
         Value::Str(_) => Some(DataType::Utf8),
         Value::Bool(_) => Some(DataType::Boolean),
         Value::Bytes(_) => Some(DataType::Binary),
-        Value::Null => None,
+        // Lists never reach storage (the writer rejects them as properties).
+        Value::Null | Value::List(_) => None,
     }
 }
 

@@ -276,8 +276,20 @@ pub fn params_from_json(
 ) -> Result<BTreeMap<String, Value>, ServerError> {
     params
         .iter()
-        .map(|(key, value)| Ok((key.clone(), scalar_from_json(value)?)))
+        .map(|(key, value)| Ok((key.clone(), param_from_json(value)?)))
         .collect()
+}
+
+/// A query parameter: a scalar, or a flat list of scalars for `IN $names`.
+fn param_from_json(value: &JsonValue) -> Result<Value, ServerError> {
+    match value {
+        JsonValue::Array(items) => items
+            .iter()
+            .map(scalar_from_json)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::List),
+        other => scalar_from_json(other),
+    }
 }
 
 pub(crate) fn scalar_from_json(value: &JsonValue) -> Result<Value, ServerError> {
@@ -313,7 +325,7 @@ pub(crate) fn scalar_from_json(value: &JsonValue) -> Result<Value, ServerError> 
             ))
         }
         JsonValue::Array(_) | JsonValue::Object(_) => Err(ServerError::InvalidRequest(
-            "parameter values must be JSON scalars or exact $bytes objects".into(),
+            "parameter values must be JSON scalars, exact $bytes objects, or flat lists of those".into(),
         )),
     }
 }

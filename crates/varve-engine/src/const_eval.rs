@@ -10,10 +10,13 @@ pub(crate) fn const_value(
 ) -> Result<Value, EngineError> {
     match expr {
         Expr::Literal(l) => Ok(literal_to_value(l)),
-        Expr::Param(name) => params
-            .get(name)
-            .cloned()
-            .ok_or_else(|| EngineError::Plan(PlanError::MissingParam(name.clone()))),
+        Expr::Param(name) => match params.get(name) {
+            None => Err(EngineError::Plan(PlanError::MissingParam(name.clone()))),
+            Some(Value::List(_)) => Err(EngineError::Unsupported(format!(
+                "list parameter ${name} cannot be stored as a property value"
+            ))),
+            Some(value) => Ok(value.clone()),
+        },
         Expr::Unary {
             op: varve_gql::ast::UnaryOp::Neg,
             expr,

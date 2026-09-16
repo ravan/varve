@@ -2,7 +2,9 @@ export type ExecutionMode = 'read' | 'write';
 
 export type JsonScalar = null | boolean | number | string | { $bytes: string };
 
-export type QueryParameters = Record<string, JsonScalar>;
+export type JsonParam = JsonScalar | JsonScalar[];
+
+export type QueryParameters = Record<string, JsonParam>;
 
 export type Basis = number | `at:${number}`;
 
