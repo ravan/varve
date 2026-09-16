@@ -4,6 +4,17 @@ All notable changes to Varve are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.1.7 (2026-09-16)
+
+### Changed
+
+- `WHERE v._id IN <list>` (inline or a list parameter) now reads only the
+  listed entities and seeds an anchored traversal from them, exactly as
+  `WHERE v._id = x` does for one id. It used to be applied after a full
+  label scan. The reachable-edge walk behind every anchored pattern also
+  reads one BFS level per adjacency read instead of one read per frontier
+  node.
+
 ## 0.1.6 (2026-09-16)
 
 ### Changed
