@@ -214,7 +214,9 @@ async fn list_param_on_in_right_hand_side() {
 #[tokio::test]
 async fn empty_list_param_matches_nothing() {
     let db = Db::memory();
-    db.execute("INSERT (:P {_id: 1, name: 'Ada'})").await.unwrap();
+    db.execute("INSERT (:P {_id: 1, name: 'Ada'})")
+        .await
+        .unwrap();
 
     let params = one_param("names", Value::List(vec![]));
     let batches = db
@@ -234,7 +236,9 @@ async fn empty_list_param_matches_nothing() {
 #[tokio::test]
 async fn scalar_param_on_in_right_hand_side_is_rejected() {
     let db = Db::memory();
-    db.execute("INSERT (:P {_id: 1, name: 'Ada'})").await.unwrap();
+    db.execute("INSERT (:P {_id: 1, name: 'Ada'})")
+        .await
+        .unwrap();
 
     let params = one_param("names", Value::Str("Ada".into()));
     let err = db

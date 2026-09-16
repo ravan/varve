@@ -148,6 +148,24 @@ impl EngineError {
     /// user-supplied identifier that must not be reflected, like an unknown
     /// graph name — and MUST stay opaque; callers log it server-side and
     /// return a generic message instead.
+    /// An error raised while a query stream runs. The lazy scan
+    /// ([`crate::lazy_scan`]) reports its own errors through DataFusion's
+    /// `External` variant; unwrapping them here keeps `MixedPropertyTypes`
+    /// and friends classified exactly as the eager path classifies them.
+    pub fn from_stream_error(error: datafusion::error::DataFusionError) -> EngineError {
+        match error {
+            datafusion::error::DataFusionError::External(boxed) => {
+                match boxed.downcast::<EngineError>() {
+                    Ok(engine) => *engine,
+                    Err(other) => EngineError::Plan(PlanError::DataFusion(
+                        datafusion::error::DataFusionError::External(other),
+                    )),
+                }
+            }
+            other => EngineError::Plan(PlanError::DataFusion(other)),
+        }
+    }
+
     pub fn client_query_error(&self) -> Option<String> {
         let statement_caused = matches!(
             self,
@@ -594,7 +612,7 @@ impl std::future::IntoFuture for Query {
             stream
                 .try_collect::<Vec<_>>()
                 .await
-                .map_err(|error| EngineError::Plan(PlanError::DataFusion(error)))
+                .map_err(EngineError::from_stream_error)
         })
     }
 }
@@ -868,6 +886,15 @@ impl Overlay {
     }
 }
 
+/// How a whole-table element scan is served. Read queries stream pages
+/// through [`crate::lazy_scan`]; the writer's MATCH-driven DML keeps the
+/// eager snapshot, which is the only path that can see a statement overlay.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ScanMode {
+    Eager,
+    Lazy,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn scan_inputs_for(
     state: &Arc<RwLock<GraphsState>>,
@@ -880,6 +907,7 @@ pub(crate) async fn scan_inputs_for(
     fast_paths: Option<&[Option<FastPath>]>,
     overlay: Option<&Overlay>,
     security: Option<&GraphGrants>,
+    mode: ScanMode,
 ) -> Result<Vec<Vec<varve_plan::ScanInput>>, EngineError> {
     scan_inputs_for_impl(
         state,
@@ -892,6 +920,7 @@ pub(crate) async fn scan_inputs_for(
         fast_paths,
         overlay,
         security,
+        mode,
     )
     .await
 }
@@ -908,6 +937,7 @@ async fn scan_inputs_for_impl(
     fast_paths: Option<&[Option<FastPath>]>,
     overlay: Option<&Overlay>,
     security: Option<&GraphGrants>,
+    mode: ScanMode,
 ) -> Result<Vec<Vec<varve_plan::ScanInput>>, EngineError> {
     if clause_specs.len() != bounds_per_clause.len() {
         return Err(EngineError::Unsupported(
@@ -937,6 +967,7 @@ async fn scan_inputs_for_impl(
                 fast_path,
                 overlay,
                 security,
+                mode,
             )
             .await?,
         );
@@ -957,6 +988,7 @@ async fn scan_inputs_for_clause(
     fast_path: Option<&FastPath>,
     overlay: Option<&Overlay>,
     security: Option<&GraphGrants>,
+    mode: ScanMode,
 ) -> Result<Vec<varve_plan::ScanInput>, EngineError> {
     let mut clause_inputs = Vec::with_capacity(
         clause_spec.specs.len()
@@ -979,6 +1011,7 @@ async fn scan_inputs_for_clause(
                 fast_path,
                 overlay,
                 security,
+                mode,
             )
             .await?,
         );
@@ -997,6 +1030,7 @@ async fn scan_inputs_for_clause(
                     None,
                     overlay,
                     security,
+                    mode,
                 )
                 .await?,
             );
@@ -1021,7 +1055,11 @@ async fn scan_input_for(
     fast_path: Option<&FastPath>,
     overlay: Option<&Overlay>,
     security: Option<&GraphGrants>,
+    mode: ScanMode,
 ) -> Result<varve_plan::ScanInput, EngineError> {
+    // Only a whole-table element can stream: a point or anchor-reachable
+    // set is already cheap, and an overlay is the writer's business.
+    let lazy = mode == ScanMode::Lazy && overlay.is_none();
     Ok(match &spec.kind {
         varve_plan::SpecKind::Node { labels, iid_point } => {
             // Anchor keeps its point lookup; every other node element of a
@@ -1044,6 +1082,21 @@ async fn scan_input_for(
                 },
                 _ => base,
             };
+            if lazy && matches!(sel, crate::scan::IidSel::All) {
+                if let Some(input) = lazy_input(
+                    state,
+                    store,
+                    graph,
+                    TableKind::Nodes,
+                    &filter,
+                    bounds,
+                    &spec.var,
+                )
+                .await?
+                {
+                    return Ok(input);
+                }
+            }
             varve_plan::ScanInput::Batch(
                 merged_snapshot(
                     state,
@@ -1079,6 +1132,21 @@ async fn scan_input_for(
                     },
                     _ => base,
                 };
+                if lazy {
+                    if let Some(input) = lazy_input(
+                        state,
+                        store,
+                        graph,
+                        TableKind::Edges,
+                        &filter,
+                        bounds,
+                        &spec.var,
+                    )
+                    .await?
+                    {
+                        return Ok(input);
+                    }
+                }
                 varve_plan::ScanInput::Batch(
                     merged_snapshot(
                         state,
@@ -1182,6 +1250,42 @@ async fn scan_input_for(
             }
         },
     })
+}
+
+/// The streaming input for a whole-table element, or `None` when the table
+/// has no fixed schema and the eager snapshot must serve it.
+async fn lazy_input(
+    state: &Arc<RwLock<GraphsState>>,
+    store: &Arc<dyn ObjectStore>,
+    graph: &str,
+    kind: TableKind,
+    filter: &LabelFilter<'_>,
+    bounds: &TemporalBounds,
+    var: &str,
+) -> Result<Option<varve_plan::ScanInput>, EngineError> {
+    use crate::lazy_scan::{ensure_block_catalogs, plan_lazy_scan, LazyPlan, LazyScanTable};
+    ensure_block_catalogs(state, store, graph, kind).await?;
+    Ok(
+        match plan_lazy_scan(
+            state,
+            store,
+            graph,
+            kind,
+            filter,
+            bounds,
+            &crate::scan::IidSel::All,
+        )? {
+            LazyPlan::Empty => Some(varve_plan::ScanInput::Batch(None)),
+            LazyPlan::Eager => None,
+            LazyPlan::Lazy(plan) => {
+                let table = LazyScanTable::new(plan, var);
+                Some(varve_plan::ScanInput::Table {
+                    rows: table.rows_estimate(),
+                    provider: Arc::new(table),
+                })
+            }
+        },
+    )
 }
 
 /// The iids of every node visible under `allowed` (each node's FULL label
@@ -2092,6 +2196,7 @@ impl Db {
                 fast_paths.as_deref(),
                 None,
                 security,
+                ScanMode::Lazy,
             )
             .await?;
             Ok::<_, EngineError>((clause_specs, inputs))
@@ -2144,6 +2249,7 @@ impl Db {
             None,
             None,
             security,
+            ScanMode::Lazy,
         )
         .await?;
         Ok((clause_specs, inputs))
@@ -2794,11 +2900,20 @@ async fn recover(
                         Err(varve_storage::StorageError::NotFound(_)) => None,
                         Err(e) => return Err(e.into()),
                     };
+                    let props = match table.scope_ref().props_key(&entry.trie_key) {
+                        Some(key) => match store.get(&key).await {
+                            Ok(bytes) => Some(Arc::new(varve_index::PropSchema::decode(&bytes)?)),
+                            Err(varve_storage::StorageError::NotFound(_)) => None,
+                            Err(e) => return Err(e.into()),
+                        },
+                        None => None,
+                    };
                     dest.push(PersistedTrie {
                         entry: entry.clone(),
                         pages: Arc::new(pages),
                         labels,
                         keys,
+                        props,
                     });
                 }
             }
@@ -4290,5 +4405,224 @@ mod tests {
         assert_ne!(a.probe_key, b.probe_key);
         assert!(a.probe_key.starts_with("v1/probe/"));
         assert!(a.probe_key.contains('-'), "key must carry the nonce suffix");
+    }
+
+    // ---- lazy scan (crate::lazy_scan) ----
+
+    async fn wait_flushed(db: &Db) {
+        for _ in 0..400 {
+            if db.metrics().live_rows == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("flush did not land within 4s");
+    }
+
+    /// The read path with the eager snapshot forced: the reference the lazy
+    /// scan must match row for row.
+    async fn eager_batches(db: &Db, gql: &str) -> Vec<RecordBatch> {
+        let program = varve_gql::parse_program(gql).unwrap();
+        let Some(Statement::Query(q)) = program.statements.into_iter().next() else {
+            panic!("not a query");
+        };
+        let now = db.inner.clock.watermark();
+        let params = BTreeMap::new();
+        let clause_specs = varve_plan::scan_specs_with_params(
+            &q.first,
+            DEFAULT_GRAPH,
+            db.inner.max_path_depth,
+            &params,
+        )
+        .unwrap();
+        let bounds = bounds_per_clause(&q.first, now);
+        let inputs = scan_inputs_for(
+            &db.inner.state,
+            &db.inner.store,
+            DEFAULT_GRAPH,
+            &clause_specs,
+            &bounds,
+            &params,
+            db.inner.query_limits,
+            None,
+            None,
+            None,
+            ScanMode::Eager,
+        )
+        .await
+        .unwrap();
+        varve_plan::execute_body_with_limits(
+            &q.first,
+            &clause_specs,
+            inputs,
+            db.inner.functions.as_ref(),
+            db.inner.query_limits.path_expand,
+            &params,
+        )
+        .await
+        .unwrap()
+    }
+
+    fn rendered(batches: &[RecordBatch]) -> String {
+        datafusion::arrow::util::pretty::pretty_format_batches(batches)
+            .unwrap()
+            .to_string()
+    }
+
+    fn nodes_tries_have_catalogs(db: &Db) -> bool {
+        let s = db.inner.state.read().unwrap();
+        let core = &s.graph(DEFAULT_GRAPH).unwrap().nodes;
+        !core.tries.is_empty() && core.tries.iter().all(|trie| trie.props.is_some())
+    }
+
+    /// Two flushed blocks (an update, a delete and an edge in the second) plus
+    /// an unflushed tail with a new property: every read shape must come out
+    /// of the lazy scan exactly as the eager snapshot renders it.
+    async fn seed_lazy_fixture(dir: &std::path::Path) -> Db {
+        let db = Db::open(blocks_config(dir, 4)).await.unwrap();
+        db.execute(
+            "INSERT (:P {_id: 1, name: 'a', score: 1}), (:P {_id: 2, name: 'b', score: 2}), \
+             (:P:Q {_id: 3, name: 'c'}), (:Q {_id: 4, name: 'd', flag: true})",
+        )
+        .await
+        .unwrap();
+        wait_flushed(&db).await;
+        db.execute("MATCH (p:P {_id: 2}) SET p.name = 'b2', p.score = 2.5")
+            .await
+            .unwrap();
+        db.execute("MATCH (p:P {_id: 3}) DELETE p").await.unwrap();
+        db.execute("INSERT (:P {_id: 5, name: 'e'})").await.unwrap();
+        db.execute("MATCH (a:P {_id: 1}), (b:P {_id: 2}) INSERT (a)-[:K {w: 1}]->(b)")
+            .await
+            .unwrap();
+        wait_flushed(&db).await;
+        db.execute("INSERT (:P {_id: 6, name: 'f', extra: 'x'})")
+            .await
+            .unwrap();
+        db.execute("MATCH (p:P {_id: 1}) SET p.name = 'a2'")
+            .await
+            .unwrap();
+        assert!(db.metrics().live_rows > 0, "the tail must stay unflushed");
+        db
+    }
+
+    const LAZY_QUERIES: &[&str] = &[
+        "MATCH (p:P) RETURN p._id, p.name, p.score ORDER BY p._id",
+        "MATCH (n) RETURN n._id, n.name ORDER BY n._id",
+        "MATCH (n) RETURN n ORDER BY n._id",
+        "MATCH (q:Q) RETURN q._id, q.flag ORDER BY q._id",
+        "MATCH (a:P)-[k:K]->(b:P) RETURN a._id, k.w, b._id",
+        "MATCH (p:P) RETURN count(*)",
+        "MATCH (p:P) WHERE p.name = 'b2' RETURN p._id",
+        "MATCH (p:P) RETURN DISTINCT p.score ORDER BY p.score",
+        "MATCH (p:P) RETURN p._id ORDER BY p._id SKIP 1 LIMIT 2",
+        "FOR SYSTEM_TIME ALL MATCH (p:P) RETURN p._id, p.name ORDER BY p._id, p.name",
+        "MATCH (p:P) WHERE p.extra IS NULL RETURN p._id ORDER BY p._id",
+    ];
+
+    #[tokio::test]
+    async fn lazy_scan_matches_eager_snapshot_across_blocks_and_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = seed_lazy_fixture(dir.path()).await;
+        assert!(nodes_tries_have_catalogs(&db));
+        for gql in LAZY_QUERIES {
+            let lazy = db.query(*gql).await.unwrap();
+            let eager = eager_batches(&db, gql).await;
+            assert_eq!(rendered(&lazy), rendered(&eager), "{gql}");
+        }
+        let names = rendered(
+            &db.query("MATCH (p:P) RETURN p._id, p.name ORDER BY p._id")
+                .await
+                .unwrap(),
+        );
+        assert!(names.contains("a2") && names.contains("b2") && !names.contains("| c"));
+    }
+
+    #[tokio::test]
+    async fn lazy_scan_catalog_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = {
+            let db = seed_lazy_fixture(dir.path()).await;
+            rendered(&db.query(LAZY_QUERIES[2]).await.unwrap())
+        };
+        let db = Db::open(blocks_config(dir.path(), 4)).await.unwrap();
+        assert!(
+            nodes_tries_have_catalogs(&db),
+            "sidecars must load on recovery"
+        );
+        assert_eq!(rendered(&db.query(LAZY_QUERIES[2]).await.unwrap()), before);
+    }
+
+    #[tokio::test]
+    async fn lazy_scan_derives_a_missing_block_catalog_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = seed_lazy_fixture(dir.path()).await;
+        {
+            let mut s = db.inner.state.write().unwrap();
+            for trie in &mut s.graph_mut(DEFAULT_GRAPH).unwrap().nodes.tries {
+                trie.props = None;
+            }
+        }
+        let lazy = db.query(LAZY_QUERIES[0]).await.unwrap();
+        let eager = eager_batches(&db, LAZY_QUERIES[0]).await;
+        assert_eq!(rendered(&lazy), rendered(&eager));
+        assert!(nodes_tries_have_catalogs(&db));
+    }
+
+    #[tokio::test]
+    async fn lazy_scan_limit_reads_a_prefetch_window_not_the_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(blocks_config(dir.path(), 8000)).await.unwrap();
+        let mut stmt = String::from("INSERT ");
+        for i in 0..8000 {
+            if i > 0 {
+                stmt.push_str(", ");
+            }
+            stmt.push_str(&format!("(:P {{_id: {i}, name: 'p{i}'}})"));
+        }
+        db.execute(&stmt).await.unwrap();
+        wait_flushed(&db).await;
+        let pages = |db: &Db| db.metrics().block_pages_read;
+
+        // 8000 rows at 1024 per page: 8 pages. LIMIT 1 needs the first; the
+        // cursor may have up to `PREFETCH_PAGES` more in flight when the
+        // stream drops.
+        let before = pages(&db);
+        let rows: usize = db
+            .query("MATCH (p:P) RETURN p._id LIMIT 1")
+            .await
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
+        assert_eq!(rows, 1);
+        let read = pages(&db) - before;
+        assert!((1..=5).contains(&read), "LIMIT 1 read {read} pages");
+
+        let before = pages(&db);
+        let rows: usize = db
+            .query("MATCH (p:P) RETURN count(*)")
+            .await
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
+        assert_eq!(rows, 1);
+        assert_eq!(pages(&db) - before, 8, "a full scan reads every page");
+    }
+
+    #[tokio::test]
+    async fn lazy_scan_keeps_the_eager_mixed_type_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(blocks_config(dir.path(), 2)).await.unwrap();
+        db.execute("INSERT (:M {_id: 1, v: 1}), (:M {_id: 2, v: 'two'})")
+            .await
+            .unwrap();
+        wait_flushed(&db).await;
+        let err = db.query("MATCH (m:M) RETURN m.v").await.unwrap_err();
+        assert!(err.to_string().contains("mixed types"), "{err}");
+        db.execute("MATCH (m:M {_id: 2}) DELETE m").await.unwrap();
+        let rows = db.query("MATCH (m:M) RETURN m.v").await.unwrap();
+        assert_eq!(rows.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
     }
 }

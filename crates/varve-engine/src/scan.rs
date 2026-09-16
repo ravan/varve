@@ -25,7 +25,7 @@ pub(crate) enum IidSel {
 }
 
 impl IidSel {
-    fn admits(&self, iid: &Iid) -> bool {
+    pub(crate) fn admits(&self, iid: &Iid) -> bool {
         match self {
             IidSel::All => true,
             IidSel::Point(point) => iid == point,
@@ -40,7 +40,7 @@ impl IidSel {
     /// inverted stats range (`min_iid > max_iid` — corrupt meta) selects
     /// nothing, matching the point variant's comparisons; probing it with
     /// `BTreeSet::range` would panic instead.
-    fn selects_page(&self, page: &PageMeta, bounds: &TemporalBounds) -> bool {
+    pub(crate) fn selects_page(&self, page: &PageMeta, bounds: &TemporalBounds) -> bool {
         match self {
             IidSel::All => page.selected(bounds, None),
             IidSel::Point(point) => page.selected(bounds, Some(point)),
@@ -56,7 +56,7 @@ impl IidSel {
     /// nothing in it. Only a point consults the filter; a set would cost one
     /// probe per member and mostly comes from label indexes that already
     /// name the block.
-    fn filtered_out(&self, filter: Option<&varve_index::KeyFilter>) -> bool {
+    pub(crate) fn filtered_out(&self, filter: Option<&varve_index::KeyFilter>) -> bool {
         match (self, filter) {
             (IidSel::Point(point), Some(filter)) => !filter.may_contain(point),
             _ => false,
@@ -64,14 +64,14 @@ impl IidSel {
     }
 
     /// `All` reads a page whole; a point or set admits only its own rows.
-    fn is_narrow(&self) -> bool {
+    pub(crate) fn is_narrow(&self) -> bool {
         !matches!(self, IidSel::All)
     }
 
     /// Whether a page is worth decoding whole (and caching) even under a
     /// narrowing selector: a set that covers at least half the page's rows.
     /// A point or a sparse set keeps the degree-bound keyed decode.
-    fn decode_whole(&self, page: &PageMeta) -> bool {
+    pub(crate) fn decode_whole(&self, page: &PageMeta) -> bool {
         match self {
             IidSel::All => true,
             IidSel::Point(_) => false,
@@ -215,28 +215,32 @@ pub(crate) async fn merged_snapshot(
 /// Every entity that may carry one of `needed` at any version: the union of
 /// the blocks' label indexes plus the live tail and overlay. `None` when a
 /// block predates the index, so the caller keeps the full scan.
-fn label_candidates(
+pub(crate) fn label_candidates(
     tries: &[crate::state::PersistedTrie],
     live: &varve_index::LiveTable,
     sealed: Option<&varve_index::LiveTable>,
     overlay: Option<&varve_index::LiveTable>,
     needed: &[&str],
 ) -> Option<std::collections::BTreeSet<Iid>> {
-    let mut set = std::collections::BTreeSet::new();
+    // Collect, sort, dedup, then bulk-build: several times cheaper than
+    // inserting a few hundred thousand iids one at a time.
+    let mut iids = Vec::new();
     for trie in tries {
         let index = trie.labels.as_ref()?;
         for label in needed {
-            set.extend(index.iids(label).iter().copied());
+            iids.extend_from_slice(index.iids(label));
         }
     }
-    set.extend(live.iids_with_any_label(needed));
+    iids.extend(live.iids_with_any_label(needed));
     if let Some(sealed) = sealed {
-        set.extend(sealed.iids_with_any_label(needed));
+        iids.extend(sealed.iids_with_any_label(needed));
     }
     if let Some(overlay) = overlay {
-        set.extend(overlay.iids_with_any_label(needed));
+        iids.extend(overlay.iids_with_any_label(needed));
     }
-    Some(set)
+    iids.sort_unstable();
+    iids.dedup();
+    Some(iids.into_iter().collect())
 }
 
 /// Concurrent page reads in flight per scan. Bounds the burst against the
@@ -1091,6 +1095,7 @@ mod tests {
                 pages: Arc::new(block.pages),
                 labels: Some(Arc::new(block.labels)),
                 keys: Some(Arc::new(block.keys)),
+                props: None,
             });
         }
         for e in live_events {
@@ -1192,6 +1197,7 @@ mod tests {
             pages: Arc::new(pages),
             labels: None,
             keys: None,
+            props: None,
         });
         let mut graphs = GraphsState::new();
         graphs.graphs.insert(DEFAULT_GRAPH.to_string(), table);
@@ -1270,6 +1276,7 @@ mod tests {
                 pages: Arc::new(block.pages),
                 labels: Some(Arc::new(block.labels)),
                 keys: Some(Arc::new(block.keys)),
+                props: None,
             });
         }
         let mut graphs = GraphsState::new();
@@ -1368,6 +1375,7 @@ mod tests {
             pages: Arc::new(block.pages),
             labels: Some(Arc::new(block.labels)),
             keys: Some(Arc::new(block.keys)),
+            props: None,
         });
         let mut graphs = GraphsState::new();
         graphs.graphs.insert(DEFAULT_GRAPH.to_string(), table);

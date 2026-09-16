@@ -649,11 +649,22 @@ async fn compact_once_impl(
                 Bytes::from(output.encoded.keys.encode()),
             )
             .await?;
+        let props = match job.props_key(&trie_key) {
+            Some(key) => {
+                state
+                    .store
+                    .put(&key, Bytes::from(output.encoded.props.encode()?))
+                    .await?;
+                Some(Arc::new(output.encoded.props))
+            }
+            None => None,
+        };
         persisted.push(PersistedTrie {
             entry: entry.clone(),
             pages: Arc::new(output.encoded.pages),
             labels,
             keys: Some(Arc::new(output.encoded.keys)),
+            props,
         });
         output_entries.push(entry);
     }
@@ -1873,6 +1884,7 @@ async fn resolve_match_part(
         None,
         overlay,
         security,
+        crate::db::ScanMode::Eager,
     )
     .await?;
     let rows = varve_plan::binding_rows_with_limits(
@@ -1999,6 +2011,7 @@ async fn resolve_match_projection(
         None,
         overlay,
         security,
+        crate::db::ScanMode::Eager,
     )
     .await?;
     let batches = varve_plan::execute_body_with_limits(

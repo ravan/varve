@@ -82,6 +82,8 @@ pub struct EncodedBlock {
     /// Membership filter over every row's sort key; lets a point lookup skip
     /// the block outright.
     pub keys: crate::KeyFilter,
+    /// Property name → widest type over this block's `Put` rows.
+    pub props: crate::PropSchema,
 }
 
 /// Per-block label index: for each label, the sorted, deduplicated iids of
@@ -330,6 +332,7 @@ fn encode_pages_by_keys(
         pages,
         labels: LabelIndex::build(rows),
         keys: crate::KeyFilter::build(keys),
+        props: crate::PropSchema::build(rows),
     })
 }
 

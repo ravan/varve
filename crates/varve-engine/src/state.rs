@@ -5,6 +5,7 @@ use std::sync::Arc;
 use varve_index::block::{LabelIndex, PageMeta};
 use varve_index::KeyFilter;
 use varve_index::LiveTable;
+use varve_index::PropSchema;
 use varve_storage::TrieEntry;
 use varve_types::Iid;
 
@@ -46,6 +47,10 @@ pub(crate) struct PersistedTrie {
     /// `None` for blocks written before the filter existed (a point lookup
     /// then reads the block's covering page as before).
     pub keys: Option<Arc<KeyFilter>>,
+    /// Property name → type over the block's rows. `None` for adjacency
+    /// families and for blocks written before the catalog existed; the lazy
+    /// scan derives it once from the block's pages in that case.
+    pub props: Option<Arc<PropSchema>>,
 }
 
 /// One table's queryable state: the live (unflushed) tail plus the

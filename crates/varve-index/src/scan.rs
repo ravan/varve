@@ -4,7 +4,7 @@
 //! from `LiveTable::snapshot_for_label` so a second scan source can share
 //! this logic without duplicating it.
 
-use crate::bitemporal::resolve;
+use crate::bitemporal::{resolve, resolve_newest_first};
 use crate::event::{Event, Op};
 use crate::live::IndexError;
 use arrow::array::{
@@ -220,73 +220,89 @@ where
     }
 
     let mut fields = vec![Field::new("_iid", DataType::FixedSizeBinary(16), false)];
-    let mut iid_b = FixedSizeBinaryBuilder::new(16);
-    for row in &visible {
-        iid_b.append_value(row.iid.as_bytes())?;
-    }
-    let mut columns: Vec<ArrayRef> = vec![Arc::new(iid_b.finish())];
-
-    for (name, get) in [
-        (
-            "_system_from",
-            (|r: &VisibleRow<'_>| r.system_from) as fn(&VisibleRow<'_>) -> Instant,
-        ),
-        ("_system_to", |r| r.system_to),
-        ("_valid_from", |r| r.valid_from),
-        ("_valid_to", |r| r.valid_to),
-    ] {
+    for name in ["_system_from", "_system_to", "_valid_from", "_valid_to"] {
         fields.push(Field::new(name, timestamp_type(), false));
-        let mut b = TimestampMicrosecondBuilder::new().with_timezone("UTC");
-        for row in &visible {
-            b.append_value(get(row).as_micros());
-        }
-        columns.push(Arc::new(b.finish()));
     }
-
     if is_edges {
-        let mut src_b = FixedSizeBinaryBuilder::new(16);
-        let mut dst_b = FixedSizeBinaryBuilder::new(16);
-        for row in &visible {
-            let Some(src) = row.src else {
-                // Unreachable: `is_edges` established every row.src.is_some().
-                return Err(IndexError::Codec("edge event missing src endpoint".into()));
-            };
-            let Some(dst) = row.dst else {
-                // `src` presence doesn't guarantee `dst` — both are stamped
-                // together by the writer, but this guards against a
-                // malformed event slipping through.
-                return Err(IndexError::Codec("edge event missing dst endpoint".into()));
-            };
-            src_b.append_value(src.as_bytes())?;
-            dst_b.append_value(dst.as_bytes())?;
-        }
         fields.push(Field::new("_src_iid", DataType::FixedSizeBinary(16), false));
-        columns.push(Arc::new(src_b.finish()));
         fields.push(Field::new("_dst_iid", DataType::FixedSizeBinary(16), false));
-        columns.push(Arc::new(dst_b.finish()));
     }
+    fields.push(labels_field());
+    for (name, dt) in &col_types {
+        fields.push(Field::new(*name, dt.clone(), true));
+    }
+    let columns = fields
+        .iter()
+        .map(|field| build_column(&visible, field))
+        .collect::<Result<Vec<_>, _>>()?;
 
-    fields.push(Field::new(
+    Ok(Some(RecordBatch::try_new(
+        Arc::new(Schema::new(fields)),
+        columns,
+    )?))
+}
+
+fn labels_field() -> Field {
+    Field::new(
         "_labels",
         DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
         false,
-    ));
-    let mut labels_b = ListBuilder::new(StringBuilder::new());
-    for row in &visible {
-        for label in row.labels {
-            labels_b.values().append_value(label);
-        }
-        labels_b.append(true);
-    }
-    columns.push(Arc::new(labels_b.finish()));
+    )
+}
 
-    for (name, dt) in &col_types {
-        fields.push(Field::new(*name, dt.clone(), true));
-        let col: ArrayRef = match dt {
+/// One snapshot column over `visible`, by field name: the fixed `_`-columns
+/// by name, anything else a property typed by the field (a value of another
+/// type is null; an `Int` in a `Float64` column is widened).
+fn build_column(visible: &[VisibleRow<'_>], field: &Field) -> Result<ArrayRef, IndexError> {
+    let name = field.name().as_str();
+    let endpoint = |pick: fn(&VisibleRow<'_>) -> Option<Iid>, which: &str| {
+        let mut b = FixedSizeBinaryBuilder::new(16);
+        for row in visible {
+            let Some(iid) = pick(row) else {
+                return Err(IndexError::Codec(format!(
+                    "edge event missing {which} endpoint"
+                )));
+            };
+            b.append_value(iid.as_bytes())?;
+        }
+        Ok::<ArrayRef, IndexError>(Arc::new(b.finish()))
+    };
+    let instant = |get: fn(&VisibleRow<'_>) -> Instant| {
+        let mut b = TimestampMicrosecondBuilder::new().with_timezone("UTC");
+        for row in visible {
+            b.append_value(get(row).as_micros());
+        }
+        Arc::new(b.finish()) as ArrayRef
+    };
+    Ok(match name {
+        "_iid" => {
+            let mut b = FixedSizeBinaryBuilder::new(16);
+            for row in visible {
+                b.append_value(row.iid.as_bytes())?;
+            }
+            Arc::new(b.finish())
+        }
+        "_system_from" => instant(|r| r.system_from),
+        "_system_to" => instant(|r| r.system_to),
+        "_valid_from" => instant(|r| r.valid_from),
+        "_valid_to" => instant(|r| r.valid_to),
+        "_src_iid" => endpoint(|r| r.src, "src")?,
+        "_dst_iid" => endpoint(|r| r.dst, "dst")?,
+        "_labels" => {
+            let mut b = ListBuilder::new(StringBuilder::new());
+            for row in visible {
+                for label in row.labels {
+                    b.values().append_value(label);
+                }
+                b.append(true);
+            }
+            Arc::new(b.finish())
+        }
+        _ => match field.data_type() {
             DataType::Int64 => {
                 let mut b = Int64Builder::new();
-                for row in &visible {
-                    match row.doc.get(*name) {
+                for row in visible {
+                    match row.doc.get(name) {
                         Some(Value::Int(i)) => b.append_value(*i),
                         _ => b.append_null(),
                     }
@@ -295,8 +311,8 @@ where
             }
             DataType::Float64 => {
                 let mut b = Float64Builder::new();
-                for row in &visible {
-                    match row.doc.get(*name) {
+                for row in visible {
+                    match row.doc.get(name) {
                         Some(Value::Float(f)) => b.append_value(*f),
                         // Widened from a mixed Int/Float column: cast the
                         // whole-number rows up to f64 (see `widen_types`).
@@ -306,7 +322,7 @@ where
                             // falsely accepting i64::MAX rounded up to 2^63.
                             if widened as i128 != i128::from(*i) {
                                 return Err(IndexError::InexactNumericConversion {
-                                    property: (*name).to_string(),
+                                    property: name.to_string(),
                                     value: *i,
                                 });
                             }
@@ -319,8 +335,8 @@ where
             }
             DataType::Utf8 => {
                 let mut b = StringBuilder::new();
-                for row in &visible {
-                    match row.doc.get(*name) {
+                for row in visible {
+                    match row.doc.get(name) {
                         Some(Value::Str(s)) => b.append_value(s),
                         _ => b.append_null(),
                     }
@@ -329,8 +345,8 @@ where
             }
             DataType::Boolean => {
                 let mut b = BooleanBuilder::new();
-                for row in &visible {
-                    match row.doc.get(*name) {
+                for row in visible {
+                    match row.doc.get(name) {
                         Some(Value::Bool(v)) => b.append_value(*v),
                         _ => b.append_null(),
                     }
@@ -339,22 +355,119 @@ where
             }
             _ => {
                 let mut b = BinaryBuilder::new();
-                for row in &visible {
-                    match row.doc.get(*name) {
+                for row in visible {
+                    match row.doc.get(name) {
                         Some(Value::Bytes(v)) => b.append_value(v),
                         _ => b.append_null(),
                     }
                 }
                 Arc::new(b.finish())
             }
-        };
-        columns.push(col);
+        },
+    })
+}
+
+/// One entity's events for a lazily built chunk: newest first across every
+/// source (live tail, then sealed tail, then blocks newest to oldest), each
+/// slice borrowed from its page.
+pub struct SnapshotEntity<'a> {
+    pub iid: Iid,
+    pub events: Vec<&'a Event>,
+}
+
+/// The lazy counterpart of [`snapshot_entities`]: resolves `entities` at
+/// `bounds`, keeps the rows matching `label`, and builds only `fields`
+/// (unmangled names; property fields typed by the table's [`crate::PropSchema`]).
+/// Returns the row count separately so a zero-column projection (`count(*)`)
+/// still reports rows.
+pub fn snapshot_projected<'a>(
+    entities: &[SnapshotEntity<'a>],
+    label: &OwnedLabelFilter,
+    bounds: &TemporalBounds,
+    fields: &[Field],
+) -> Result<(usize, Vec<ArrayRef>), IndexError> {
+    let mut visible: Vec<VisibleRow<'_>> = Vec::new();
+    for entity in entities {
+        for version in resolve_newest_first(entity.events.iter().copied(), bounds) {
+            let Op::Put { labels, doc } = &version.event.op else {
+                continue;
+            };
+            if !label.matches(labels) {
+                continue;
+            }
+            visible.push(VisibleRow {
+                iid: entity.iid,
+                doc,
+                labels,
+                system_from: version.event.system_from,
+                system_to: version.system_to,
+                valid_from: version.valid_from,
+                valid_to: version.valid_to,
+                src: version.event.src,
+                dst: version.event.dst,
+            });
+        }
+    }
+    let columns = fields
+        .iter()
+        .map(|field| build_column(&visible, field))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((visible.len(), columns))
+}
+
+/// [`LabelFilter`] without borrows, for a scan that outlives its planner.
+#[derive(Clone, Debug)]
+pub enum OwnedLabelFilter {
+    Single(String),
+    All(Vec<String>),
+    Any(Vec<String>),
+    Visible {
+        base: Box<OwnedLabelFilter>,
+        allowed: std::collections::BTreeSet<String>,
+    },
+}
+
+impl OwnedLabelFilter {
+    /// Same contract as [`LabelFilter::needed_labels`].
+    pub fn needed_labels(&self) -> Option<Vec<&str>> {
+        match self {
+            Self::Single(label) => Some(vec![label]),
+            Self::All(required) => required.first().map(|l| vec![l.as_str()]),
+            Self::Any(allowed) => Some(allowed.iter().map(String::as_str).collect()),
+            Self::Visible { base, .. } => base.needed_labels(),
+        }
     }
 
-    Ok(Some(RecordBatch::try_new(
-        Arc::new(Schema::new(fields)),
-        columns,
-    )?))
+    pub fn matches(&self, labels: &[String]) -> bool {
+        match self {
+            Self::Single(label) => labels.iter().any(|candidate| candidate == label),
+            Self::All(required) => required
+                .iter()
+                .all(|label| labels.iter().any(|candidate| candidate == label)),
+            Self::Any(allowed) => allowed
+                .iter()
+                .any(|label| labels.iter().any(|candidate| candidate == label)),
+            Self::Visible { base, allowed } => {
+                !labels.is_empty()
+                    && labels.iter().all(|label| allowed.contains(label))
+                    && base.matches(labels)
+            }
+        }
+    }
+}
+
+impl LabelFilter<'_> {
+    pub fn to_owned_filter(&self) -> OwnedLabelFilter {
+        match self {
+            Self::Single(label) => OwnedLabelFilter::Single((*label).to_string()),
+            Self::All(labels) => OwnedLabelFilter::All(labels.to_vec()),
+            Self::Any(labels) => OwnedLabelFilter::Any(labels.to_vec()),
+            Self::Visible { base, allowed } => OwnedLabelFilter::Visible {
+                base: Box::new(base.to_owned_filter()),
+                allowed: (*allowed).clone(),
+            },
+        }
+    }
 }
 
 /// Merge decoded events from persisted blocks and a live tail into

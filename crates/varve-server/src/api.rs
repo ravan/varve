@@ -325,7 +325,8 @@ pub(crate) fn scalar_from_json(value: &JsonValue) -> Result<Value, ServerError> 
             ))
         }
         JsonValue::Array(_) | JsonValue::Object(_) => Err(ServerError::InvalidRequest(
-            "parameter values must be JSON scalars, exact $bytes objects, or flat lists of those".into(),
+            "parameter values must be JSON scalars, exact $bytes objects, or flat lists of those"
+                .into(),
         )),
     }
 }

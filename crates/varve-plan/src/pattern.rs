@@ -26,6 +26,7 @@ use crate::PlanError;
 use datafusion::arrow::array::{new_empty_array, Array, FixedSizeBinaryArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::catalog::TableProvider;
 use datafusion::common::{Column, UnnestOptions};
 use datafusion::datasource::MemTable;
 use datafusion::logical_expr::{Expr as DfExpr, Extension, LogicalPlan};
@@ -102,6 +103,13 @@ pub enum SpecKind {
 /// The engine's answer to one [`ScanSpec`], in the same order as `specs`.
 pub enum ScanInput {
     Batch(Option<RecordBatch>),
+    /// A lazily scanned element: the engine's table, whose schema is already
+    /// mangled with the element's variable, plus a row estimate for the
+    /// join-direction heuristic.
+    Table {
+        provider: Arc<dyn TableProvider>,
+        rows: usize,
+    },
     /// Task 9's adjacency input for an `Expand` element: the resolved
     /// (bounds-applied) adjacency the engine built for this quantified hop.
     Adjacency(Arc<EdgeAdjacency>),
@@ -742,6 +750,20 @@ pub async fn execute_pattern(
                 frames.push(Some(df));
                 adjacencies.push(None);
             }
+            ScanInput::Table { provider, rows } => {
+                row_counts.push(rows);
+                let df = ctx.read_table(provider)?;
+                let df = apply_element_predicates(
+                    df,
+                    &spec.var,
+                    element_props(path, i),
+                    query.where_clause,
+                    params,
+                    functions,
+                )?;
+                frames.push(Some(df));
+                adjacencies.push(None);
+            }
             ScanInput::Adjacency(adj) => {
                 row_counts.push(0);
                 frames.push(None);
@@ -1290,22 +1312,14 @@ fn path_dataframe(
                 let schema = batch.schema();
                 let table = MemTable::try_new(schema, vec![vec![batch]])?;
                 let df = ctx.read_table(Arc::new(table))?;
-                let df = apply_element_predicates(
-                    df,
-                    &spec.var,
-                    element_props(path, i),
-                    where_clause,
-                    lowering.params,
-                    lowering.functions,
-                )?;
-                let df = if preserve_vars.contains(&spec.var) {
-                    df.with_column(
-                        &exists_join_key(&spec.var),
-                        col_exact(mangled(&spec.var, "_iid")),
-                    )?
-                } else {
-                    df
-                };
+                let df = element_frame(df, spec, path, i, where_clause, lowering, preserve_vars)?;
+                frames.push(Some(df));
+                adjacencies.push(None);
+            }
+            ScanInput::Table { provider, rows } => {
+                row_counts.push(rows);
+                let df = ctx.read_table(provider)?;
+                let df = element_frame(df, spec, path, i, where_clause, lowering, preserve_vars)?;
                 frames.push(Some(df));
                 adjacencies.push(None);
             }
@@ -1333,6 +1347,35 @@ fn path_dataframe(
     )
 }
 
+/// One element's frame: its inline-prop and WHERE equalities, plus the EXISTS
+/// join key when the element is shared with the outer query.
+fn element_frame(
+    df: DataFrame,
+    spec: &ScanSpec,
+    path: &PathPattern,
+    i: usize,
+    where_clause: &Option<Expr>,
+    lowering: &LoweringContext<'_>,
+    preserve_vars: &[String],
+) -> Result<DataFrame, PlanError> {
+    let df = apply_element_predicates(
+        df,
+        &spec.var,
+        element_props(path, i),
+        where_clause,
+        lowering.params,
+        lowering.functions,
+    )?;
+    if preserve_vars.contains(&spec.var) {
+        Ok(df.with_column(
+            &exists_join_key(&spec.var),
+            col_exact(mangled(&spec.var, "_iid")),
+        )?)
+    } else {
+        Ok(df)
+    }
+}
+
 fn empty_path_dataframe(
     specs: &[ScanSpec],
     inputs: &[ScanInput],
@@ -1355,6 +1398,12 @@ fn empty_path_dataframe(
                 for field in empty_scan_fields(spec) {
                     columns.push(new_empty_array(field.data_type()));
                     fields.push(field);
+                }
+            }
+            ScanInput::Table { provider, .. } => {
+                for field in provider.schema().fields() {
+                    fields.push(field.as_ref().clone());
+                    columns.push(new_empty_array(field.data_type()));
                 }
             }
             ScanInput::Adjacency(_) => {}

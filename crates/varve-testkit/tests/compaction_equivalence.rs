@@ -176,17 +176,19 @@ async fn storage_object_count_plateaus_under_update_churn() {
         compact_until_idle(&db).await.unwrap();
         db.gc_once().await.unwrap();
         let keys = block_store_objects(dir.path()).await;
-        // One label index and one key filter per primary data object; count
-        // them apart from the data/meta/manifest plateau.
+        // One label index, key filter and property catalog per primary data
+        // object; count them apart from the data/meta/manifest plateau.
         let labels = keys.iter().filter(|k| k.contains("/labels/")).count();
         let filters = keys.iter().filter(|k| k.contains("/keys/")).count();
+        let props = keys.iter().filter(|k| k.contains("/props/")).count();
         let data = keys
             .iter()
             .filter(|k| k.contains("/tables/nodes/data/"))
             .count();
         assert_eq!(labels, data, "cycle {cycle}: {keys:#?}");
         assert_eq!(filters, data, "cycle {cycle}: {keys:#?}");
-        let objects = keys.len() - labels - filters;
+        assert_eq!(props, data, "cycle {cycle}: {keys:#?}");
+        let objects = keys.len() - labels - filters - props;
         max_objects = max_objects.max(objects);
         assert!(objects <= 12, "cycle {cycle} left {objects} objects");
     }

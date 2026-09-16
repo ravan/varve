@@ -6,6 +6,7 @@ pub mod db;
 mod flush;
 mod follower;
 mod gc;
+mod lazy_scan;
 mod metrics;
 mod node;
 mod page_cache;

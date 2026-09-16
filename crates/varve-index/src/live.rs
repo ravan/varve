@@ -39,6 +39,8 @@ pub struct LiveTable {
     /// fresh `LiveTable` on flush). Used only for the writer's byte-watermark
     /// flush trigger — never for correctness.
     approx_bytes: usize,
+    /// Every property name/type appended so far (the lazy scan's schema).
+    props: crate::props::PropSchema,
 }
 
 impl LiveTable {
@@ -61,6 +63,7 @@ impl LiveTable {
         self.last_system_from = Some(event.system_from);
         self.event_count += 1;
         self.approx_bytes += event.approx_bytes();
+        self.props.observe_event(&event);
         if let (Some(src), Some(dst)) = (event.src, event.dst) {
             self.out.entry(src).or_default().insert(event.iid);
             self.in_.entry(dst).or_default().insert(event.iid);
@@ -71,6 +74,10 @@ impl LiveTable {
 
     pub fn event_count(&self) -> usize {
         self.event_count
+    }
+
+    pub fn prop_schema(&self) -> &crate::props::PropSchema {
+        &self.props
     }
 
     /// Running-sum in-memory footprint of every appended event (spec: never

@@ -76,6 +76,24 @@ the next two `_iid` bits), with `erase` events physically dropping matching rows
 Because job selection and output are pure functions of the inputs, any node can run any
 compaction job without coordination.
 
+## Reading a table
+
+A `MATCH` over a label is a merge over the table's sources in `_iid` order: persisted
+blocks oldest to newest, then the sealed and live tails. The merge pulls pages as it reaches
+them (a few pages ahead per block), resolves entities a chunk at a time, and builds only the
+columns the query projects. `LIMIT` therefore stops the scan after its first pages, and
+`count(*)` builds no property columns at all.
+
+The schema the query planner sees comes from a per-table **property catalog**: every property
+name the table has ever stored, with the widest type seen for it (`Int` and `Float` share a
+`Float64` column). The live tail tracks it as events arrive, and every flush and compaction
+writes it next to the block as `props/<trie>.arrow`. A block written before the catalog
+existed gets one derived from its pages the first time it is scanned. A property stored under
+two incompatible types (a string on one node, a number on another) has no fixed column type;
+that table falls back to the eager snapshot, which materialises every row first and errors
+only if the conflict is visible at the query's bounds. Point lookups, anchored traversals and
+the writer's own `MATCH … SET` / `DELETE` resolution keep the eager snapshot too.
+
 ## Group commit
 
 The writer batches concurrently submitted transactions for up to a configured time window or

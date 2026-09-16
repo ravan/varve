@@ -198,7 +198,11 @@ mod tests {
 
     #[test]
     fn list_roundtrips_through_wire_encoding_and_is_not_an_id() {
-        let v = Value::List(vec![Value::Int(1), Value::Str("a".into()), Value::List(vec![])]);
+        let v = Value::List(vec![
+            Value::Int(1),
+            Value::Str("a".into()),
+            Value::List(vec![]),
+        ]);
         let mut out = Vec::new();
         v.encode_into(&mut out);
         let mut input = out.as_slice();

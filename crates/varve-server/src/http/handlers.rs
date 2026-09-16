@@ -93,6 +93,12 @@ pub(super) async fn query(
         // operators — otherwise a query-time failure like a type clash in an
         // unlabeled traversal is undiagnosable from the server side.
         Err(error) => {
+            // The lazy scan raises statement-caused errors (a mixed-type
+            // property column) while streaming; those keep their 4xx.
+            let error = EngineError::from_stream_error(error);
+            if error.client_query_error().is_some() {
+                return mapped(ServerError::Engine(error));
+            }
             tracing::error!(%error, "query result stream execution failed");
             mapped(ServerError::Protocol("query execution failed".into()))
         }

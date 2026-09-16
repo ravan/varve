@@ -74,7 +74,12 @@ fn params_reject_nested_json_but_decode_tagged_bytes() {
         params_from_json(&ok).unwrap()["payload"],
         Value::Bytes(vec![0, 1, 2])
     );
-    for value in [json!([[1], 2]), json!([{"nested": 1}]), json!({"nested": 1}), json!(u64::MAX)] {
+    for value in [
+        json!([[1], 2]),
+        json!([{"nested": 1}]),
+        json!({"nested": 1}),
+        json!(u64::MAX),
+    ] {
         assert!(params_from_json(&BTreeMap::from([("x".into(), value)])).is_err());
     }
 }
@@ -92,7 +97,10 @@ fn params_accept_flat_lists_of_scalars() {
         ])
     );
     let empty = BTreeMap::from([("names".into(), json!([]))]);
-    assert_eq!(params_from_json(&empty).unwrap()["names"], Value::List(vec![]));
+    assert_eq!(
+        params_from_json(&empty).unwrap()["names"],
+        Value::List(vec![])
+    );
 }
 
 #[test]

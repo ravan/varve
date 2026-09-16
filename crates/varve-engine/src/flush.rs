@@ -69,6 +69,7 @@ struct PrimaryFlush {
     pages: Vec<PageMeta>,
     labels: LabelIndex,
     keys: KeyFilter,
+    props: varve_index::PropSchema,
 }
 
 struct AdjFlush {
@@ -243,6 +244,7 @@ async fn run_flush(
                 pages,
                 labels,
                 keys: key_filter,
+                props,
             }) = block
             else {
                 continue;
@@ -276,6 +278,12 @@ async fn run_flush(
                     Bytes::from(key_filter.encode()),
                 )
                 .await?;
+            store
+                .put(
+                    &keys::props_key(&enc.graph, kind.name(), &trie_key),
+                    Bytes::from(props.encode()?),
+                )
+                .await?;
             flushed.push(PrimaryFlush {
                 graph: enc.graph.clone(),
                 kind,
@@ -283,6 +291,7 @@ async fn run_flush(
                 pages: pages.clone(),
                 labels: labels.clone(),
                 keys: key_filter.clone(),
+                props: props.clone(),
             });
         }
 
@@ -418,6 +427,7 @@ async fn run_flush(
                 pages: Arc::new(flush.pages),
                 labels: Some(Arc::new(flush.labels)),
                 keys: Some(Arc::new(flush.keys)),
+                props: Some(Arc::new(flush.props)),
             });
             core.sealed = None;
         }
@@ -430,6 +440,7 @@ async fn run_flush(
                 pages: Arc::new(flush.pages),
                 labels: None,
                 keys: Some(Arc::new(flush.keys)),
+                props: None,
             };
             if flush.family == varve_storage::ADJ_OUT {
                 table.adj_out.push(trie);

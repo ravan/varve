@@ -227,11 +227,21 @@ pub struct ResolvedVersion<'a> {
 /// Iterates newest-system-first (reverse arrival, so a batch's last write is
 /// newest). Single-entity port of XTDB `PolygonCalculator.calculate`.
 pub fn resolve<'a>(events: &'a [Event], bounds: &TemporalBounds) -> Vec<ResolvedVersion<'a>> {
+    resolve_newest_first(events.iter().rev(), bounds)
+}
+
+/// [`resolve`] over events already ordered newest-first (reverse arrival),
+/// so a scan can chain per-source slices without copying them into one
+/// arrival-ordered buffer.
+pub fn resolve_newest_first<'a>(
+    events: impl Iterator<Item = &'a Event>,
+    bounds: &TemporalBounds,
+) -> Vec<ResolvedVersion<'a>> {
     let mut out = Vec::new();
     let mut ceiling = Ceiling::new();
     let mut polygon = Polygon::default();
 
-    for event in events.iter().rev() {
+    for event in events {
         // An erase kills itself and everything older — deliberately BEFORE the
         // system-bounds check: erased history is gone at every system time.
         if matches!(event.op, Op::Erase) {

@@ -193,6 +193,9 @@ fn protect_entry(entry: &ScopedTrieKey, protected: &mut BTreeSet<String>) {
     if let Some(labels) = entry.labels_key() {
         protected.insert(labels);
     }
+    if let Some(props) = entry.props_key() {
+        protected.insert(props);
+    }
     protected.insert(entry.keys_key());
 }
 
@@ -239,12 +242,12 @@ fn is_graph_data_or_meta_key(key: &str) -> bool {
     }
 }
 
-/// `data`/`meta` (and `labels` on the primary table) are `.arrow`; the
+/// `data`/`meta` (and `labels`/`props` on the primary table) are `.arrow`; the
 /// sort-key filter is `keys/*.bin` on every family.
 fn block_object(kind: &str, object: &str, primary: bool) -> bool {
     match kind {
         "data" | "meta" => object_name(object, ".arrow"),
-        "labels" => primary && object_name(object, ".arrow"),
+        "labels" | "props" => primary && object_name(object, ".arrow"),
         "keys" => object_name(object, ".bin"),
         _ => false,
     }

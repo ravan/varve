@@ -4,6 +4,34 @@ All notable changes to Varve are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- Whole-table `MATCH` scans in read queries stream instead of materialising.
+  The engine used to copy every event of the table, group it per entity and
+  build every column before DataFusion saw a row, so `LIMIT 5` cost the same
+  as the full result. The scan is now a DataFusion table: pages are read as
+  the `_iid`-ordered merge over blocks and tails reaches them, entities are
+  resolved a chunk at a time, and only projected columns are built. On
+  200k flushed nodes (`cargo run --release --example scan_bench -p varve`):
+  `RETURN v.x LIMIT 5` 313 ms → 5 ms, `RETURN v.x` 315 ms → 97 ms,
+  `count(*)` 312 ms → 89 ms, `ORDER BY … LIMIT 5` 318 ms → 126 ms.
+- Each block carries a property catalog (`props/<trie>.arrow`: property name
+  → widest stored type), written at flush and compaction and loaded on
+  recovery. Blocks from earlier releases get one derived from their pages
+  the first time they are scanned. Its cost is a few kilobytes per block.
+- `RETURN v` for a bare element now lists every property the table has ever
+  stored for that scan's schema, `null` where a row lacks it, instead of only
+  the properties present on some visible row. A property's column type is
+  the widest type ever stored for it, so a property written as both `Int`
+  and `Float` renders as a float even when every visible row holds a whole
+  number. A property stored under incompatible types keeps the previous
+  behaviour: that table is scanned eagerly and the query errors only if the
+  conflict is visible.
+- Label narrowing builds its candidate set in bulk (sort, dedup, build)
+  instead of one insert per id.
+
 ## 0.1.5 (2026-09-14)
 
 ### Changed
